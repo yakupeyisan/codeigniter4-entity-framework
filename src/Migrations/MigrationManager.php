@@ -138,7 +138,7 @@ class MigrationManager
             error_log('addMigration: generated is ' . ($generated !== null ? 'not null' : 'null'));
             
             // Use generated code if available, otherwise use template
-            if ($generated !== null && is_array($generated) && isset($generated['up']) && isset($generated['down'])) {
+            if ($generated !== null && is_array($generated) && isset($generated['up']) && isset($generated['down']) && !empty(trim($generated['up'])) && !empty(trim($generated['down']))) {
                 error_log('addMigration: using generated code. Up length: ' . strlen($generated['up']) . ', Down length: ' . strlen($generated['down']));
                 $content = $this->generateMigrationContentFromCode($className, $generated['up'], $generated['down']);
             } else {
@@ -226,13 +226,49 @@ PHP;
 
     /**
      * Generate migration from ApplicationDbContext
+     * 
+     * @param string|null $contextClass The fully qualified class name of the DbContext (e.g., 'App\EntityFramework\ApplicationDbContext')
+     * @return array|null Returns array with 'up' and 'down' keys, or null if generation fails
      */
-    public function generateMigrationFromContext(): ?array
+    public function generateMigrationFromContext(?string $contextClass = null): ?array
     {
-        // MigrationGenerator is application-specific and should be implemented in your application
-        // This method should be overridden or a custom MigrationGenerator should be provided
-        // For now, return null to use default template
-        return null;
+        // Try to auto-detect ApplicationDbContext if not provided
+        if ($contextClass === null) {
+            // Common locations for ApplicationDbContext
+            $possibleClasses = [
+                'App\EntityFramework\ApplicationDbContext',
+                'App\ApplicationDbContext',
+                'ApplicationDbContext'
+            ];
+            
+            foreach ($possibleClasses as $class) {
+                if (class_exists($class)) {
+                    $contextClass = $class;
+                    break;
+                }
+            }
+        }
+        
+        if ($contextClass === null || !class_exists($contextClass)) {
+            error_log("Context class not found. Please provide the fully qualified class name of your DbContext.");
+            return null;
+        }
+        
+        try {
+            $generator = new MigrationGenerator($contextClass, $this->connection);
+            $result = $generator->generateMigrationCode();
+            
+            // Return null if generation failed (empty code)
+            if (empty($result['up']) || empty($result['down'])) {
+                return null;
+            }
+            
+            return $result;
+        } catch (\Exception $e) {
+            error_log("Error generating migration from context: " . $e->getMessage());
+            error_log("Stack trace: " . $e->getTraceAsString());
+            return null;
+        }
     }
 
     /**

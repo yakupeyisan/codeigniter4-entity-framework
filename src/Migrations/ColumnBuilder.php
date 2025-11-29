@@ -107,6 +107,18 @@ class ColumnBuilder
     }
 
     /**
+     * Add float column
+     */
+    public function float(string $name): self
+    {
+        $this->fields[$name] = [
+            'type' => 'FLOAT',
+            'null' => true
+        ];
+        return $this;
+    }
+
+    /**
      * Add boolean column
      */
     public function boolean(string $name): self
