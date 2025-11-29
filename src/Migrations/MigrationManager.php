@@ -45,15 +45,27 @@ class MigrationManager
                 throw new \RuntimeException('Database name not configured');
             }
             
-            // Check if it's a SQL Server connection
-            $driver = strtolower($defaultConfig['DBDriver'] ?? '');
+            // Use database provider to create database
+            $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
             
-            if ($driver === 'sqlsrv' || $driver === 'sqlserver') {
-                $this->createSqlServerDatabase($defaultConfig, $database);
-            } elseif ($driver === 'mysqli' || $driver === 'mysql') {
-                $this->createMySqlDatabase($defaultConfig, $database);
-            } else {
-                // For other drivers, just re-throw the exception
+            try {
+                // Check if database exists
+                $checkSql = $provider->getCheckDatabaseExistsSql($database);
+                if (!empty($checkSql)) {
+                    $query = $this->connection->query($checkSql);
+                    $exists = $query->getNumRows() > 0;
+                    
+                    if (!$exists) {
+                        // Create database
+                        $createSql = $provider->getCreateDatabaseSql($database);
+                        if (!empty($createSql)) {
+                            $this->connection->query($createSql);
+                            echo "Database '{$database}' created successfully.\n";
+                        }
+                    }
+                }
+            } catch (\Exception $createException) {
+                // If creation fails, re-throw original exception
                 throw $e;
             }
             
@@ -62,60 +74,6 @@ class MigrationManager
         }
     }
     
-    /**
-     * Create SQL Server database
-     */
-    private function createSqlServerDatabase(array $config, string $database): void
-    {
-        // Connect to master database to create new database
-        $masterConfig = $config;
-        $masterConfig['database'] = 'master';
-        
-        // Create a new connection to master database
-        $db = \Config\Database::connect($masterConfig, false);
-        
-        try {
-            // Check if database exists
-            $query = $db->query("SELECT name FROM sys.databases WHERE name = ?", [$database]);
-            $exists = $query->getNumRows() > 0;
-            
-            if (!$exists) {
-                // Create database
-                $dbName = '[' . str_replace(']', ']]', $database) . ']';
-                $db->query("CREATE DATABASE {$dbName}");
-                echo "Database '{$database}' created successfully.\n";
-            }
-        } finally {
-            $db->close();
-        }
-    }
-    
-    /**
-     * Create MySQL database
-     */
-    private function createMySqlDatabase(array $config, string $database): void
-    {
-        // Connect without database to create new database
-        $tempConfig = $config;
-        $tempConfig['database'] = '';
-        
-        $db = \Config\Database::connect($tempConfig, false);
-        
-        try {
-            // Check if database exists
-            $query = $db->query("SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = ?", [$database]);
-            $exists = $query->getNumRows() > 0;
-            
-            if (!$exists) {
-                // Create database
-                $dbName = '`' . str_replace('`', '``', $database) . '`';
-                $db->query("CREATE DATABASE {$dbName}");
-                echo "Database '{$database}' created successfully.\n";
-            }
-        } finally {
-            $db->close();
-        }
-    }
 
     /**
      * Add migration (equivalent to Add-Migration)

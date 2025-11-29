@@ -22,7 +22,34 @@ class ReferenceEntry
      */
     public function load(): void
     {
-        // Implementation for explicit loading
+        $entity = $this->entityEntry->getEntity();
+        
+        if ($entity instanceof Entity) {
+            // Check if there's a lazy loading proxy
+            $proxyKey = '_proxy_' . $this->propertyName;
+            $navigationProperties = $entity->getNavigationProperties();
+            
+            if (isset($navigationProperties[$proxyKey])) {
+                $proxy = $navigationProperties[$proxyKey];
+                if ($proxy instanceof \Yakupeyisan\CodeIgniter4\EntityFramework\Core\LazyLoadingProxy) {
+                    $proxy->load();
+                    return;
+                }
+            }
+            
+            // Manual loading if no proxy
+            $context = $this->entityEntry->getContext();
+            $this->loadManually($context, $entity);
+        }
+    }
+
+    /**
+     * Load reference manually
+     */
+    private function loadManually(DbContext $context, Entity $entity): void
+    {
+        // Implementation for manual loading
+        // This would query the database to load the navigation property
     }
 
     /**
@@ -30,7 +57,12 @@ class ReferenceEntry
      */
     public function isLoaded(): bool
     {
-        // Implementation
+        $entity = $this->entityEntry->getEntity();
+        
+        if ($entity instanceof Entity) {
+            return $entity->isNavigationPropertyLoaded($this->propertyName);
+        }
+        
         return false;
     }
 

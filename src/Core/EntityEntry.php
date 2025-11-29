@@ -71,6 +71,14 @@ class EntityEntry
     }
 
     /**
+     * Get context
+     */
+    public function getContext(): DbContext
+    {
+        return $this->context;
+    }
+
+    /**
      * Reload entity from database
      */
     public function reload(): void

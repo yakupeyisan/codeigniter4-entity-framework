@@ -152,5 +152,56 @@ interface IQueryable
      * Get SQL string (for debugging)
      */
     public function toSql(): string;
+
+    /**
+     * Analyze query execution plan
+     * Returns analysis with recommendations and warnings
+     * 
+     * @return array Query plan analysis
+     */
+    public function analyzePlan(): array;
+
+    /**
+     * Get query execution statistics
+     * 
+     * @return array Query statistics (execution time, rows returned, etc.)
+     */
+    public function getStats(): array;
+
+    /**
+     * Add query hints for optimization
+     */
+    public function withHints(callable $hintsBuilder): IQueryable;
+
+    /**
+     * Set query timeout (in seconds)
+     */
+    public function timeout(int $seconds): IQueryable;
+
+    /**
+     * Use specific index
+     */
+    public function useIndex(string $indexName): IQueryable;
+
+    /**
+     * Force specific index
+     */
+    public function forceIndex(string $indexName): IQueryable;
+
+    /**
+     * Set lock hint (SQL Server: NOLOCK, READPAST, etc.)
+     */
+    public function withLock(string $lockHint): IQueryable;
+
+    /**
+     * Disable query cache
+     */
+    public function noCache(): IQueryable;
+
+    /**
+     * Get database-specific query builder
+     * Provides database-specific features (full-text search, JSON, window functions, etc.)
+     */
+    public function databaseSpecific(): \Yakupeyisan\CodeIgniter4\EntityFramework\Query\DatabaseSpecificQueryBuilder;
 }
 

@@ -187,5 +187,52 @@ abstract class Entity
         }
         $this->$name = $value;
     }
+
+    /**
+     * Magic method to handle property access with lazy loading
+     */
+    public function __get(string $name)
+    {
+        // Check if there's a lazy loading proxy for this property
+        $proxyKey = '_proxy_' . $name;
+        if (isset($this->navigationProperties[$proxyKey])) {
+            $proxy = $this->navigationProperties[$proxyKey];
+            if ($proxy instanceof \Yakupeyisan\CodeIgniter4\EntityFramework\Core\LazyLoadingProxy) {
+                // Load the navigation property
+                return $proxy->load();
+            }
+        }
+
+        // Default behavior - return property value if exists
+        if (property_exists($this, $name)) {
+            return $this->$name;
+        }
+
+        return null;
+    }
+
+    /**
+     * Check if navigation property is loaded
+     */
+    public function isNavigationPropertyLoaded(string $name): bool
+    {
+        $proxyKey = '_proxy_' . $name;
+        if (isset($this->navigationProperties[$proxyKey])) {
+            $proxy = $this->navigationProperties[$proxyKey];
+            if ($proxy instanceof \Yakupeyisan\CodeIgniter4\EntityFramework\Core\LazyLoadingProxy) {
+                return $proxy->isLoaded();
+            }
+        }
+
+        // Check if property has a value (loaded)
+        $reflection = new \ReflectionClass($this);
+        if ($reflection->hasProperty($name)) {
+            $property = $reflection->getProperty($name);
+            $property->setAccessible(true);
+            return $property->getValue($this) !== null;
+        }
+
+        return false;
+    }
 }
 

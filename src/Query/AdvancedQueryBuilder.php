@@ -34,12 +34,41 @@ class AdvancedQueryBuilder
     private ?string $rawSql = null;
     private array $rawSqlParameters = [];
     private bool $useRawSql = false;
+    private ?QueryHints $queryHints = null;
+    private array $selectRaw = [];
+    private array $whereRaw = [];
 
     public function __construct(DbContext $context, string $entityType, BaseConnection $connection)
     {
         $this->context = $context;
         $this->entityType = $entityType;
         $this->connection = $connection;
+    }
+
+    /**
+     * Get table name for this entity
+     */
+    public function getTableName(): string
+    {
+        return $this->context->getTableName($this->entityType);
+    }
+
+    /**
+     * Add raw SELECT clause
+     */
+    public function selectRaw(string $sql): self
+    {
+        $this->selectRaw[] = $sql;
+        return $this;
+    }
+
+    /**
+     * Add raw WHERE clause
+     */
+    public function whereRaw(string $sql): self
+    {
+        $this->whereRaw[] = $sql;
+        return $this;
     }
 
     /**
@@ -383,6 +412,7 @@ class AdvancedQueryBuilder
 
     /**
      * Get SQL string
+     * Uses query cache for performance optimization
      */
     public function toSql(): string
     {
@@ -390,6 +420,16 @@ class AdvancedQueryBuilder
             return $this->rawSql;
         }
 
+        // Check query cache
+        $queryState = $this->getQueryState();
+        $cacheKey = QueryCache::generateKey($this->context, $this->entityType, $queryState);
+        
+        $cachedSql = QueryCache::getSql($cacheKey);
+        if ($cachedSql !== null) {
+            return $cachedSql;
+        }
+
+        // Generate SQL
         $tableName = $this->context->getTableName($this->entityType);
         $builder = $this->connection->table($tableName);
         
@@ -412,7 +452,158 @@ class AdvancedQueryBuilder
             $builder->limit($this->takeCount);
         }
         
-        return $builder->getCompiledSelect(false);
+        $sql = $builder->getCompiledSelect(false);
+        
+        // Apply query hints
+        if ($this->queryHints !== null) {
+            $driver = strtolower($this->connection->getPlatform() ?? '');
+            $sql = $this->queryHints->applyToSql($sql, $driver, $tableName);
+        }
+        
+        // Cache the SQL (unless noCache is set)
+        if ($this->queryHints === null || !$this->queryHints->isNoCache()) {
+            QueryCache::setSql($cacheKey, $sql);
+        }
+        
+        return $sql;
+    }
+
+    /**
+     * Add query hints for optimization
+     */
+    public function withHints(callable $hintsBuilder): self
+    {
+        if ($this->queryHints === null) {
+            $this->queryHints = new QueryHints();
+        }
+        $hintsBuilder($this->queryHints);
+        return $this;
+    }
+
+    /**
+     * Set query timeout
+     */
+    public function timeout(int $seconds): self
+    {
+        if ($this->queryHints === null) {
+            $this->queryHints = new QueryHints();
+        }
+        $this->queryHints->timeout($seconds);
+        return $this;
+    }
+
+    /**
+     * Use specific index
+     */
+    public function useIndex(string $indexName): self
+    {
+        if ($this->queryHints === null) {
+            $this->queryHints = new QueryHints();
+        }
+        $this->queryHints->useIndex($indexName);
+        return $this;
+    }
+
+    /**
+     * Force specific index
+     */
+    public function forceIndex(string $indexName): self
+    {
+        if ($this->queryHints === null) {
+            $this->queryHints = new QueryHints();
+        }
+        $this->queryHints->forceIndex($indexName);
+        return $this;
+    }
+
+    /**
+     * Ignore specific index
+     */
+    public function ignoreIndex(string $indexName): self
+    {
+        if ($this->queryHints === null) {
+            $this->queryHints = new QueryHints();
+        }
+        $this->queryHints->ignoreIndex($indexName);
+        return $this;
+    }
+
+    /**
+     * Set lock hint (SQL Server: NOLOCK, READPAST, etc.)
+     */
+    public function withLock(string $lockHint): self
+    {
+        if ($this->queryHints === null) {
+            $this->queryHints = new QueryHints();
+        }
+        $this->queryHints->withLock($lockHint);
+        return $this;
+    }
+
+    /**
+     * Disable query cache
+     */
+    public function noCache(): self
+    {
+        if ($this->queryHints === null) {
+            $this->queryHints = new QueryHints();
+        }
+        $this->queryHints->noCache();
+        return $this;
+    }
+
+    /**
+     * Add optimizer hint
+     */
+    public function optimizerHint(string $hint): self
+    {
+        if ($this->queryHints === null) {
+            $this->queryHints = new QueryHints();
+        }
+        $this->queryHints->optimizerHint($hint);
+        return $this;
+    }
+
+    /**
+     * Analyze query execution plan
+     * Returns analysis with recommendations and warnings
+     * 
+     * @return array Query plan analysis
+     */
+    public function analyzePlan(): array
+    {
+        $sql = $this->toSql();
+        $analyzer = new QueryPlanAnalyzer($this->connection);
+        return $analyzer->analyzePlan($sql);
+    }
+
+    /**
+     * Get query execution statistics
+     * 
+     * @return array Query statistics (execution time, rows returned, etc.)
+     */
+    public function getStats(): array
+    {
+        $sql = $this->toSql();
+        $analyzer = new QueryPlanAnalyzer($this->connection);
+        return $analyzer->getQueryStats($sql);
+    }
+
+    /**
+     * Get current query state for cache key generation
+     */
+    private function getQueryState(): array
+    {
+        return [
+            'wheres' => $this->wheres,
+            'includes' => $this->includes,
+            'orderBys' => $this->orderBys,
+            'skipCount' => $this->skipCount,
+            'takeCount' => $this->takeCount,
+            'groupBy' => $this->groupBy,
+            'joins' => $this->joins,
+            'isNoTracking' => $this->isNoTracking,
+        ];
     }
 
     /**
@@ -449,6 +640,16 @@ class AdvancedQueryBuilder
         }
         if ($this->takeCount !== null) {
             $builder->limit($this->takeCount);
+        }
+        
+        // Apply query hints (timeout, max rows, etc.)
+        if ($this->queryHints !== null) {
+            if ($this->queryHints->getTimeout() !== null) {
+                $this->setQueryTimeout($this->queryHints->getTimeout());
+            }
+            if ($this->queryHints->getMaxRows() !== null) {
+                $builder->limit($this->queryHints->getMaxRows());
+            }
         }
         
         $query = $builder->get();
@@ -491,6 +692,18 @@ class AdvancedQueryBuilder
         // Build EF Core style SQL query
         $sql = $this->buildEfCoreStyleQuery();
         
+        // Apply query hints
+        if ($this->queryHints !== null) {
+            $driver = strtolower($this->connection->getPlatform() ?? '');
+            $tableName = $this->context->getTableName($this->entityType);
+            $sql = $this->queryHints->applyToSql($sql, $driver, $tableName);
+            
+            // Apply timeout
+            if ($this->queryHints->getTimeout() !== null) {
+                $this->setQueryTimeout($this->queryHints->getTimeout());
+            }
+        }
+        
         // Execute raw SQL
         $query = $this->connection->query($sql);
         $results = $query->getResultArray();
@@ -510,12 +723,17 @@ class AdvancedQueryBuilder
         
         log_message('debug', 'Parsed entities count: ' . count($entities));
         
-        // Apply change tracking
+        // Apply change tracking and lazy loading proxies
         if ($this->isTracking && !$this->isNoTracking) {
             foreach ($entities as $entity) {
                 if ($entity instanceof Entity) {
                     $entity->enableTracking();
                     $entity->markAsUnchanged();
+                    
+                    // Enable lazy loading for navigation properties (if not already loaded via Include)
+                    if ($this->context->isLazyLoadingEnabled()) {
+                        $this->enableLazyLoading($entity);
+                    }
                 }
             }
         }
@@ -530,7 +748,27 @@ class AdvancedQueryBuilder
     {
         $query = $this->connection->query($this->rawSql, $this->rawSqlParameters);
         $results = $query->getResultArray();
-        return $this->mapToEntities($results);
+        $entities = $this->mapToEntities($results);
+        
+        // Enable lazy loading for navigation properties
+        if ($this->context->isLazyLoadingEnabled()) {
+            foreach ($entities as $entity) {
+                if ($entity instanceof Entity) {
+                    $this->enableLazyLoading($entity);
+                }
+            }
+        }
+        
+        return $entities;
+    }
+
+    /**
+     * Enable lazy loading for entity navigation properties
+     */
+    private function enableLazyLoading(Entity $entity): void
+    {
+        $proxyFactory = new \Yakupeyisan\CodeIgniter4\EntityFramework\Core\ProxyFactory($this->context);
+        $proxyFactory->enableLazyLoading($entity);
     }
 
     /**
@@ -622,6 +860,7 @@ class AdvancedQueryBuilder
     /**
      * Apply WHERE clause with navigation property support
      * Detects navigation property access and adds necessary JOINs
+     * Uses ExpressionParser for advanced expression parsing
      */
     private function applyWhere($builder, callable $predicate): void
     {
@@ -634,12 +873,95 @@ class AdvancedQueryBuilder
                 $this->addJoinForNavigationPath($builder, $path);
             }
             
-            // Apply WHERE conditions on joined tables
+            // Apply WHERE conditions on joined tables using ExpressionParser
             $this->applyNavigationWhereToSql($builder, $predicate, $navigationPaths);
         } else {
-            // Simple property filter - try to apply directly
-        // This is a simplified implementation
+            // Simple property filter - use ExpressionParser for advanced parsing
+            $this->applySimpleWhereWithParser($builder, $predicate);
         }
+    }
+
+    /**
+     * Apply simple WHERE clause using ExpressionParser
+     */
+    private function applySimpleWhereWithParser($builder, callable $predicate): void
+    {
+        try {
+            $parser = new ExpressionParser($this->entityType, $this->getTableAliasForParser());
+            $sqlCondition = $parser->parse($predicate);
+            
+            if (!empty($sqlCondition)) {
+                // Apply the parsed SQL condition
+                // Note: CodeIgniter's where() accepts raw SQL with second parameter as false
+                $builder->where($sqlCondition, null, false);
+            } else {
+                // Fallback to old method if parsing fails
+                $this->applySimpleWhereFallback($builder, $predicate);
+            }
+        } catch (\Exception $e) {
+            // If parsing fails, fall back to old method
+            log_message('debug', 'ExpressionParser failed: ' . $e->getMessage());
+            $this->applySimpleWhereFallback($builder, $predicate);
+        }
+    }
+
+    /**
+     * Fallback method for simple WHERE clauses
+     */
+    private function applySimpleWhereFallback($builder, callable $predicate): void
+    {
+        // Old implementation - try to extract simple conditions
+        $reflection = new \ReflectionFunction($predicate);
+        $code = $this->getFunctionCode($reflection);
+        
+        // Try to match simple patterns like $x->Property === value
+        if (preg_match('/\$[a-zA-Z_][a-zA-Z0-9_]*->([a-zA-Z_][a-zA-Z0-9_]*)\s*(===|==|!==|!=|<=|>=|<|>)\s*(.+?)(?:;|$)/', $code, $matches)) {
+            $property = $matches[1];
+            $operator = $matches[2] === '===' || $matches[2] === '==' ? '=' : ($matches[2] === '!==' || $matches[2] === '!=' ? '!=' : $matches[2]);
+            $value = trim($matches[3]);
+            
+            // Parse value
+            if (preg_match('/^["\'](.+?)["\']$/', $value, $valueMatch)) {
+                $value = $valueMatch[1];
+            } elseif (is_numeric($value)) {
+                // Keep as is
+            } else {
+                $value = null; // Can't determine value
+            }
+            
+            if ($value !== null) {
+                $tableName = $this->context->getTableName($this->entityType);
+                $columnName = $this->getColumnNameFromProperty($this->entityType, $property);
+                $builder->where("{$tableName}.{$columnName} {$operator}", $value);
+            }
+        }
+    }
+
+    /**
+     * Get table alias for current entity (for ExpressionParser)
+     */
+    private function getTableAliasForParser(): string
+    {
+        return 't0';
+    }
+
+    /**
+     * Get function source code
+     */
+    private function getFunctionCode(\ReflectionFunction $reflection): string
+    {
+        $file = $reflection->getFileName();
+        $start = $reflection->getStartLine();
+        $end = $reflection->getEndLine();
+        
+        if (!$file || !$start || !$end || !file_exists($file)) {
+            return '';
+        }
+        
+        $lines = file($file);
+        $code = implode('', array_slice($lines, $start - 1, $end - $start + 1));
+        
+        return $code;
     }
     
     /**
@@ -1347,12 +1669,29 @@ class AdvancedQueryBuilder
             $idProperty->setAccessible(true);
             $id = $idProperty->getValue($entity);
             
+            // Remove Id from update data
+            unset($row['Id']);
+            
             if ($this->connection->table($tableName)->where('Id', $id)->update($row)) {
                 $updated++;
             }
         }
         
         return $updated;
+    }
+
+    /**
+     * Batch delete entities by IDs
+     */
+    public function batchDelete(array $ids): int
+    {
+        if (empty($ids)) {
+            return 0;
+        }
+        
+        $tableName = $this->context->getTableName($this->entityType);
+        $result = $this->connection->table($tableName)->whereIn('Id', $ids)->delete();
+        return $result ? count($ids) : 0;
     }
 
     /**
