@@ -103,6 +103,12 @@ class Queryable implements IQueryable
         return $this;
     }
 
+    public function joinRaw(string $rawSql, string $alias, string $joinCondition, string $joinType = 'LEFT', array $parameters = []): IQueryable
+    {
+        $this->queryBuilder->joinRaw($rawSql, $alias, $joinCondition, $joinType, $parameters);
+        return $this;
+    }
+
     public function asNoTracking(): IQueryable
     {
         $this->queryBuilder->asNoTracking();

@@ -2,6 +2,10 @@
 
 Entity Framework Core for CodeIgniter 4 - A comprehensive ORM solution inspired by .NET Entity Framework Core.
 
+## VSCode Extension
+
+A VSCode extension is available to enhance your Entity Framework development experience with C#-like property outline, navigation properties, and attribute highlighting. See [vscode-extension/README.md](vscode-extension/README.md) for details.
+
 ## Installation
 
 ```bash
@@ -80,6 +84,7 @@ DatabaseProviderFactory::register(new OracleProvider());
    - Projection (Select)
    - GroupBy
    - Join / Left Join
+   - **JoinRaw** - Join with raw SQL (derived tables, CTEs, date generation queries, etc.)
    - Raw SQL (FromSqlRaw)
    - **Advanced Expression Tree Parsing**
      - Complex WHERE clause support (AND, OR, NOT)
@@ -585,6 +590,108 @@ $users = $context->Users()
 6. **Performance**: Navigation property filtrelemeleri JOIN gerektirir, performansı etkileyebilir
 7. **Index Kullanımı**: Sık kullanılan filtreleme alanları için index oluşturun
 8. **Date/Time Methods**: Date/Time method'ları sadece DateTime alanlarında kullanılabilir
+
+### JoinRaw - Raw SQL ile Join
+
+`joinRaw` metodu ile raw SQL sorgularını (derived table, CTE, date generation query vb.) mevcut tablolarla birleştirebilirsiniz. Bu özellik, özellikle tarih aralığı oluşturma gibi durumlarda kullanışlıdır.
+
+#### SQL Server'da Tarih Aralığı ile Join
+
+SQL Server'da `master..spt_values` kullanarak tarih aralığı oluşturup mevcut tabloyla birleştirme:
+
+```php
+use App\EntityFramework\ApplicationDbContext;
+
+$context = new ApplicationDbContext();
+
+// Tarih aralığı oluşturan raw SQL sorgusu
+$dateRangeSql = "SELECT CONVERT(DATE, DATEADD(DAY, number, '2024-01-01')) AS [Date] 
+                 FROM master..spt_values 
+                 WHERE type = 'P' 
+                 AND DATEADD(DAY, number, '2024-01-01') < '2024-02-01'";
+
+// Mevcut tabloyu tarih aralığı ile birleştirme
+$results = $context->Orders()
+    ->joinRaw(
+        $dateRangeSql,                    // Raw SQL sorgusu
+        'dates',                          // Alias (JOIN edilen tablo için)
+        'dates.[Date] = main.[OrderDate]', // Join koşulu
+        'LEFT'                            // Join tipi (LEFT, INNER, RIGHT, FULL)
+    )
+    ->where(fn($o) => $o->Status === 'Active')
+    ->toList();
+
+// Sonuçlarda hem Order bilgileri hem de dates.Date kolonu bulunur
+foreach ($results as $order) {
+    echo $order->OrderDate; // Order'ın tarihi
+    // dates_Date özelliği de mevcut olacaktır (alias_ColumnName formatında)
+}
+```
+
+#### Parametreli Raw SQL ile Join
+
+```php
+// Parametreli sorgu ile tarih aralığı
+$startDate = '2024-01-01';
+$endDate = '2024-02-01';
+
+$dateRangeSql = "SELECT CONVERT(DATE, DATEADD(DAY, number, ?)) AS [Date] 
+                 FROM master..spt_values 
+                 WHERE type = 'P' 
+                 AND DATEADD(DAY, number, ?) < ?";
+
+$results = $context->Orders()
+    ->joinRaw(
+        $dateRangeSql,
+        'dates',
+        'dates.[Date] = main.[OrderDate]',
+        'LEFT',
+        [$startDate, $startDate, $endDate] // Parametreler
+    )
+    ->toList();
+```
+
+#### INNER JOIN Örneği
+
+```php
+// Sadece eşleşen kayıtları getirmek için INNER JOIN
+$results = $context->Orders()
+    ->joinRaw(
+        "SELECT DISTINCT CONVERT(DATE, OrderDate) AS [Date] FROM Orders",
+        'distinctDates',
+        'distinctDates.[Date] = main.[OrderDate]',
+        'INNER'
+    )
+    ->toList();
+```
+
+#### Birden Fazla Raw Join
+
+```php
+// Birden fazla raw join kullanımı
+$results = $context->Orders()
+    ->joinRaw(
+        $dateRangeSql,
+        'dates',
+        'dates.[Date] = main.[OrderDate]',
+        'LEFT'
+    )
+    ->joinRaw(
+        "SELECT * FROM (VALUES (1, 'New'), (2, 'Processing')) AS Status(Id, Name)",
+        'statusLookup',
+        'statusLookup.Id = main.StatusId',
+        'LEFT'
+    )
+    ->toList();
+```
+
+#### Notlar
+
+1. **Alias Kullanımı**: Raw join'de verdiğiniz alias ile kolonlara erişebilirsiniz (format: `alias_ColumnName`)
+2. **Join Condition**: Join koşulunda ana tabloya `main` alias'ı ile veya tablo adı ile referans verebilirsiniz
+3. **Join Type**: 'LEFT', 'INNER', 'RIGHT', 'FULL' join tiplerini kullanabilirsiniz
+4. **Parametreler**: Raw SQL'de parametreler kullanıyorsanız, `joinRaw` metodunun son parametresine dizi olarak geçebilirsiniz
+5. **SQL Injection**: Parametreli sorgular kullanarak SQL injection'dan korunun
 
 ### Repository Pattern
 

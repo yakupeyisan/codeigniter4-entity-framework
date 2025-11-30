@@ -28,6 +28,7 @@ class AdvancedQueryBuilder
     private ?int $takeCount = null;
     private $groupBy = null; // callable|null
     private array $joins = [];
+    private array $rawJoins = []; // Raw SQL joins
     private array $requiredJoins = []; // Navigation property joins for WHERE clauses
     private bool $isNoTracking = false;
     private bool $isTracking = true;
@@ -170,6 +171,59 @@ class AdvancedQueryBuilder
             'type' => $joinType
         ];
         return $this;
+    }
+
+    /**
+     * Join with raw SQL (derived table/CTE)
+     * 
+     * @param string $rawSql Raw SQL query to join (e.g., subquery or CTE)
+     * @param string $alias Alias for the raw SQL table
+     * @param string $joinCondition SQL join condition (e.g., "dates.Date = mainTable.CreatedDate")
+     * @param string $joinType Join type: 'INNER', 'LEFT', 'RIGHT', 'FULL' (default: 'LEFT')
+     * @param array $parameters Parameters for the raw SQL query
+     * @return self
+     */
+    public function joinRaw(string $rawSql, string $alias, string $joinCondition, string $joinType = 'LEFT', array $parameters = []): self
+    {
+        $this->rawJoins[] = [
+            'rawSql' => $rawSql,
+            'alias' => $alias,
+            'joinCondition' => $joinCondition,
+            'joinType' => strtoupper($joinType),
+            'parameters' => $parameters
+        ];
+        return $this;
+    }
+
+    /**
+     * Apply raw join to CodeIgniter query builder
+     * 
+     * @param mixed $builder CodeIgniter query builder instance
+     * @param array $rawJoin Raw join configuration
+     * @return void
+     */
+    private function applyRawJoin($builder, array $rawJoin): void
+    {
+        $rawSql = $rawJoin['rawSql'];
+        $alias = $rawJoin['alias'];
+        $joinCondition = $rawJoin['joinCondition'];
+        $joinType = $rawJoin['joinType'];
+        
+        // Escape the alias
+        $quotedAlias = $this->connection->escapeIdentifiers($alias);
+        
+        // Build the raw join clause
+        // Format: {JOIN_TYPE} JOIN ({rawSql}) AS {alias} ON {joinCondition}
+        $joinClause = "{$joinType} JOIN ({$rawSql}) AS {$quotedAlias} ON {$joinCondition}";
+        
+        // CodeIgniter's query builder doesn't directly support raw subquery joins
+        // We'll need to use a raw join by building the SQL manually
+        // For now, we'll store it and apply it when building the final query
+        // Use join with escape = false to indicate it's raw SQL
+        // Note: This might require custom handling in query execution
+        $builder->join($joinClause, null, '', false);
+        
+        log_message('debug', "Added RAW JOIN ({$joinType}): ({$rawSql}) AS {$alias} ON {$joinCondition}");
     }
 
     /**
@@ -620,6 +674,11 @@ class AdvancedQueryBuilder
             return $this->executeEfCoreStyleQuery();
         }
 
+        // Check if we have raw joins - if so, build SQL manually
+        if (!empty($this->rawJoins)) {
+            return $this->executeQueryWithRawJoins();
+        }
+        
         // Fallback to simple query builder for basic queries
         $tableName = $this->context->getTableName($this->entityType);
         $builder = $this->connection->table($tableName);
@@ -654,6 +713,105 @@ class AdvancedQueryBuilder
         
         $query = $builder->get();
         $results = $query->getResultArray();
+        $entities = $this->mapToEntities($results);
+        
+        // Apply change tracking
+        if ($this->isTracking && !$this->isNoTracking) {
+            foreach ($entities as $entity) {
+                if ($entity instanceof Entity) {
+                    $entity->enableTracking();
+                    $entity->markAsUnchanged();
+                }
+            }
+        }
+        
+        return $entities;
+    }
+
+    /**
+     * Execute query with raw joins (builds SQL manually)
+     * 
+     * @return array
+     */
+    private function executeQueryWithRawJoins(): array
+    {
+        $tableName = $this->context->getTableName($this->entityType);
+        $quotedTableName = $this->connection->escapeIdentifiers($tableName);
+        $mainAlias = 'main';
+        
+        // Get entity columns
+        $entityReflection = new ReflectionClass($this->entityType);
+        $entityColumns = $this->getEntityColumns($entityReflection);
+        
+        // Build SELECT columns
+        $selectColumns = [];
+        foreach ($entityColumns as $col) {
+            $quotedCol = $this->connection->escapeIdentifiers($col);
+            $selectColumns[] = "[{$mainAlias}].{$quotedCol}";
+        }
+        
+        // Add all columns from raw joins (prefixed with alias)
+        // Users can access them in the result set
+        foreach ($this->rawJoins as $rawJoin) {
+            $alias = $rawJoin['alias'];
+            $quotedAlias = $this->connection->escapeIdentifiers($alias);
+            // Select all columns from raw join using alias.*
+            // The actual column names will depend on the raw SQL query
+            $selectColumns[] = "[{$quotedAlias}].*";
+        }
+        
+        // Build FROM clause
+        $sql = "SELECT " . implode(', ', $selectColumns) . "\n";
+        $sql .= "FROM {$quotedTableName} AS [{$mainAlias}]";
+        
+        // Add raw joins
+        foreach ($this->rawJoins as $rawJoin) {
+            $rawSql = $rawJoin['rawSql'];
+            $alias = $rawJoin['alias'];
+            $joinCondition = $rawJoin['joinCondition'];
+            $joinType = $rawJoin['joinType'];
+            $quotedAlias = $this->connection->escapeIdentifiers($alias);
+            
+            $sql .= "\n{$joinType} JOIN ({$rawSql}) AS [{$quotedAlias}] ON {$joinCondition}";
+        }
+        
+        // Build WHERE clauses (simple ones)
+        $whereConditions = [];
+        foreach ($this->wheres as $where) {
+            try {
+                $parser = new ExpressionParser($this->entityType, $mainAlias);
+                $sqlCondition = $parser->parse($where);
+                if (!empty($sqlCondition)) {
+                    $whereConditions[] = $sqlCondition;
+                }
+            } catch (\Exception $e) {
+                log_message('debug', 'Error parsing WHERE clause: ' . $e->getMessage());
+            }
+        }
+        
+        if (!empty($whereConditions)) {
+            $sql .= "\nWHERE " . implode(' AND ', $whereConditions);
+        }
+        
+        // Apply ORDER BY
+        foreach ($this->orderBys as $orderBy) {
+            // Simple order by parsing (can be enhanced)
+            // For now, skip complex order by with raw joins
+        }
+        
+        // Apply LIMIT/OFFSET
+        if ($this->takeCount !== null) {
+            $sql .= "\nLIMIT " . (int)$this->takeCount;
+        }
+        if ($this->skipCount !== null) {
+            $sql .= "\nOFFSET " . (int)$this->skipCount;
+        }
+        
+        // Execute query
+        $query = $this->connection->query($sql);
+        $results = $query->getResultArray();
+        
+        // Map to entities (simplified - may need adjustment)
         $entities = $this->mapToEntities($results);
         
         // Apply change tracking

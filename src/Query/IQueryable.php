@@ -74,6 +74,18 @@ interface IQueryable
     public function leftJoin(IQueryable $inner, callable $outerKeySelector, callable $innerKeySelector, callable $resultSelector): IQueryable;
 
     /**
+     * Join with raw SQL (derived table/CTE)
+     * 
+     * @param string $rawSql Raw SQL query to join (e.g., subquery or CTE)
+     * @param string $alias Alias for the raw SQL table
+     * @param string $joinCondition SQL join condition (e.g., "t.Date = mainTable.CreatedDate")
+     * @param string $joinType Join type: 'INNER', 'LEFT', 'RIGHT', 'FULL' (default: 'LEFT')
+     * @param array $parameters Parameters for the raw SQL query
+     * @return IQueryable
+     */
+    public function joinRaw(string $rawSql, string $alias, string $joinCondition, string $joinType = 'LEFT', array $parameters = []): IQueryable;
+
+    /**
      * AsNoTracking - Disable change tracking
      */
     public function asNoTracking(): IQueryable;
