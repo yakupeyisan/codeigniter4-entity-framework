@@ -29,6 +29,15 @@ class Repository implements IRepository
     }
 
     /**
+     * Get all entities without sensitive value masking
+     * Returns unmasked sensitive values (bypasses SensitiveValue attribute)
+     */
+    public function getAllDisableSensitive(): IQueryable
+    {
+        return $this->context->set($this->entityType)->disableSensitive();
+    }
+
+    /**
      * Get entity by ID
      */
     public function getById(int|string $id): ?object

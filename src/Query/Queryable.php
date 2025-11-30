@@ -121,6 +121,12 @@ class Queryable implements IQueryable
         return $this;
     }
 
+    public function disableSensitive(): IQueryable
+    {
+        $this->queryBuilder->disableSensitive();
+        return $this;
+    }
+
     public function first(): ?object
     {
         return $this->queryBuilder->first();

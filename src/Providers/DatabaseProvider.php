@@ -64,5 +64,17 @@ interface DatabaseProvider
      * Get string concatenation operator
      */
     public function getStringConcatOperator(): string;
+
+    /**
+     * Get masking SQL expression for sensitive values
+     * 
+     * @param string $columnName Column name to mask
+     * @param string $maskChar Character used for masking
+     * @param int $visibleStart Number of characters to show from start
+     * @param int $visibleEnd Number of characters to show from end
+     * @param string|null $customMask Custom SQL expression for masking (overrides other options)
+     * @return string SQL expression for masked column
+     */
+    public function getMaskingSql(string $columnName, string $maskChar = '*', int $visibleStart = 0, int $visibleEnd = 4, ?string $customMask = null): string;
 }
 

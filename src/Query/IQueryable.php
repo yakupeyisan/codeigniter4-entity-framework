@@ -96,6 +96,14 @@ interface IQueryable
     public function asTracking(): IQueryable;
 
     /**
+     * DisableSensitive - Disable sensitive value masking
+     * Returns unmasked sensitive values (bypasses SensitiveValue attribute)
+     * 
+     * @return IQueryable
+     */
+    public function disableSensitive(): IQueryable;
+
+    /**
      * Execute query and get first result
      */
     public function first(): ?object;

@@ -16,6 +16,12 @@ interface IRepository
     public function getAll(): IQueryable;
 
     /**
+     * Get all entities without sensitive value masking (IQueryable)
+     * Returns unmasked sensitive values
+     */
+    public function getAllDisableSensitive(): IQueryable;
+
+    /**
      * Get entity by ID
      */
     public function getById(int|string $id): ?object;

@@ -32,6 +32,7 @@ class AdvancedQueryBuilder
     private array $requiredJoins = []; // Navigation property joins for WHERE clauses
     private bool $isNoTracking = false;
     private bool $isTracking = true;
+    private bool $isSensitive = false; // Disable sensitive value masking
     private ?string $rawSql = null;
     private array $rawSqlParameters = [];
     private bool $useRawSql = false;
@@ -243,6 +244,16 @@ class AdvancedQueryBuilder
     {
         $this->isNoTracking = false;
         $this->isTracking = true;
+        return $this;
+    }
+
+    /**
+     * DisableSensitive - Disable sensitive value masking
+     * Returns unmasked sensitive values (bypasses SensitiveValue attribute)
+     */
+    public function disableSensitive(): self
+    {
+        $this->isSensitive = true;
         return $this;
     }
 
@@ -681,6 +692,29 @@ class AdvancedQueryBuilder
         
         // Fallback to simple query builder for basic queries
         $tableName = $this->context->getTableName($this->entityType);
+        
+        // Check if we need masking (has sensitive columns and disableSensitive not called)
+        $entityReflection = new ReflectionClass($this->entityType);
+        $columnsWithProperties = $this->getEntityColumnsWithProperties($entityReflection);
+        $hasSensitiveColumns = false;
+        
+        if (!$this->isSensitive) {
+            foreach ($columnsWithProperties as $colInfo) {
+                $property = $entityReflection->getProperty($colInfo['property']);
+                $sensitiveAttributes = $property->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\SensitiveValue::class);
+                if (!empty($sensitiveAttributes)) {
+                    $hasSensitiveColumns = true;
+                    break;
+                }
+            }
+        }
+        
+        // If has sensitive columns, build SQL manually with masking
+        if ($hasSensitiveColumns) {
+            return $this->executeQueryWithMasking($columnsWithProperties, $entityReflection);
+        }
+        
+        // Otherwise use standard query builder
         $builder = $this->connection->table($tableName);
         
         // Apply WHERE clauses
@@ -713,6 +747,102 @@ class AdvancedQueryBuilder
         
         $query = $builder->get();
         $results = $query->getResultArray();
+        $entities = $this->mapToEntities($results);
+        
+        // Apply change tracking
+        if ($this->isTracking && !$this->isNoTracking) {
+            foreach ($entities as $entity) {
+                if ($entity instanceof Entity) {
+                    $entity->enableTracking();
+                    $entity->markAsUnchanged();
+                }
+            }
+        }
+        
+        return $entities;
+    }
+
+    /**
+     * Execute query with sensitive value masking
+     * 
+     * @param array $columnsWithProperties Array of ['column' => 'ColumnName', 'property' => 'PropertyName']
+     * @param ReflectionClass $entityReflection Entity reflection
+     * @return array
+     */
+    private function executeQueryWithMasking(array $columnsWithProperties, ReflectionClass $entityReflection): array
+    {
+        $tableName = $this->context->getTableName($this->entityType);
+        $quotedTableName = $this->connection->escapeIdentifiers($tableName);
+        $mainAlias = 'main';
+        $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
+        
+        // Build SELECT columns with masking
+        $selectColumns = [];
+        foreach ($columnsWithProperties as $colInfo) {
+            $property = $entityReflection->getProperty($colInfo['property']);
+            $sensitiveAttributes = $property->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\SensitiveValue::class);
+            
+            $quotedCol = $this->connection->escapeIdentifiers($colInfo['column']);
+            $quotedAlias = $this->connection->escapeIdentifiers($mainAlias);
+            
+            if (!empty($sensitiveAttributes) && !$this->isSensitive) {
+                // Apply masking
+                $sensitiveAttr = $sensitiveAttributes[0]->newInstance();
+                $maskedExpression = $provider->getMaskingSql(
+                    "{$quotedAlias}.{$quotedCol}",
+                    $sensitiveAttr->maskChar,
+                    $sensitiveAttr->visibleStart,
+                    $sensitiveAttr->visibleEnd,
+                    $sensitiveAttr->customMask
+                );
+                $selectColumns[] = "({$maskedExpression}) AS {$quotedCol}";
+            } else {
+                // No masking
+                $selectColumns[] = "{$quotedAlias}.{$quotedCol}";
+            }
+        }
+        
+        // Build SQL
+        $sql = "SELECT " . implode(', ', $selectColumns) . "\n";
+        $sql .= "FROM {$quotedTableName} AS {$quotedAlias}";
+        
+        // Build WHERE clauses
+        $whereConditions = [];
+        foreach ($this->wheres as $where) {
+            try {
+                $parser = new ExpressionParser($this->entityType, $mainAlias);
+                $sqlCondition = $parser->parse($where);
+                if (!empty($sqlCondition)) {
+                    $whereConditions[] = $sqlCondition;
+                }
+            } catch (\Exception $e) {
+                log_message('debug', 'Error parsing WHERE clause: ' . $e->getMessage());
+            }
+        }
+        
+        if (!empty($whereConditions)) {
+            $sql .= "\nWHERE " . implode(' AND ', $whereConditions);
+        }
+        
+        // Apply ORDER BY
+        foreach ($this->orderBys as $orderBy) {
+            // Simple order by - can be enhanced
+        }
+        
+        // Apply LIMIT/OFFSET
+        if ($this->takeCount !== null) {
+            $limitClause = $provider->getLimitClause($this->takeCount, $this->skipCount);
+            $sql .= "\n" . $limitClause;
+        } elseif ($this->skipCount !== null) {
+            $limitClause = $provider->getLimitClause(999999, $this->skipCount);
+            $sql .= "\n" . $limitClause;
+        }
+        
+        // Execute query
+        $query = $this->connection->query($sql);
+        $results = $query->getResultArray();
+        
+        // Map to entities
         $entities = $this->mapToEntities($results);
         
         // Apply change tracking
@@ -2328,6 +2458,103 @@ class AdvancedQueryBuilder
             if ($hasColumnAttr || $property->isPublic()) {
                 $columnName = $this->getColumnNameFromProperty($entityReflection, $propertyName);
                 $columns[] = $columnName;
+            }
+        }
+        return $columns;
+    }
+
+    /**
+     * Get column SELECT expression with sensitive value masking if needed
+     * 
+     * @param ReflectionClass $entityReflection Entity reflection
+     * @param string $propertyName Property name
+     * @param string $tableAlias Table alias for SQL
+     * @return string SQL SELECT expression
+     */
+    private function getColumnSelectExpression(ReflectionClass $entityReflection, string $propertyName, string $tableAlias = 'main'): string
+    {
+        if (!$entityReflection->hasProperty($propertyName)) {
+            return '';
+        }
+
+        $property = $entityReflection->getProperty($propertyName);
+        $columnName = $this->getColumnNameFromProperty($entityReflection, $propertyName);
+        $quotedColumn = $this->connection->escapeIdentifiers($columnName);
+        $quotedAlias = $this->connection->escapeIdentifiers($tableAlias);
+        
+        // Check if disableSensitive is enabled
+        if ($this->isSensitive) {
+            return "[{$quotedAlias}].{$quotedColumn}";
+        }
+
+        // Check for SensitiveValue attribute
+        $sensitiveAttributes = $property->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\SensitiveValue::class);
+        if (empty($sensitiveAttributes)) {
+            return "[{$quotedAlias}].{$quotedColumn}";
+        }
+
+        // Get masking configuration
+        $sensitiveAttr = $sensitiveAttributes[0]->newInstance();
+        $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
+        
+        // Build masked column expression
+        $maskedExpression = $provider->getMaskingSql(
+            "[{$quotedAlias}].{$quotedColumn}",
+            $sensitiveAttr->maskChar,
+            $sensitiveAttr->visibleStart,
+            $sensitiveAttr->visibleEnd,
+            $sensitiveAttr->customMask
+        );
+        
+        return "({$maskedExpression}) AS {$quotedColumn}";
+    }
+
+    /**
+     * Get entity columns with property names mapping
+     * Returns array of ['column' => 'ColumnName', 'property' => 'PropertyName']
+     */
+    private function getEntityColumnsWithProperties(ReflectionClass $entityReflection): array
+    {
+        $excludedProperties = [
+            'entityState',
+            'originalValues',
+            'currentValues',
+            'navigationProperties',
+            'isTracking'
+        ];
+        
+        $columns = [];
+        foreach ($entityReflection->getProperties() as $property) {
+            if ($property->isStatic()) {
+                continue;
+            }
+            
+            $propertyName = $property->getName();
+            
+            if (in_array($propertyName, $excludedProperties)) {
+                continue;
+            }
+            
+            if ($property->isProtected() || $property->isPrivate()) {
+                $attributes = $property->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\Column::class);
+                if (empty($attributes)) {
+                    continue;
+                }
+            }
+            
+            $docComment = $property->getDocComment();
+            if ($docComment && (preg_match('/@var\s+[A-Za-z_][A-Za-z0-9_\\\\]*(?:\\\\[A-Za-z_][A-Za-z0-9_]*)*(\[\])?/', $docComment) || 
+                preg_match('/@var\s+array/', $docComment))) {
+                continue;
+            }
+            
+            $hasColumnAttr = !empty($property->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\Column::class));
+            if ($hasColumnAttr || $property->isPublic()) {
+                $columnName = $this->getColumnNameFromProperty($entityReflection, $propertyName);
+                $columns[] = [
+                    'column' => $columnName,
+                    'property' => $propertyName
+                ];
             }
         }
         return $columns;

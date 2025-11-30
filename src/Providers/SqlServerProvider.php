@@ -142,6 +142,36 @@ class SqlServerProvider implements DatabaseProvider
         return '+'; // SQL Server uses + for string concatenation
     }
 
+    public function getMaskingSql(string $columnName, string $maskChar = '*', int $visibleStart = 0, int $visibleEnd = 4, ?string $customMask = null): string
+    {
+        if ($customMask !== null) {
+            return str_replace('{column}', $columnName, $customMask);
+        }
+
+        $quotedCol = $this->escapeIdentifier($columnName);
+        $maskCharEscaped = str_replace("'", "''", $maskChar);
+        
+        // SQL Server masking: LEFT + REPLICATE + RIGHT
+        // Show first X chars, mask middle, show last Y chars
+        if ($visibleStart > 0 && $visibleEnd > 0) {
+            // Show both start and end
+            return "LEFT({$quotedCol}, {$visibleStart}) + " .
+                   "REPLICATE(N'{$maskCharEscaped}', LEN({$quotedCol}) - {$visibleStart} - {$visibleEnd}) + " .
+                   "RIGHT({$quotedCol}, {$visibleEnd})";
+        } elseif ($visibleStart > 0) {
+            // Show only start
+            return "LEFT({$quotedCol}, {$visibleStart}) + " .
+                   "REPLICATE(N'{$maskCharEscaped}', LEN({$quotedCol}) - {$visibleStart})";
+        } elseif ($visibleEnd > 0) {
+            // Show only end
+            return "REPLICATE(N'{$maskCharEscaped}', LEN({$quotedCol}) - {$visibleEnd}) + " .
+                   "RIGHT({$quotedCol}, {$visibleEnd})";
+        } else {
+            // Mask all
+            return "REPLICATE(N'{$maskCharEscaped}', LEN({$quotedCol}))";
+        }
+    }
+
     private function escapeValue($value): string
     {
         if ($value === null) {

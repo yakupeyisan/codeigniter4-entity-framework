@@ -135,6 +135,32 @@ class SqliteProvider implements DatabaseProvider
         return '||'; // SQLite uses || for string concatenation
     }
 
+    public function getMaskingSql(string $columnName, string $maskChar = '*', int $visibleStart = 0, int $visibleEnd = 4, ?string $customMask = null): string
+    {
+        if ($customMask !== null) {
+            return str_replace('{column}', $columnName, $customMask);
+        }
+
+        $quotedCol = $this->escapeIdentifier($columnName);
+        $maskCharEscaped = str_replace("'", "''", $maskChar);
+        
+        // SQLite masking: substr + printf (for repeating)
+        // SQLite doesn't have REPEAT, so we use a workaround
+        if ($visibleStart > 0 && $visibleEnd > 0) {
+            return "substr({$quotedCol}, 1, {$visibleStart}) || " .
+                   "replace(hex(zeroblob(max(0, length({$quotedCol}) - {$visibleStart} - {$visibleEnd}))), '00', '{$maskCharEscaped}') || " .
+                   "substr({$quotedCol}, -{$visibleEnd})";
+        } elseif ($visibleStart > 0) {
+            return "substr({$quotedCol}, 1, {$visibleStart}) || " .
+                   "replace(hex(zeroblob(max(0, length({$quotedCol}) - {$visibleStart}))), '00', '{$maskCharEscaped}')";
+        } elseif ($visibleEnd > 0) {
+            return "replace(hex(zeroblob(max(0, length({$quotedCol}) - {$visibleEnd}))), '00', '{$maskCharEscaped}') || " .
+                   "substr({$quotedCol}, -{$visibleEnd})";
+        } else {
+            return "replace(hex(zeroblob(length({$quotedCol}))), '00', '{$maskCharEscaped}')";
+        }
+    }
+
     private function escapeValue($value): string
     {
         if ($value === null) {

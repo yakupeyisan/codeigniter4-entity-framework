@@ -140,6 +140,37 @@ class PostgreSqlProvider implements DatabaseProvider
         return '||'; // PostgreSQL uses || for string concatenation
     }
 
+    public function getMaskingSql(string $columnName, string $maskChar = '*', int $visibleStart = 0, int $visibleEnd = 4, ?string $customMask = null): string
+    {
+        if ($customMask !== null) {
+            return str_replace('{column}', $columnName, $customMask);
+        }
+
+        $quotedCol = $this->escapeIdentifier($columnName);
+        $maskCharEscaped = str_replace("'", "''", $maskChar);
+        
+        // PostgreSQL masking: CONCAT + REPEAT + SUBSTRING
+        if ($visibleStart > 0 && $visibleEnd > 0) {
+            return "CONCAT(" .
+                   "SUBSTRING({$quotedCol}, 1, {$visibleStart}), " .
+                   "REPEAT('{$maskCharEscaped}', GREATEST(0, LENGTH({$quotedCol})::INTEGER - {$visibleStart} - {$visibleEnd})), " .
+                   "SUBSTRING({$quotedCol}, LENGTH({$quotedCol})::INTEGER - {$visibleEnd} + 1)" .
+                   ")";
+        } elseif ($visibleStart > 0) {
+            return "CONCAT(" .
+                   "SUBSTRING({$quotedCol}, 1, {$visibleStart}), " .
+                   "REPEAT('{$maskCharEscaped}', GREATEST(0, LENGTH({$quotedCol})::INTEGER - {$visibleStart}))" .
+                   ")";
+        } elseif ($visibleEnd > 0) {
+            return "CONCAT(" .
+                   "REPEAT('{$maskCharEscaped}', GREATEST(0, LENGTH({$quotedCol})::INTEGER - {$visibleEnd})), " .
+                   "SUBSTRING({$quotedCol}, LENGTH({$quotedCol})::INTEGER - {$visibleEnd} + 1)" .
+                   ")";
+        } else {
+            return "REPEAT('{$maskCharEscaped}', LENGTH({$quotedCol}))";
+        }
+    }
+
     private function escapeValue($value): string
     {
         if ($value === null) {

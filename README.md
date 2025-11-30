@@ -86,6 +86,7 @@ DatabaseProviderFactory::register(new OracleProvider());
    - Join / Left Join
    - **JoinRaw** - Join with raw SQL (derived tables, CTEs, date generation queries, etc.)
    - Raw SQL (FromSqlRaw)
+   - **SensitiveValue** - SQL seviyesinde hassas veri maskeleme (kredi kartı, SSN vb.)
    - **Advanced Expression Tree Parsing**
      - Complex WHERE clause support (AND, OR, NOT)
      - **String Methods**: Contains, StartsWith, EndsWith, ToLower, ToUpper, Length, Substring, Trim, LTrim, RTrim, Replace
@@ -692,6 +693,161 @@ $results = $context->Orders()
 3. **Join Type**: 'LEFT', 'INNER', 'RIGHT', 'FULL' join tiplerini kullanabilirsiniz
 4. **Parametreler**: Raw SQL'de parametreler kullanıyorsanız, `joinRaw` metodunun son parametresine dizi olarak geçebilirsiniz
 5. **SQL Injection**: Parametreli sorgular kullanarak SQL injection'dan korunun
+
+### SensitiveValue - Hassas Veri Maskeleme
+
+`SensitiveValue` attribute'u ile hassas verileri (kredi kartı, SSN, telefon numarası vb.) SQL sorgusu seviyesinde maskelayabilirsiniz. Maskeleme doğrudan SQL'de yapılır, böylece hassas veriler uygulama koduna hiç maskelenmemiş olarak gelmez.
+
+#### Entity'de Kullanım
+
+```php
+use Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\SensitiveValue;
+
+class User
+{
+    public int $Id;
+    
+    public string $FirstName;
+    public string $LastName;
+    
+    // Kredi kartı: İlk 0 karakter, son 4 karakter gösterilir
+    // Örnek: "1234-5678-9012-3456" -> "************3456"
+    #[SensitiveValue(maskChar: '*', visibleStart: 0, visibleEnd: 4)]
+    public string $CreditCard;
+    
+    // SSN: İlk 2 karakter, son 2 karakter gösterilir
+    // Örnek: "123-45-6789" -> "12*****89"
+    #[SensitiveValue(maskChar: '*', visibleStart: 2, visibleEnd: 2)]
+    public string $SSN;
+    
+    // Telefon numarası: Sadece son 4 rakam gösterilir
+    #[SensitiveValue(maskChar: 'X', visibleStart: 0, visibleEnd: 4)]
+    public string $PhoneNumber;
+}
+```
+
+#### Maskeleme Parametreleri
+
+- **maskChar**: Maskeleme için kullanılacak karakter (varsayılan: `'*'`)
+- **visibleStart**: Baştan gösterilecek karakter sayısı (varsayılan: `0`)
+- **visibleEnd**: Sondan gösterilecek karakter sayısı (varsayılan: `4`)
+- **customMask**: Özel SQL ifadesi (diğer seçenekleri geçersiz kılar)
+
+#### Normal Sorgu - Maskelenmiş Veri
+
+```php
+use App\EntityFramework\ApplicationDbContext;
+
+$context = new ApplicationDbContext();
+
+// Normal sorgu - hassas veriler maskelenmiş gelir
+$users = $context->Users()->toList();
+
+foreach ($users as $user) {
+    echo $user->CreditCard; // "************3456"
+    echo $user->SSN;        // "12*****89"
+    echo $user->PhoneNumber; // "XXXXXXX1234"
+}
+```
+
+#### disableSensitive() ile Maskelenmemiş Veri
+
+```php
+// disableSensitive() çağrıldığında maskeleme devre dışı kalır
+$users = $context->Users()
+    ->disableSensitive()
+    ->toList();
+
+foreach ($users as $user) {
+    echo $user->CreditCard; // "1234-5678-9012-3456" (maskelenmemiş)
+    echo $user->SSN;        // "123-45-6789" (maskelenmemiş)
+}
+```
+
+#### Filtreleme ile Birlikte Kullanım
+
+```php
+// Maskeleme aktif, filtreleme yapılabilir
+$user = $context->Users()
+    ->where(fn($u) => $u->Id === 1)
+    ->firstOrDefault();
+
+// Sonuçta CreditCard maskelenmiş gelir
+echo $user->CreditCard; // "************3456"
+
+// disableSensitive() ile maskelenmemiş veri
+$user = $context->Users()
+    ->where(fn($u) => $u->Id === 1)
+    ->disableSensitive()
+    ->firstOrDefault();
+
+echo $user->CreditCard; // "1234-5678-9012-3456"
+```
+
+#### Repository Pattern ile Kullanım
+
+```php
+use Yakupeyisan\CodeIgniter4\EntityFramework\Repository\UnitOfWork;
+
+$context = new ApplicationDbContext();
+$unitOfWork = new UnitOfWork($context);
+$userRepo = $unitOfWork->getRepository(User::class);
+
+// Normal sorgu - maskelenmiş
+$users = $userRepo->getAll()->toList();
+
+// getAllDisableSensitive() ile maskelenmemiş
+$users = $userRepo->getAllDisableSensitive()->toList();
+```
+
+#### Özel Maskeleme SQL'i
+
+```php
+class User
+{
+    // Özel SQL maskeleme ifadesi
+    #[SensitiveValue(customMask: "SUBSTRING({column}, 1, 1) + REPLICATE('*', LEN({column}) - 2) + SUBSTRING({column}, LEN({column}), 1)")]
+    public string $Email;
+}
+```
+
+**Not**: `{column}` placeholder'ı kolon adı ile değiştirilir.
+
+#### Veritabanı Desteği
+
+Maskeleme tüm desteklenen veritabanlarında çalışır:
+- **SQL Server**: `LEFT`, `REPLICATE`, `RIGHT` fonksiyonları
+- **MySQL**: `SUBSTRING`, `REPEAT`, `CONCAT` fonksiyonları
+- **PostgreSQL**: `SUBSTRING`, `REPEAT`, `CONCAT` fonksiyonları
+- **SQLite**: `substr`, `zeroblob`, `replace` fonksiyonları
+
+#### Güvenlik Notları
+
+1. **Varsayılan Davranış**: Varsayılan olarak hassas veriler maskelenmiş gelir
+2. **Açık İzin**: `disableSensitive()` açıkça çağrılmadığı sürece maskeleme aktif kalır
+3. **SQL Seviyesi**: Maskeleme SQL sorgusu seviyesinde yapılır, uygulama katmanında değil
+4. **Performans**: Maskeleme SQL'de yapıldığı için ek performans maliyeti minimaldir
+5. **Audit Log**: Maskelenmemiş verilere erişim için `disableSensitive()` kullanımını loglayın
+
+#### Maskeleme Örnekleri
+
+```php
+// Sadece son 4 karakter göster
+#[SensitiveValue(visibleStart: 0, visibleEnd: 4)]
+public string $AccountNumber; // "1234567890" -> "******7890"
+
+// İlk 3 ve son 3 karakter göster
+#[SensitiveValue(visibleStart: 3, visibleEnd: 3)]
+public string $Password; // "mySecretPassword123" -> "myS***********123"
+
+// Tamamen maskele
+#[SensitiveValue(visibleStart: 0, visibleEnd: 0)]
+public string $SecretKey; // "abc123xyz" -> "*********"
+
+// Farklı maskeleme karakteri
+#[SensitiveValue(maskChar: 'X', visibleStart: 0, visibleEnd: 4)]
+public string $PIN; // "123456" -> "XX3456"
+```
 
 ### Repository Pattern
 
