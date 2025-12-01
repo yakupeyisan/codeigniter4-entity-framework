@@ -704,10 +704,13 @@ class AdvancedQueryBuilder
                 $sensitiveAttributes = $property->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\SensitiveValue::class);
                 if (!empty($sensitiveAttributes)) {
                     $hasSensitiveColumns = true;
+                    log_message('debug', "Found sensitive column: {$colInfo['property']} -> {$colInfo['column']}");
                     break;
                 }
             }
         }
+        
+        log_message('debug', "hasSensitiveColumns: " . ($hasSensitiveColumns ? 'true' : 'false') . ", isSensitive: " . ($this->isSensitive ? 'true' : 'false'));
         
         // If has sensitive columns, build SQL manually with masking
         if ($hasSensitiveColumns) {
@@ -772,7 +775,6 @@ class AdvancedQueryBuilder
     private function executeQueryWithMasking(array $columnsWithProperties, ReflectionClass $entityReflection): array
     {
         $tableName = $this->context->getTableName($this->entityType);
-        $quotedTableName = $this->connection->escapeIdentifiers($tableName);
         $mainAlias = 'main';
         $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
         
@@ -782,14 +784,17 @@ class AdvancedQueryBuilder
             $property = $entityReflection->getProperty($colInfo['property']);
             $sensitiveAttributes = $property->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\SensitiveValue::class);
             
-            $quotedCol = $this->connection->escapeIdentifiers($colInfo['column']);
-            $quotedAlias = $this->connection->escapeIdentifiers($mainAlias);
+            // Use provider's escapeIdentifier for database-specific formatting
+            $quotedCol = $provider->escapeIdentifier($colInfo['column']);
+            $quotedAlias = $provider->escapeIdentifier($mainAlias);
             
             if (!empty($sensitiveAttributes) && !$this->isSensitive) {
                 // Apply masking
                 $sensitiveAttr = $sensitiveAttributes[0]->newInstance();
+                // Build column reference with proper escaping
+                $columnRef = "{$quotedAlias}.{$quotedCol}";
                 $maskedExpression = $provider->getMaskingSql(
-                    "{$quotedAlias}.{$quotedCol}",
+                    $columnRef,
                     $sensitiveAttr->maskChar,
                     $sensitiveAttr->visibleStart,
                     $sensitiveAttr->visibleEnd,
@@ -804,7 +809,13 @@ class AdvancedQueryBuilder
         
         // Build SQL
         $sql = "SELECT " . implode(', ', $selectColumns) . "\n";
-        $sql .= "FROM {$quotedTableName} AS {$quotedAlias}";
+        // Use provider's escapeIdentifier for table and alias to ensure correct format
+        $quotedTableName = $provider->escapeIdentifier($tableName);
+        $quotedAliasForFrom = $provider->escapeIdentifier($mainAlias);
+        $sql .= "FROM {$quotedTableName} AS {$quotedAliasForFrom}";
+        
+        // Debug log
+        log_message('debug', 'SensitiveValue masking SQL: ' . substr($sql, 0, 500));
         
         // Build WHERE clauses
         $whereConditions = [];
@@ -866,8 +877,8 @@ class AdvancedQueryBuilder
     private function executeQueryWithRawJoins(): array
     {
         $tableName = $this->context->getTableName($this->entityType);
-        $quotedTableName = $this->connection->escapeIdentifiers($tableName);
         $mainAlias = 'main';
+        $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
         
         // Get entity columns
         $entityReflection = new ReflectionClass($this->entityType);
@@ -875,24 +886,25 @@ class AdvancedQueryBuilder
         
         // Build SELECT columns
         $selectColumns = [];
+        $quotedMainAlias = $provider->escapeIdentifier($mainAlias);
         foreach ($entityColumns as $col) {
-            $quotedCol = $this->connection->escapeIdentifiers($col);
-            $selectColumns[] = "[{$mainAlias}].{$quotedCol}";
+            $quotedCol = $provider->escapeIdentifier($col);
+            $selectColumns[] = "{$quotedMainAlias}.{$quotedCol}";
         }
         
         // Add all columns from raw joins (prefixed with alias)
         // Users can access them in the result set
         foreach ($this->rawJoins as $rawJoin) {
             $alias = $rawJoin['alias'];
-            $quotedAlias = $this->connection->escapeIdentifiers($alias);
-            // Select all columns from raw join using alias.*
-            // The actual column names will depend on the raw SQL query
-            $selectColumns[] = "[{$quotedAlias}].*";
+            // Use provider's escapeIdentifier for database-specific formatting
+            $quotedRawAlias = $provider->escapeIdentifier($alias);
+            $selectColumns[] = "{$quotedRawAlias}.*";
         }
         
         // Build FROM clause
+        $quotedTableName = $provider->escapeIdentifier($tableName);
         $sql = "SELECT " . implode(', ', $selectColumns) . "\n";
-        $sql .= "FROM {$quotedTableName} AS [{$mainAlias}]";
+        $sql .= "FROM {$quotedTableName} AS {$quotedMainAlias}";
         
         // Add raw joins
         foreach ($this->rawJoins as $rawJoin) {
@@ -900,9 +912,10 @@ class AdvancedQueryBuilder
             $alias = $rawJoin['alias'];
             $joinCondition = $rawJoin['joinCondition'];
             $joinType = $rawJoin['joinType'];
-            $quotedAlias = $this->connection->escapeIdentifiers($alias);
+            // Use provider's escapeIdentifier for database-specific formatting
+            $quotedRawAlias = $provider->escapeIdentifier($alias);
             
-            $sql .= "\n{$joinType} JOIN ({$rawSql}) AS [{$quotedAlias}] ON {$joinCondition}";
+            $sql .= "\n{$joinType} JOIN ({$rawSql}) AS {$quotedRawAlias} ON {$joinCondition}";
         }
         
         // Build WHERE clauses (simple ones)
@@ -2076,12 +2089,38 @@ class AdvancedQueryBuilder
         // Get all entity columns
         $entityReflection = new ReflectionClass($this->entityType);
         $entityColumns = $this->getEntityColumns($entityReflection);
+        $columnsWithProperties = $this->getEntityColumnsWithProperties($entityReflection);
         
-        // Build main subquery SELECT columns
+        // Build main subquery SELECT columns with masking support
         $mainSelectColumns = [];
         $columnIndex = 0;
-        foreach ($entityColumns as $col) {
-            $mainSelectColumns[] = "[{$mainAlias}].[{$col}]";
+        $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
+        
+        foreach ($columnsWithProperties as $colInfo) {
+            $col = $colInfo['column'];
+            $property = $entityReflection->getProperty($colInfo['property']);
+            $sensitiveAttributes = $property->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\SensitiveValue::class);
+            
+            // Use provider's escapeIdentifier for database-specific formatting
+            $quotedCol = $provider->escapeIdentifier($col);
+            $quotedAlias = $provider->escapeIdentifier($mainAlias);
+            
+            if (!empty($sensitiveAttributes) && !$this->isSensitive) {
+                // Apply masking
+                $sensitiveAttr = $sensitiveAttributes[0]->newInstance();
+                $columnRef = "{$quotedAlias}.{$quotedCol}";
+                $maskedExpression = $provider->getMaskingSql(
+                    $columnRef,
+                    $sensitiveAttr->maskChar,
+                    $sensitiveAttr->visibleStart,
+                    $sensitiveAttr->visibleEnd,
+                    $sensitiveAttr->customMask
+                );
+                $mainSelectColumns[] = "({$maskedExpression}) AS {$quotedCol}";
+            } else {
+                // No masking
+                $mainSelectColumns[] = "{$quotedAlias}.{$quotedCol}";
+            }
         }
         
         // Add reference navigation columns (from includes and WHERE filters)
@@ -2093,16 +2132,39 @@ class AdvancedQueryBuilder
                 $refAlias = $this->getTableAlias($navPath, $referenceNavIndex);
                 $referenceNavAliases[$navPath] = $refAlias;
                 $refEntityReflection = new ReflectionClass($navInfo['entityType']);
-                $refColumns = $this->getEntityColumns($refEntityReflection);
+                $refColumnsWithProperties = $this->getEntityColumnsWithProperties($refEntityReflection);
                 
                 // First column gets alias Id0, Id1, etc.
                 $firstCol = true;
-                foreach ($refColumns as $col) {
+                $quotedRefAlias = $provider->escapeIdentifier($refAlias);
+                foreach ($refColumnsWithProperties as $colInfo) {
+                    $col = $colInfo['column'];
+                    $property = $refEntityReflection->getProperty($colInfo['property']);
+                    $sensitiveAttributes = $property->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\SensitiveValue::class);
+                    
+                    $quotedRefCol = $provider->escapeIdentifier($col);
+                    
                     if ($firstCol && $col === 'Id') {
-                        $mainSelectColumns[] = "[{$refAlias}].[{$col}] AS [Id{$referenceNavIndex}]";
+                        $quotedIdAlias = $provider->escapeIdentifier("Id{$referenceNavIndex}");
+                        $mainSelectColumns[] = "{$quotedRefAlias}.{$quotedRefCol} AS {$quotedIdAlias}";
                         $firstCol = false;
                     } else {
-                        $mainSelectColumns[] = "[{$refAlias}].[{$col}]";
+                        // Apply masking for sensitive columns in reference navigation
+                        if (!empty($sensitiveAttributes) && !$this->isSensitive) {
+                            $sensitiveAttr = $sensitiveAttributes[0]->newInstance();
+                            $columnRef = "{$quotedRefAlias}.{$quotedRefCol}";
+                            $maskedExpression = $provider->getMaskingSql(
+                                $columnRef,
+                                $sensitiveAttr->maskChar,
+                                $sensitiveAttr->visibleStart,
+                                $sensitiveAttr->visibleEnd,
+                                $sensitiveAttr->customMask
+                            );
+                            $mainSelectColumns[] = "({$maskedExpression}) AS {$quotedRefCol}";
+                        } else {
+                            // No masking
+                            $mainSelectColumns[] = "{$quotedRefAlias}.{$quotedRefCol}";
+                        }
                     }
                 }
                 $referenceNavIndex++;
@@ -2110,7 +2172,9 @@ class AdvancedQueryBuilder
         }
         
         // Build main subquery FROM and JOINs
-        $mainFrom = "FROM [{$tableName}] AS [{$mainAlias}]";
+        $quotedTableName = $provider->escapeIdentifier($tableName);
+        $quotedMainAlias = $provider->escapeIdentifier($mainAlias);
+        $mainFrom = "FROM {$quotedTableName} AS {$quotedMainAlias}";
         $mainJoins = [];
         
         // Add JOINs for reference navigations (many-to-one, one-to-one)
@@ -2121,7 +2185,9 @@ class AdvancedQueryBuilder
                 $refTableName = $this->context->getTableName($navInfo['entityType']);
                 $joinCondition = $this->buildJoinCondition($mainAlias, $refAlias, $navPath, $navInfo);
                 $joinType = $this->getJoinType($navPath, $navInfo);
-                $mainJoins[] = "{$joinType} [{$refTableName}] AS [{$refAlias}] ON {$joinCondition}";
+                $quotedRefTableName = $provider->escapeIdentifier($refTableName);
+                $quotedRefAlias = $provider->escapeIdentifier($refAlias);
+                $mainJoins[] = "{$joinType} {$quotedRefTableName} AS {$quotedRefAlias} ON {$joinCondition}";
             }
         }
         
@@ -2681,19 +2747,28 @@ class AdvancedQueryBuilder
     {
         $entityReflection = new ReflectionClass($this->entityType);
         $foreignKey = $navInfo['foreignKey'];
+        $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
         
         // Check if FK is in main entity (many-to-one) or related entity (one-to-one)
         if ($entityReflection->hasProperty($foreignKey)) {
             // Many-to-one: FK in main entity
             $fkColumn = $this->getColumnNameFromProperty($entityReflection, $foreignKey);
             $refIdColumn = 'Id';
-            return "[{$mainAlias}].[{$fkColumn}] = [{$refAlias}].[{$refIdColumn}]";
+            $quotedMainAlias = $provider->escapeIdentifier($mainAlias);
+            $quotedFkColumn = $provider->escapeIdentifier($fkColumn);
+            $quotedRefAlias = $provider->escapeIdentifier($refAlias);
+            $quotedRefIdColumn = $provider->escapeIdentifier($refIdColumn);
+            return "{$quotedMainAlias}.{$quotedFkColumn} = {$quotedRefAlias}.{$quotedRefIdColumn}";
         } else {
             // One-to-one: FK in related entity
             $refEntityReflection = new ReflectionClass($navInfo['entityType']);
             $fkColumn = $this->getColumnNameFromProperty($refEntityReflection, $foreignKey);
             $mainIdColumn = 'Id';
-            return "[{$refAlias}].[{$fkColumn}] = [{$mainAlias}].[{$mainIdColumn}]";
+            $quotedRefAlias = $provider->escapeIdentifier($refAlias);
+            $quotedFkColumn = $provider->escapeIdentifier($fkColumn);
+            $quotedMainAlias = $provider->escapeIdentifier($mainAlias);
+            $quotedMainIdColumn = $provider->escapeIdentifier($mainIdColumn);
+            return "{$quotedRefAlias}.{$quotedFkColumn} = {$quotedMainAlias}.{$quotedMainIdColumn}";
         }
     }
 
@@ -2750,23 +2825,50 @@ class AdvancedQueryBuilder
         $joinEntityReflection = new ReflectionClass($joinEntityType);
         $joinColumns = $this->getEntityColumns($joinEntityReflection);
         $relatedEntityReflection = new ReflectionClass($relatedEntityType);
-        $relatedColumns = $this->getEntityColumns($relatedEntityReflection);
+        $relatedColumnsWithProperties = $this->getEntityColumnsWithProperties($relatedEntityReflection);
+        
+        $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
         
         log_message('debug', "buildCollectionSubquery: Join entity: {$joinEntityType}, Related entity: {$relatedEntityType}");
         
         // Build SELECT
         $selectColumns = [];
+        $quotedJoinAlias = $provider->escapeIdentifier($joinAlias);
         foreach ($joinColumns as $col) {
-            $selectColumns[] = "[{$joinAlias}].[{$col}]";
+            $quotedJoinCol = $provider->escapeIdentifier($col);
+            $selectColumns[] = "{$quotedJoinAlias}.{$quotedJoinCol}";
         }
         $relatedIdx = 0;
         $firstCol = true;
-        foreach ($relatedColumns as $col) {
+        $quotedRelatedAlias = $provider->escapeIdentifier($relatedAlias);
+        foreach ($relatedColumnsWithProperties as $colInfo) {
+            $col = $colInfo['column'];
+            $property = $relatedEntityReflection->getProperty($colInfo['property']);
+            $sensitiveAttributes = $property->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\SensitiveValue::class);
+            
+            $quotedRelatedCol = $provider->escapeIdentifier($col);
+            
             if ($firstCol && $col === 'Id') {
-                $selectColumns[] = "[{$relatedAlias}].[{$col}] AS [Id{$relatedIdx}]";
+                $quotedIdAlias = $provider->escapeIdentifier("Id{$relatedIdx}");
+                $selectColumns[] = "{$quotedRelatedAlias}.{$quotedRelatedCol} AS {$quotedIdAlias}";
                 $firstCol = false;
             } else {
-                $selectColumns[] = "[{$relatedAlias}].[{$col}]";
+                // Apply masking for sensitive columns in related entity
+                if (!empty($sensitiveAttributes) && !$this->isSensitive) {
+                    $sensitiveAttr = $sensitiveAttributes[0]->newInstance();
+                    $columnRef = "{$quotedRelatedAlias}.{$quotedRelatedCol}";
+                    $maskedExpression = $provider->getMaskingSql(
+                        $columnRef,
+                        $sensitiveAttr->maskChar,
+                        $sensitiveAttr->visibleStart,
+                        $sensitiveAttr->visibleEnd,
+                        $sensitiveAttr->customMask
+                    );
+                    $selectColumns[] = "({$maskedExpression}) AS {$quotedRelatedCol}";
+                } else {
+                    // No masking
+                    $selectColumns[] = "{$quotedRelatedAlias}.{$quotedRelatedCol}";
+                }
             }
         }
         
@@ -2842,7 +2944,9 @@ class AdvancedQueryBuilder
         
         $joinFkColumn = $this->getColumnNameFromProperty($joinEntityReflection, $joinFk);
         log_message('debug', "buildCollectionSubquery: Using FK column: {$joinFkColumn} for join condition");
-        $joinCondition = "[{$joinAlias}].[{$joinFkColumn}] = [{$relatedAlias}].[Id]";
+        $quotedJoinFkColumn = $provider->escapeIdentifier($joinFkColumn);
+        $quotedRelatedId = $provider->escapeIdentifier('Id');
+        $joinCondition = "{$quotedJoinAlias}.{$quotedJoinFkColumn} = {$quotedRelatedAlias}.{$quotedRelatedId}";
         
         // Build nested subqueries for thenIncludes
         $nestedSubqueries = [];
@@ -2927,9 +3031,11 @@ class AdvancedQueryBuilder
         $allSelectColumns = array_merge($selectColumns, $nestedSelectColumns);
         
         // Build SQL with nested subqueries
+        $quotedJoinTableName = $provider->escapeIdentifier($joinTableName);
+        $quotedRelatedTableName = $provider->escapeIdentifier($relatedTableName);
         $sql = "SELECT " . implode(', ', $allSelectColumns) . "\n"
-            . "FROM [{$joinTableName}] AS [{$joinAlias}]\n"
-            . "INNER JOIN [{$relatedTableName}] AS [{$relatedAlias}] ON {$joinCondition}";
+            . "FROM {$quotedJoinTableName} AS {$quotedJoinAlias}\n"
+            . "INNER JOIN {$quotedRelatedTableName} AS {$quotedRelatedAlias} ON {$joinCondition}";
         
         // Add nested subquery LEFT JOINs
         if (!empty($nestedSubqueryJoins)) {
@@ -2975,21 +3081,48 @@ class AdvancedQueryBuilder
         // Get columns
         $joinColumns = $this->getEntityColumns($joinEntityReflection);
         $relatedEntityReflection = new ReflectionClass($relatedEntityType);
-        $relatedColumns = $this->getEntityColumns($relatedEntityReflection);
+        $relatedColumnsWithProperties = $this->getEntityColumnsWithProperties($relatedEntityReflection);
+        
+        $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
         
         // Build SELECT
         $selectColumns = [];
+        $quotedJoinAlias = $provider->escapeIdentifier($joinAlias);
         foreach ($joinColumns as $col) {
-            $selectColumns[] = "[{$joinAlias}].[{$col}]";
+            $quotedJoinCol = $provider->escapeIdentifier($col);
+            $selectColumns[] = "{$quotedJoinAlias}.{$quotedJoinCol}";
         }
         $relatedIdx = 0;
         $firstCol = true;
-        foreach ($relatedColumns as $col) {
+        $quotedRelatedAlias = $provider->escapeIdentifier($relatedAlias);
+        foreach ($relatedColumnsWithProperties as $colInfo) {
+            $col = $colInfo['column'];
+            $property = $relatedEntityReflection->getProperty($colInfo['property']);
+            $sensitiveAttributes = $property->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\SensitiveValue::class);
+            
+            $quotedRelatedCol = $provider->escapeIdentifier($col);
+            
             if ($firstCol && $col === 'Id') {
-                $selectColumns[] = "[{$relatedAlias}].[{$col}] AS [Id{$relatedIdx}]";
+                $quotedIdAlias = $provider->escapeIdentifier("Id{$relatedIdx}");
+                $selectColumns[] = "{$quotedRelatedAlias}.{$quotedRelatedCol} AS {$quotedIdAlias}";
                 $firstCol = false;
             } else {
-                $selectColumns[] = "[{$relatedAlias}].[{$col}]";
+                // Apply masking for sensitive columns in related entity
+                if (!empty($sensitiveAttributes) && !$this->isSensitive) {
+                    $sensitiveAttr = $sensitiveAttributes[0]->newInstance();
+                    $columnRef = "{$quotedRelatedAlias}.{$quotedRelatedCol}";
+                    $maskedExpression = $provider->getMaskingSql(
+                        $columnRef,
+                        $sensitiveAttr->maskChar,
+                        $sensitiveAttr->visibleStart,
+                        $sensitiveAttr->visibleEnd,
+                        $sensitiveAttr->customMask
+                    );
+                    $selectColumns[] = "({$maskedExpression}) AS {$quotedRelatedCol}";
+                } else {
+                    // No masking
+                    $selectColumns[] = "{$quotedRelatedAlias}.{$quotedRelatedCol}";
+                }
             }
         }
         
@@ -3000,14 +3133,18 @@ class AdvancedQueryBuilder
         
         if ($joinEntityReflection->hasProperty($joinFk)) {
             $joinFkColumn = $this->getColumnNameFromProperty($joinEntityReflection, $joinFk);
-            $joinCondition = "[{$joinAlias}].[{$joinFkColumn}] = [{$relatedAlias}].[Id]";
+            $quotedJoinFkColumn = $provider->escapeIdentifier($joinFkColumn);
+            $quotedRelatedId = $provider->escapeIdentifier('Id');
+            $joinCondition = "{$quotedJoinAlias}.{$quotedJoinFkColumn} = {$quotedRelatedAlias}.{$quotedRelatedId}";
         } else {
             return null;
         }
         
+        $quotedJoinTableName = $provider->escapeIdentifier($joinTableName);
+        $quotedRelatedTableName = $provider->escapeIdentifier($relatedTableName);
         $sql = "SELECT " . implode(', ', $selectColumns) . "\n"
-            . "FROM [{$joinTableName}] AS [{$joinAlias}]\n"
-            . "INNER JOIN [{$relatedTableName}] AS [{$relatedAlias}] ON {$joinCondition}";
+            . "FROM {$quotedJoinTableName} AS {$quotedJoinAlias}\n"
+            . "INNER JOIN {$quotedRelatedTableName} AS {$quotedRelatedAlias} ON {$joinCondition}";
         
         return [
             'navigation' => $navPath,

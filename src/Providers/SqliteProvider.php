@@ -141,7 +141,9 @@ class SqliteProvider implements DatabaseProvider
             return str_replace('{column}', $columnName, $customMask);
         }
 
-        $quotedCol = $this->escapeIdentifier($columnName);
+        // Column name is already escaped (e.g., "main"."FirstName")
+        // Don't escape again, use as is
+        $quotedCol = $columnName;
         $maskCharEscaped = str_replace("'", "''", $maskChar);
         
         // SQLite masking: substr + printf (for repeating)

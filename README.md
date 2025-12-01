@@ -720,6 +720,11 @@ class User
     #[SensitiveValue(maskChar: '*', visibleStart: 2, visibleEnd: 2)]
     public string $SSN;
     
+    // İsim: İlk 2 karakter gösterilir, gerisi maskelenir
+    // Örnek: "John" -> "Jo**", "Fatma" -> "Fa***"
+    #[SensitiveValue(maskChar: '*', visibleStart: 2, visibleEnd: 0)]
+    public string $FirstName;
+    
     // Telefon numarası: Sadece son 4 rakam gösterilir
     #[SensitiveValue(maskChar: 'X', visibleStart: 0, visibleEnd: 4)]
     public string $PhoneNumber;
@@ -730,8 +735,15 @@ class User
 
 - **maskChar**: Maskeleme için kullanılacak karakter (varsayılan: `'*'`)
 - **visibleStart**: Baştan gösterilecek karakter sayısı (varsayılan: `0`)
+  - Örnek: `visibleStart: 2` -> "John" -> "Jo**"
 - **visibleEnd**: Sondan gösterilecek karakter sayısı (varsayılan: `4`)
+  - Örnek: `visibleEnd: 2` -> "John" -> "**hn"
 - **customMask**: Özel SQL ifadesi (diğer seçenekleri geçersiz kılar)
+
+**Örnekler:**
+- `visibleStart: 2, visibleEnd: 0` -> "John" -> "Jo**", "Fatma" -> "Fa***"
+- `visibleStart: 0, visibleEnd: 4` -> "John" -> "****", "1234-5678-9012-3456" -> "************3456"
+- `visibleStart: 2, visibleEnd: 2` -> "John" -> "Jo**hn", "Fatma" -> "Fa**ma"
 
 #### Normal Sorgu - Maskelenmiş Veri
 
@@ -832,6 +844,10 @@ Maskeleme tüm desteklenen veritabanlarında çalışır:
 #### Maskeleme Örnekleri
 
 ```php
+// İlk 2 karakter göster, gerisi maskelenir
+#[SensitiveValue(visibleStart: 2, visibleEnd: 0)]
+public string $FirstName; // "John" -> "Jo**", "Fatma" -> "Fa***"
+
 // Sadece son 4 karakter göster
 #[SensitiveValue(visibleStart: 0, visibleEnd: 4)]
 public string $AccountNumber; // "1234567890" -> "******7890"
