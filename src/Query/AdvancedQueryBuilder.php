@@ -1345,7 +1345,9 @@ class AdvancedQueryBuilder
                 log_message('debug', 'Variable values: ' . json_encode($variableValues));
                 
                 // Only apply if we have a valid condition (not empty after cleanup)
-                if (!empty($sqlCondition) && !preg_match('/^[\s->]*$/', $sqlCondition)) {
+                // Check if condition is not just whitespace or -> operators
+                $isValid = !empty($sqlCondition) && trim($sqlCondition) !== '' && strpos($sqlCondition, '->') === false;
+                if ($isValid) {
                     // Get parameter values for binding
                     $paramValues = $parser->getParameterValues();
                     

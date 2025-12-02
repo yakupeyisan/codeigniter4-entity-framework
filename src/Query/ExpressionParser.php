@@ -78,9 +78,30 @@ class ExpressionParser
         
         // If the code contains ->where, ->and, ->or, etc., extract just the lambda part
         // Pattern: ->where(fn($e) => $e->Id === $id) or ->where(function($e) { return $e->Id === $id; })
+        // Also handle multi-line expressions like: ->where(fn($e) => $e->{$this->primaryKey} === (int)$id)
         if (preg_match('/->(where|and|or|not)\s*\(\s*(?:fn|function)\s*\([^)]+\)\s*=>\s*(.+?)(?:\)|;|$)/s', $code, $matches)) {
             // Return just the lambda expression part, wrapped in fn() => format
             $lambdaBody = trim($matches[2]);
+            
+            // If the expression seems incomplete (ends with incomplete type cast or variable), try to get more lines
+            if (preg_match('/\(int\s*$|\(string\s*$|\(float\s*$|\(bool\s*$|\$\s*$/', $lambdaBody)) {
+                // Get a few more lines to complete the expression
+                $moreLines = array_slice($lines, $end - $start, 3);
+                $moreCode = implode('', $moreLines);
+                // Try to find the complete expression
+                if (preg_match('/(\(int\)\s*\$[a-zA-Z_][a-zA-Z0-9_]*)/', $moreCode, $completeMatches)) {
+                    $lambdaBody = str_replace('(int', $completeMatches[1], $lambdaBody);
+                } elseif (preg_match('/(\(string\)\s*\$[a-zA-Z_][a-zA-Z0-9_]*)/', $moreCode, $completeMatches)) {
+                    $lambdaBody = str_replace('(string', $completeMatches[1], $lambdaBody);
+                } elseif (preg_match('/(\(float\)\s*\$[a-zA-Z_][a-zA-Z0-9_]*)/', $moreCode, $completeMatches)) {
+                    $lambdaBody = str_replace('(float', $completeMatches[1], $lambdaBody);
+                } elseif (preg_match('/(\(bool\)\s*\$[a-zA-Z_][a-zA-Z0-9_]*)/', $moreCode, $completeMatches)) {
+                    $lambdaBody = str_replace('(bool', $completeMatches[1], $lambdaBody);
+                } elseif (preg_match('/(\$[a-zA-Z_][a-zA-Z0-9_]*)/', $moreCode, $completeMatches)) {
+                    $lambdaBody .= $completeMatches[1];
+                }
+            }
+            
             // Remove trailing closing parenthesis if present (from method chaining)
             $lambdaBody = rtrim($lambdaBody, ')');
             // Remove any trailing -> operators
@@ -132,6 +153,14 @@ class ExpressionParser
         // Handle parentheses FIRST
         if (preg_match('/^\((.*)\)$/', $expression, $matches)) {
             return '(' . $this->parseExpression($matches[1]) . ')';
+        }
+        
+        // Handle type casting first: (int)$id, (string)$value, etc.
+        if (preg_match('/^\((\w+)\)\s*(.+)$/', $expression, $castMatches)) {
+            $type = $castMatches[1];
+            $value = trim($castMatches[2]);
+            // Parse the value (ignore the cast, SQL will handle it)
+            return $this->parseExpression($value);
         }
         
         // Handle comparison operators FIRST (before arithmetic, because === has higher precedence than -)
@@ -537,11 +566,40 @@ class ExpressionParser
     }
 
     /**
-     * Parse property access (e.g., $x->Property)
+     * Parse property access (e.g., $x->Property or $x->{$variable})
      */
     private function parsePropertyAccess(string $expression): string
     {
         log_message('debug', "parsePropertyAccess - input: {$expression}");
+        
+        // Handle dynamic property access: $e->{$this->primaryKey}
+        if (preg_match('/^\$[a-zA-Z_][a-zA-Z0-9_]*->\{([^}]+)\}/', $expression, $dynamicMatches)) {
+            $dynamicProperty = trim($dynamicMatches[1]);
+            log_message('debug', "parsePropertyAccess - dynamic property detected: {$dynamicProperty}");
+            
+            // Try to extract property name from dynamic expression
+            // Pattern: $this->primaryKey or $variable->property
+            if (preg_match('/\$this->([a-zA-Z_][a-zA-Z0-9_]*)/', $dynamicProperty, $thisMatches)) {
+                $propertyName = $thisMatches[1];
+                log_message('debug', "parsePropertyAccess - extracted property from \$this->: {$propertyName}");
+            } elseif (preg_match('/\$([a-zA-Z_][a-zA-Z0-9_]*)/', $dynamicProperty, $varMatches)) {
+                // It's a variable - we can't resolve it at parse time
+                // Use a default property name (Id) or throw an error
+                log_message('warning', "parsePropertyAccess - cannot resolve dynamic property variable: {$dynamicProperty}");
+                $propertyName = 'Id'; // Fallback
+            } else {
+                // It's a literal property name
+                $propertyName = trim($dynamicProperty);
+                // Remove any remaining -> operators
+                $propertyName = preg_replace('/->/', '', $propertyName);
+                $propertyName = preg_replace('/[^A-Za-z0-9_]/', '', $propertyName);
+            }
+            
+            $columnName = $this->getColumnName($propertyName);
+            $result = "{$this->tableAlias}.{$columnName}";
+            log_message('debug', "parsePropertyAccess - dynamic property result: {$result}");
+            return $result;
+        }
         
         // Remove variable prefix ($x->, $u->, $e->, etc.)
         // Match: $variable->Property or $variable->Property->NestedProperty
@@ -591,6 +649,7 @@ class ExpressionParser
         }
         
         // Remove any remaining invalid characters (dots, dashes, etc. that shouldn't be in property name)
+        // But keep curly braces for dynamic properties
         $expression = preg_replace('/[^A-Za-z0-9_]/', '', $expression);
         
         // Get column name from property

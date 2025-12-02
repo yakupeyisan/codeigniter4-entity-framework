@@ -530,6 +530,53 @@ ERROR - Failed SQL Query: SELECT [main].[Id] FROM [Users] AS [main] WHERE main.I
 ```
 
 Bu tür hatalarda, sistem otomatik olarak `?` placeholder'larını kullanır ve değerleri güvenli bir şekilde SQL'e ekler.
+
+#### Dinamik Property Access ve Type Casting
+
+Lambda expression'larda dinamik property access ve type casting kullanabilirsiniz:
+
+```php
+// Dinamik property access
+$primaryKey = 'Id';
+$users = $context->Users()
+    ->where(fn($u) => $u->{$primaryKey} === 1)
+    ->toList();
+
+// Class property ile dinamik access
+class UserRepository {
+    protected $primaryKey = 'Id';
+    
+    public function getById($id) {
+        return $this->context->Users()
+            ->where(fn($u) => $u->{$this->primaryKey} === (int)$id)
+            ->firstOrDefault();
+    }
+}
+
+// Type casting desteği
+$id = "123"; // String olarak geliyor
+$user = $context->Users()
+    ->where(fn($u) => $u->Id === (int)$id)
+    ->firstOrDefault();
+
+// Farklı type casting'ler
+$users = $context->Users()
+    ->where(fn($u) => $u->Age === (float)$age)
+    ->where(fn($u) => $u->IsActive === (bool)$status)
+    ->where(fn($u) => $u->Name === (string)$name)
+    ->toList();
+```
+
+**Desteklenen Type Casting'ler:**
+- `(int)` - Integer'a çevirme
+- `(string)` - String'e çevirme
+- `(float)` - Float'a çevirme
+- `(bool)` - Boolean'a çevirme
+
+**Notlar:**
+- Type casting'ler SQL'e çevrilirken göz ardı edilir (SQL type conversion kullanılır)
+- Dinamik property access'lerde `$this->property` gibi ifadeler otomatik olarak parse edilir
+- Çok satırlı expression'lar desteklenir
 - Karmaşık expression'lar optimize edilmiş SQL üretir
 - Navigation property'ler için otomatik JOIN'ler oluşturulur
 - Index'ler kullanılarak performans optimize edilir
