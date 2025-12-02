@@ -497,6 +497,39 @@ $users = $context->Users()
 #### Performans Notları
 
 - Expression Tree Parsing otomatik olarak SQL'e çevrilir
+
+#### Lambda Expression'larda Değişken Kullanımı
+
+Lambda expression'larda closure'ın `use` clause'undaki değişkenleri kullanabilirsiniz:
+
+```php
+$id = 123;
+$status = 'Active';
+
+$users = $context->Users()
+    ->where(fn($u) => $u->Id === $id)
+    ->where(fn($u) => $u->Status === $status)
+    ->toList();
+```
+
+**Önemli Notlar:**
+
+1. **SQL Server Uyumluluğu**: Sistem SQL Server ile uyumlu olması için `?` placeholder'larını kullanır. Named parameter'lar (`:param_0` gibi) desteklenmez.
+
+2. **Değişken Değerleri**: Closure'ın `use` clause'undaki değişkenlerin değerleri otomatik olarak yakalanır ve SQL sorgusuna güvenli bir şekilde eklenir.
+
+3. **Hata Ayıklama**: SQL sorgularında hata oluştuğunda, hatalı SQL sorgusu otomatik olarak log'a yazılır. Bu sayede sorunları daha kolay tespit edebilirsiniz.
+
+4. **Güvenlik**: Tüm değişken değerleri SQL injection saldırılarına karşı korunur. String değerler otomatik olarak escape edilir.
+
+**Örnek Hata Log'u:**
+
+```
+ERROR - SQL Query Error: [Microsoft][ODBC Driver 17 for SQL Server][SQL Server]Incorrect syntax near ':'.
+ERROR - Failed SQL Query: SELECT [main].[Id] FROM [Users] AS [main] WHERE main.Id = :param_0
+```
+
+Bu tür hatalarda, sistem otomatik olarak `?` placeholder'larını kullanır ve değerleri güvenli bir şekilde SQL'e ekler.
 - Karmaşık expression'lar optimize edilmiş SQL üretir
 - Navigation property'ler için otomatik JOIN'ler oluşturulur
 - Index'ler kullanılarak performans optimize edilir

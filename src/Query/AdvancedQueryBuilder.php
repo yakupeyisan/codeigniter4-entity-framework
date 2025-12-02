@@ -330,9 +330,16 @@ class AdvancedQueryBuilder
     {
         if ($this->useRawSql) {
             $sql = "SELECT COUNT(*) as count FROM ({$this->rawSql}) as subquery";
-            $result = $this->connection->query($sql, $this->rawSqlParameters);
-            $row = $result->getRowArray();
-            return (int)($row['count'] ?? 0);
+            try {
+                $result = $this->connection->query($sql, $this->rawSqlParameters);
+                $row = $result->getRowArray();
+                return (int)($row['count'] ?? 0);
+            } catch (\Exception $e) {
+                log_message('error', 'SQL Query Error: ' . $e->getMessage());
+                log_message('error', 'Failed SQL Query: ' . $sql);
+                log_message('error', 'SQL Parameters: ' . json_encode($this->rawSqlParameters));
+                throw $e;
+            }
         }
 
         $tableName = $this->context->getTableName($this->entityType);
@@ -748,8 +755,15 @@ class AdvancedQueryBuilder
             }
         }
         
-        $query = $builder->get();
-        $results = $query->getResultArray();
+        try {
+            $query = $builder->get();
+            $results = $query->getResultArray();
+        } catch (\Exception $e) {
+            $sql = $builder->getCompiledSelect(false);
+            log_message('error', 'SQL Query Error: ' . $e->getMessage());
+            log_message('error', 'Failed SQL Query: ' . $sql);
+            throw $e;
+        }
         $entities = $this->mapToEntities($results);
         
         // Apply change tracking
@@ -819,12 +833,28 @@ class AdvancedQueryBuilder
         
         // Build WHERE clauses
         $whereConditions = [];
+        $whereParams = [];
         foreach ($this->wheres as $where) {
             try {
                 $parser = new ExpressionParser($this->entityType, $mainAlias);
+                
+                // Try to extract variable values from closure
+                $reflection = new \ReflectionFunction($where);
+                $staticVariables = $reflection->getStaticVariables();
+                $variableValues = [];
+                foreach ($staticVariables as $varName => $varValue) {
+                    if (!is_object($varValue) || !($varValue instanceof \Yakupeyisan\CodeIgniter4\EntityFramework\Core\Entity)) {
+                        $variableValues[$varName] = $varValue;
+                    }
+                }
+                $parser->setVariableValues($variableValues);
+                
                 $sqlCondition = $parser->parse($where);
                 if (!empty($sqlCondition)) {
                     $whereConditions[] = $sqlCondition;
+                    // Collect parameter values
+                    $paramValues = $parser->getParameterValues();
+                    $whereParams = array_merge($whereParams, $paramValues);
                 }
             } catch (\Exception $e) {
                 log_message('debug', 'Error parsing WHERE clause: ' . $e->getMessage());
@@ -850,8 +880,20 @@ class AdvancedQueryBuilder
         }
         
         // Execute query
-        $query = $this->connection->query($sql);
-        $results = $query->getResultArray();
+        try {
+        try {
+            $query = $this->connection->query($sql);
+            $results = $query->getResultArray();
+        } catch (\Exception $e) {
+            log_message('error', 'SQL Query Error: ' . $e->getMessage());
+            log_message('error', 'Failed SQL Query: ' . $sql);
+            throw $e;
+        }
+        } catch (\Exception $e) {
+            log_message('error', 'SQL Query Error: ' . $e->getMessage());
+            log_message('error', 'Failed SQL Query: ' . $sql);
+            throw $e;
+        }
         
         // Map to entities
         $entities = $this->mapToEntities($results);
@@ -951,8 +993,20 @@ class AdvancedQueryBuilder
         }
         
         // Execute query
-        $query = $this->connection->query($sql);
-        $results = $query->getResultArray();
+        try {
+        try {
+            $query = $this->connection->query($sql);
+            $results = $query->getResultArray();
+        } catch (\Exception $e) {
+            log_message('error', 'SQL Query Error: ' . $e->getMessage());
+            log_message('error', 'Failed SQL Query: ' . $sql);
+            throw $e;
+        }
+        } catch (\Exception $e) {
+            log_message('error', 'SQL Query Error: ' . $e->getMessage());
+            log_message('error', 'Failed SQL Query: ' . $sql);
+            throw $e;
+        }
         
         // Map to entities (simplified - may need adjustment)
         $entities = $this->mapToEntities($results);
@@ -1006,8 +1060,20 @@ class AdvancedQueryBuilder
         }
         
         // Execute raw SQL
-        $query = $this->connection->query($sql);
-        $results = $query->getResultArray();
+        try {
+        try {
+            $query = $this->connection->query($sql);
+            $results = $query->getResultArray();
+        } catch (\Exception $e) {
+            log_message('error', 'SQL Query Error: ' . $e->getMessage());
+            log_message('error', 'Failed SQL Query: ' . $sql);
+            throw $e;
+        }
+        } catch (\Exception $e) {
+            log_message('error', 'SQL Query Error: ' . $e->getMessage());
+            log_message('error', 'Failed SQL Query: ' . $sql);
+            throw $e;
+        }
         
         // Log actual SQL executed
         log_message('debug', 'EF Core Style SQL executed: ' . substr($sql, 0, 500) . '...');
@@ -1047,8 +1113,15 @@ class AdvancedQueryBuilder
      */
     private function executeRawSql(): array
     {
-        $query = $this->connection->query($this->rawSql, $this->rawSqlParameters);
-        $results = $query->getResultArray();
+        try {
+            $query = $this->connection->query($this->rawSql, $this->rawSqlParameters);
+            $results = $query->getResultArray();
+        } catch (\Exception $e) {
+            log_message('error', 'SQL Query Error: ' . $e->getMessage());
+            log_message('error', 'Failed SQL Query: ' . $this->rawSql);
+            log_message('error', 'SQL Parameters: ' . json_encode($this->rawSqlParameters));
+            throw $e;
+        }
         $entities = $this->mapToEntities($results);
         
         // Enable lazy loading for navigation properties
@@ -1189,19 +1262,149 @@ class AdvancedQueryBuilder
     {
         try {
             $parser = new ExpressionParser($this->entityType, $this->getTableAliasForParser());
+            
+            // Try to extract variable values from closure
+            $reflection = new \ReflectionFunction($predicate);
+            $staticVariables = $reflection->getStaticVariables();
+            
+            // Parse closure code to extract use() clause variables
+            $closureFile = $reflection->getFileName();
+            $closureStartLine = $reflection->getStartLine();
+            $closureEndLine = $reflection->getEndLine();
+            
+            $variableValues = [];
+            
+            // Try to get variables from static variables first
+            foreach ($staticVariables as $varName => $varValue) {
+                // Skip entity objects (they're the lambda parameter)
+                if (!is_object($varValue) || !($varValue instanceof \Yakupeyisan\CodeIgniter4\EntityFramework\Core\Entity)) {
+                    $variableValues[$varName] = $varValue;
+                }
+            }
+            
+            // Try to parse use() clause from closure code and extract variable names
+            $useVarNames = [];
+            if ($closureFile && file_exists($closureFile) && $closureStartLine && $closureEndLine) {
+                $lines = file($closureFile);
+                // Get a few lines before the closure to catch use() clause
+                $startLine = max(1, $closureStartLine - 5);
+                $endLine = min(count($lines), $closureEndLine);
+                $closureCode = implode('', array_slice($lines, $startLine - 1, $endLine - $startLine + 1));
+                
+                // Extract use() clause: pattern: use ($var1, $var2, ...) or fn($e) => $e->Id === $id (no use clause)
+                if (preg_match('/use\s*\(\s*([^)]+)\s*\)/', $closureCode, $useMatches)) {
+                    $useVars = preg_split('/\s*,\s*/', trim($useMatches[1]));
+                    foreach ($useVars as $useVar) {
+                        $useVar = trim($useVar);
+                        $varName = ltrim($useVar, '$');
+                        $useVarNames[] = $varName;
+                    }
+                } else {
+                    // No use() clause found - try to extract variable names from the expression itself
+                    // Pattern: fn($e) => $e->Id === $id (where $id is a variable in parent scope)
+                    if (preg_match('/=>\s*.+?\$([a-zA-Z_][a-zA-Z0-9_]*)/', $closureCode, $varMatches)) {
+                        // Check if it's not the lambda parameter ($e, $u, etc.)
+                        $possibleVarName = $varMatches[1];
+                        // Lambda parameters are usually single letters like $e, $u, $x
+                        if (strlen($possibleVarName) > 1 || !in_array($possibleVarName, ['e', 'u', 'x', 'a', 'i', 'o'])) {
+                            $useVarNames[] = $possibleVarName;
+                        }
+                    }
+                }
+            }
+            
+            // Try to get variable values from calling scope using eval (dangerous but necessary)
+            // Actually, we can't safely do this. Instead, we'll let the user pass variables explicitly
+            // For now, log what we found
+            log_message('debug', 'Use variable names found: ' . json_encode($useVarNames));
+            log_message('debug', 'Variable values extracted: ' . json_encode($variableValues));
+            
+            $parser->setVariableValues($variableValues);
+            
             $sqlCondition = $parser->parse($predicate);
             
+            log_message('debug', 'Parsed SQL condition (before cleanup): ' . $sqlCondition);
+            
             if (!empty($sqlCondition)) {
-                // Apply the parsed SQL condition
-                // Note: CodeIgniter's where() accepts raw SQL with second parameter as false
-                $builder->where($sqlCondition, null, false);
+                // Get parameter map from parser
+                $parameterMap = $parser->getParameterMap();
+                
+                // Clean up any remaining $variable references that weren't parsed
+                // This handles cases where variables weren't properly replaced
+                $sqlCondition = preg_replace('/\$[a-zA-Z_][a-zA-Z0-9_]*/', '', $sqlCondition);
+                // Remove any -> operators that might have leaked through (not valid in SQL Server)
+                $sqlCondition = preg_replace('/\s*->\s*/', ' ', $sqlCondition);
+                $sqlCondition = preg_replace('/^->+|->+$/', '', $sqlCondition);
+                // Clean up any double spaces or operators
+                $sqlCondition = preg_replace('/\s*=\s*=\s*/', ' = ', $sqlCondition);
+                $sqlCondition = preg_replace('/\s+/', ' ', $sqlCondition);
+                $sqlCondition = trim($sqlCondition);
+                
+                log_message('debug', 'Parsed SQL condition (after cleanup): ' . $sqlCondition);
+                log_message('debug', 'Parameter map: ' . json_encode($parameterMap));
+                log_message('debug', 'Variable values: ' . json_encode($variableValues));
+                
+                // Only apply if we have a valid condition (not empty after cleanup)
+                if (!empty($sqlCondition) && !preg_match('/^[\s->]*$/', $sqlCondition)) {
+                    // Get parameter values for binding
+                    $paramValues = $parser->getParameterValues();
+                    
+                    // If we have ? placeholders, replace them with actual values
+                    if (!empty($paramValues) && strpos($sqlCondition, '?') !== false) {
+                        $paramIndex = 0;
+                        $sqlCondition = preg_replace_callback('/\?/', function() use (&$paramIndex, &$paramValues, &$variableValues, &$parameterMap) {
+                            if ($paramIndex >= count($paramValues)) {
+                                return 'NULL';
+                            }
+                            
+                            $value = $paramValues[$paramIndex];
+                            $paramIndex++;
+                            
+                            // If value is null, try to get from variableValues using parameter map
+                            if ($value === null && !empty($parameterMap)) {
+                                $paramKeys = array_keys($parameterMap);
+                                if (isset($paramKeys[$paramIndex - 1])) {
+                                    $varName = ltrim($parameterMap[$paramKeys[$paramIndex - 1]], '$');
+                                    if (isset($variableValues[$varName])) {
+                                        $value = $variableValues[$varName];
+                                    }
+                                }
+                            }
+                            
+                            // Format value for SQL
+                            if (is_string($value)) {
+                                $value = "'" . str_replace("'", "''", $value) . "'";
+                            } elseif (is_numeric($value)) {
+                                $value = (string)$value;
+                            } elseif (is_bool($value)) {
+                                $value = $value ? '1' : '0';
+                            } elseif (is_null($value)) {
+                                $value = 'NULL';
+                            } else {
+                                $value = "'" . str_replace("'", "''", (string)$value) . "'";
+                            }
+                            return $value;
+                        }, $sqlCondition);
+                        log_message('debug', 'SQL condition after parameter replacement: ' . $sqlCondition);
+                    }
+                    
+                    // Apply the parsed SQL condition
+                    $builder->where($sqlCondition, null, false);
+                    log_message('debug', 'WHERE clause applied: ' . $sqlCondition);
+                } else {
+                    log_message('debug', 'SQL condition empty or invalid after cleanup, using fallback');
+                    // Fallback if cleanup resulted in empty condition
+                    $this->applySimpleWhereFallback($builder, $predicate);
+                }
             } else {
+                log_message('debug', 'SQL condition empty from parser, using fallback');
                 // Fallback to old method if parsing fails
                 $this->applySimpleWhereFallback($builder, $predicate);
             }
         } catch (\Exception $e) {
             // If parsing fails, fall back to old method
             log_message('debug', 'ExpressionParser failed: ' . $e->getMessage());
+            log_message('debug', 'Exception trace: ' . $e->getTraceAsString());
             $this->applySimpleWhereFallback($builder, $predicate);
         }
     }
@@ -1665,8 +1868,15 @@ class AdvancedQueryBuilder
         $relatedTableName = $this->context->getTableName($relatedEntityType);
         $builder = $this->connection->table($relatedTableName);
         $builder->whereIn('Id', array_unique($foreignKeyValues));
-        $query = $builder->get();
-        $relatedResults = $query->getResultArray();
+        try {
+            $query = $builder->get();
+            $relatedResults = $query->getResultArray();
+        } catch (\Exception $e) {
+            $sql = $builder->getCompiledSelect(false);
+            log_message('error', 'SQL Query Error (Navigation): ' . $e->getMessage());
+            log_message('error', 'Failed SQL Query: ' . $sql);
+            throw $e;
+        }
         
         // Map to entities
             $relatedEntities = $this->mapToEntities($relatedResults, $relatedEntityType);
@@ -1728,8 +1938,15 @@ class AdvancedQueryBuilder
             
             $builder = $this->connection->table($relatedTableName);
             $builder->whereIn($fkColumnName, array_unique($entityIds));
-            $query = $builder->get();
-            $relatedResults = $query->getResultArray();
+            try {
+                $query = $builder->get();
+                $relatedResults = $query->getResultArray();
+            } catch (\Exception $e) {
+                $sql = $builder->getCompiledSelect(false);
+                log_message('error', 'SQL Query Error (Navigation): ' . $e->getMessage());
+                log_message('error', 'Failed SQL Query: ' . $sql);
+                throw $e;
+            }
             
             log_message('debug', "Loading one-to-one navigation (FK in related): {$navigationProperty} from {$relatedTableName} where {$fkColumnName} IN (" . implode(',', $entityIds) . ") - Found " . count($relatedResults) . " results");
             
@@ -1799,8 +2016,15 @@ class AdvancedQueryBuilder
         
         $builder = $this->connection->table($relatedTableName);
         $builder->whereIn($fkColumnName, array_unique($entityIds));
-        $query = $builder->get();
-        $relatedResults = $query->getResultArray();
+        try {
+            $query = $builder->get();
+            $relatedResults = $query->getResultArray();
+        } catch (\Exception $e) {
+            $sql = $builder->getCompiledSelect(false);
+            log_message('error', 'SQL Query Error (Navigation): ' . $e->getMessage());
+            log_message('error', 'Failed SQL Query: ' . $sql);
+            throw $e;
+        }
         
         // Debug log
         log_message('debug', "Loading collection navigation: {$navigationProperty} from {$relatedTableName} where {$foreignKey} IN (" . implode(',', $entityIds) . ") - Found " . count($relatedResults) . " results");
