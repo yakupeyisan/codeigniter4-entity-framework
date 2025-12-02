@@ -836,7 +836,7 @@ class AdvancedQueryBuilder
         $whereParams = [];
         foreach ($this->wheres as $where) {
             try {
-                $parser = new ExpressionParser($this->entityType, $mainAlias);
+                $parser = new ExpressionParser($this->entityType, $mainAlias, $this->context);
                 
                 // Try to extract variable values from closure
                 $reflection = new \ReflectionFunction($where);
@@ -964,7 +964,7 @@ class AdvancedQueryBuilder
         $whereConditions = [];
         foreach ($this->wheres as $where) {
             try {
-                $parser = new ExpressionParser($this->entityType, $mainAlias);
+                $parser = new ExpressionParser($this->entityType, $mainAlias, $this->context);
                 $sqlCondition = $parser->parse($where);
                 if (!empty($sqlCondition)) {
                     $whereConditions[] = $sqlCondition;
@@ -1261,7 +1261,7 @@ class AdvancedQueryBuilder
     private function applySimpleWhereWithParser($builder, callable $predicate): void
     {
         try {
-            $parser = new ExpressionParser($this->entityType, $this->getTableAliasForParser());
+            $parser = new ExpressionParser($this->entityType, $this->getTableAliasForParser(), $this->context);
             
             // Try to extract variable values from closure
             $reflection = new \ReflectionFunction($predicate);
@@ -1448,7 +1448,13 @@ class AdvancedQueryBuilder
      */
     private function getTableAliasForParser(): string
     {
-        return 't0';
+        // When using CodeIgniter's base builder (no explicit alias), use the table name.
+        // For advanced scenarios (raw joins, includes, masking) aliases are handled separately.
+        if ($this->useRawSql || !empty($this->rawJoins) || !empty($this->includes) || !empty($this->requiredJoins)) {
+            return 't0';
+        }
+
+        return $this->context->getTableName($this->entityType);
     }
 
     /**
