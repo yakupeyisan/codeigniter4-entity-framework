@@ -190,7 +190,10 @@ abstract class DbContext
         
         foreach ($this->changeTracker as $entity) {
             $state = $entity->getEntityState();
-            
+            log_message('debug', "Change Tracker: " . json_encode($this->changeTracker, JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE));
+            log_message('debug', "Entity: " . json_encode($entity, JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE));
+            log_message('debug', "State: " . $state);
+            log_message('debug', "Changes Count: " . $changesCount);
             switch ($state) {
                 case Entity::STATE_ADDED:
                     $changesCount += $this->insertEntity($entity);
@@ -203,7 +206,6 @@ abstract class DbContext
                     break;
             }
         }
-        
         $this->changeTracker = [];
         return $changesCount;
     }
@@ -223,13 +225,18 @@ abstract class DbContext
     /**
      * Update entity in context
      */
-    public function update(object $entity): void
+    public function update(object &$entity): void
     {
+        log_message('debug', "Update Entity: " . json_encode($entity, JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE));
         if ($entity instanceof Entity) {
+            log_message('debug', "Marking as modified");
             $entity->markAsModified();
+            log_message('debug', "Marked as modified");
             $entity->enableTracking();
             if (!in_array($entity, $this->changeTracker, true)) {
+                log_message('debug', "Adding to change tracker");
                 $this->changeTracker[] = $entity;
+                log_message('debug', "Added to change tracker");
             }
         }
     }
@@ -345,6 +352,15 @@ abstract class DbContext
         $reflection = new ReflectionClass($entityType);
         $primaryKeyName = $this->getPrimaryKeyName($entityType);
         $data = [];
+        
+        // Internal properties to exclude (from Entity base class)
+        $excludedProperties = [
+            'entityState',
+            'originalValues',
+            'currentValues',
+            'navigationProperties',
+            'isTracking'
+        ];
 
         foreach ($entities as $entity) {
             $row = [];
@@ -354,19 +370,37 @@ abstract class DbContext
                 if ($property->isStatic()) {
                     continue;
                 }
+                
+                $propertyName = $property->getName();
+                
+                // Skip internal tracking properties
+                if (in_array($propertyName, $excludedProperties)) {
+                    continue;
+                }
 
                 $property->setAccessible(true);
                 $value = $property->getValue($entity);
 
-                // Skip navigation properties
+                // Skip navigation properties (objects, arrays, and properties with InverseProperty attribute)
                 if (is_object($value) && !($value instanceof \DateTime) && !($value instanceof \DateTimeInterface)) {
                     continue;
                 }
 
-                $columnName = $this->propertyToColumnName($reflection, $property->getName());
+                // Skip array properties (navigation properties are usually arrays)
+                if (is_array($value)) {
+                    continue;
+                }
+
+                // Skip properties with InverseProperty attribute (navigation properties)
+                $inversePropertyAttributes = $property->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\InverseProperty::class);
+                if (!empty($inversePropertyAttributes)) {
+                    continue;
+                }
+
+                $columnName = $this->propertyToColumnName($reflection, $propertyName);
 
                 // Get ID for WHERE clause
-                if ($this->isPrimaryKey($reflection, $property->getName())) {
+                if ($this->isPrimaryKey($reflection, $propertyName)) {
                     $id = $value;
                     $row[$primaryKeyName] = $value;
                     continue; // Include PK in row but don't update it
@@ -446,23 +480,62 @@ abstract class DbContext
         $reflection = new ReflectionClass($entity);
         $data = [];
         
+        // Internal properties to exclude (from Entity base class)
+        $excludedProperties = [
+            'entityState',
+            'originalValues',
+            'currentValues',
+            'navigationProperties',
+            'isTracking'
+        ];
+        
         foreach ($reflection->getProperties() as $property) {
             if ($property->isStatic()) {
                 continue;
             }
             
-            $property->setAccessible(true);
-            $value = $property->getValue($entity);
+            $propertyName = $property->getName();
             
-            // Skip navigation properties
+            // Skip internal tracking properties
+            if (in_array($propertyName, $excludedProperties)) {
+                continue;
+            }
+            
+            $property->setAccessible(true);
+            
+            // Check if property is initialized (for typed properties in PHP 7.4+)
+            // Skip if not initialized and it's an auto-increment primary key
+            if (!$property->isInitialized($entity)) {
+                // For identity columns (auto-increment), skip if not initialized
+                if ($this->isAutoIncrementPrimaryKey($reflection, $propertyName)) {
+                    continue; // Skip identity columns that are not initialized
+                }
+                // For other properties, set to null if not initialized
+                $value = null;
+            } else {
+                $value = $property->getValue($entity);
+            }
+            
+            // Skip navigation properties (objects, arrays, and properties with InverseProperty attribute)
             if (is_object($value) && !($value instanceof \DateTime) && !($value instanceof \DateTimeInterface)) {
                 continue;
             }
             
-            $columnName = $this->propertyToColumnName($reflection, $property->getName());
+            // Skip array properties (navigation properties are usually arrays)
+            if (is_array($value)) {
+                continue;
+            }
             
-            // Skip auto-increment primary keys
-            if ($this->isAutoIncrementPrimaryKey($reflection, $property->getName())) {
+            // Skip properties with InverseProperty attribute (navigation properties)
+            $inversePropertyAttributes = $property->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\InverseProperty::class);
+            if (!empty($inversePropertyAttributes)) {
+                continue;
+            }
+            
+            $columnName = $this->propertyToColumnName($reflection, $propertyName);
+            
+            // Skip auto-increment primary keys (double check, but should already be skipped above)
+            if ($this->isAutoIncrementPrimaryKey($reflection, $propertyName)) {
                 continue;
             }
             
@@ -501,23 +574,50 @@ abstract class DbContext
         $data = [];
         $id = null;
         
+        // Internal properties to exclude (from Entity base class)
+        $excludedProperties = [
+            'entityState',
+            'originalValues',
+            'currentValues',
+            'navigationProperties',
+            'isTracking'
+        ];
+        
         foreach ($reflection->getProperties() as $property) {
             if ($property->isStatic()) {
+                continue;
+            }
+            
+            $propertyName = $property->getName();
+            
+            // Skip internal tracking properties
+            if (in_array($propertyName, $excludedProperties)) {
                 continue;
             }
             
             $property->setAccessible(true);
             $value = $property->getValue($entity);
             
-            // Skip navigation properties
+            // Skip navigation properties (objects, arrays, and properties with InverseProperty attribute)
             if (is_object($value) && !($value instanceof \DateTime) && !($value instanceof \DateTimeInterface)) {
                 continue;
             }
             
-            $columnName = $this->propertyToColumnName($reflection, $property->getName());
+            // Skip array properties (navigation properties are usually arrays)
+            if (is_array($value)) {
+                continue;
+            }
+            
+            // Skip properties with InverseProperty attribute (navigation properties)
+            $inversePropertyAttributes = $property->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\InverseProperty::class);
+            if (!empty($inversePropertyAttributes)) {
+                continue;
+            }
+            
+            $columnName = $this->propertyToColumnName($reflection, $propertyName);
             
             // Get ID for WHERE clause
-            if ($this->isPrimaryKey($reflection, $property->getName())) {
+            if ($this->isPrimaryKey($reflection, $propertyName)) {
                 $id = $value;
                 continue; // Don't update primary key
             }

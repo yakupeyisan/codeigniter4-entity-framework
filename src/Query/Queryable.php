@@ -25,9 +25,9 @@ class Queryable implements IQueryable
         $this->queryBuilder = new AdvancedQueryBuilder($context, $entityType, $connection);
     }
 
-    public function where(callable $predicate): IQueryable
+    public function where(callable $predicate, bool $isOr = false): IQueryable
     {
-        $this->queryBuilder->where($predicate);
+        $this->queryBuilder->where($predicate, $isOr);
         return $this;
     }
 
@@ -150,6 +150,80 @@ class Queryable implements IQueryable
     public function toList(): array
     {
         return $this->queryBuilder->toList();
+    }
+
+    /**
+     * Execute query and get all results as arrays
+     * Converts entities to clean arrays (excludes internal properties)
+     * 
+     * @param bool $includeNavigationProperties Whether to include navigation properties (default: true)
+     * @return array Array of entity arrays
+     */
+    public function toArray(bool $includeNavigationProperties = true): array
+    {
+        $entities = $this->queryBuilder->toList();
+        $result = [];
+        
+        foreach ($entities as $entity) {
+            if ($entity instanceof \Yakupeyisan\CodeIgniter4\EntityFramework\Core\Entity) {
+                $result[] = $entity->toArray($includeNavigationProperties);
+            } else {
+                // If not an Entity, convert to array using reflection
+                $result[] = $this->objectToArray($entity);
+            }
+        }
+        
+        return $result;
+    }
+
+    /**
+     * Convert any object to array
+     * 
+     * @param object $object
+     * @return array
+     */
+    private function objectToArray(object $object): array
+    {
+        $reflection = new \ReflectionClass($object);
+        $result = [];
+        
+        foreach ($reflection->getProperties() as $property) {
+            if ($property->isStatic()) {
+                continue;
+            }
+            
+            $property->setAccessible(true);
+            
+            // Check if property is initialized
+            if (!$property->isInitialized($object)) {
+                continue;
+            }
+            
+            $value = $property->getValue($object);
+            
+            // Convert DateTime to string
+            if ($value instanceof \DateTime || $value instanceof \DateTimeInterface) {
+                $result[$property->getName()] = $value->format('Y-m-d H:i:s');
+            }
+            // Convert arrays recursively
+            elseif (is_array($value)) {
+                $result[$property->getName()] = array_map(function($item) {
+                    if (is_object($item)) {
+                        return $this->objectToArray($item);
+                    }
+                    return $item;
+                }, $value);
+            }
+            // Convert objects recursively
+            elseif (is_object($value)) {
+                $result[$property->getName()] = $this->objectToArray($value);
+            }
+            else {
+                $result[$property->getName()] = $value;
+            }
+        }
+        
+        return $result;
     }
 
     public function count(): int

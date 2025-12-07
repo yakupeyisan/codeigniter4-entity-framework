@@ -10,8 +10,10 @@ interface IQueryable
 {
     /**
      * Filter entities (Where)
+     * @param callable $predicate Predicate function
+     * @param bool $isOr Whether this is an OR condition (default: false)
      */
-    public function where(callable $predicate): IQueryable;
+    public function where(callable $predicate, bool $isOr = false): IQueryable;
 
     /**
      * Select/Project (Select)
@@ -127,6 +129,15 @@ interface IQueryable
      * Execute query and get all results
      */
     public function toList(): array;
+
+    /**
+     * Execute query and get all results as arrays
+     * Converts entities to clean arrays (excludes internal properties)
+     * 
+     * @param bool $includeNavigationProperties Whether to include navigation properties (default: true)
+     * @return array Array of entity arrays
+     */
+    public function toArray(bool $includeNavigationProperties = true): array;
 
     /**
      * Execute query and get count

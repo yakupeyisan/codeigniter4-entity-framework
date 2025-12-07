@@ -82,9 +82,68 @@ class ExpressionParser
         // If the code contains ->where, ->and, ->or, etc., extract just the lambda part
         // Pattern: ->where(fn($e) => $e->Id === $id) or ->where(function($e) { return $e->Id === $id; })
         // Also handle multi-line expressions like: ->where(fn($e) => $e->{$this->primaryKey} === (int)$id)
-        if (preg_match('/->(where|and|or|not)\s*\(\s*(?:fn|function)\s*\([^)]+\)\s*=>\s*(.+?)(?:\)|;|$)/s', $code, $matches)) {
+        // Handle nested parentheses correctly: ->where(fn($e) => in_array($e->Id, $ids))
+        if (preg_match('/->(where|and|or|not)\s*\(\s*(?:fn|function)\s*\([^)]+\)\s*=>\s*(.+)/s', $code, $matches)) {
             // Return just the lambda expression part, wrapped in fn() => format
             $lambdaBody = trim($matches[2]);
+            
+            // Find the correct closing parenthesis by counting parentheses
+            // We need to find the closing parenthesis that matches the opening parenthesis of ->where(...)
+            // Start with parenCount = 1 because we're inside ->where( which opened a parenthesis
+            $parenCount = 1;
+            $lambdaEndPos = 0;
+            $inString = false;
+            $stringChar = '';
+            
+            for ($i = 0; $i < strlen($lambdaBody); $i++) {
+                $char = $lambdaBody[$i];
+                
+                // Handle string literals
+                if (($char === '"' || $char === "'") && ($i === 0 || $lambdaBody[$i - 1] !== '\\')) {
+                    if (!$inString) {
+                        $inString = true;
+                        $stringChar = $char;
+                    } elseif ($char === $stringChar) {
+                        $inString = false;
+                        $stringChar = '';
+                    }
+                    continue;
+                }
+                
+                if ($inString) {
+                    continue;
+                }
+                
+                // Count parentheses
+                if ($char === '(') {
+                    $parenCount++;
+                } elseif ($char === ')') {
+                    $parenCount--;
+                    // If we've closed all parentheses, this is the closing parenthesis of ->where(...)
+                    if ($parenCount === 0) {
+                        $lambdaEndPos = $i;
+                        break;
+                    }
+                } elseif ($char === ';' && $parenCount === 1) {
+                    // End of statement (but only if we're at the top level, not inside nested parentheses)
+                    $lambdaEndPos = $i;
+                    break;
+                }
+            }
+            
+            // If we found a valid end position, truncate the lambda body
+            if ($lambdaEndPos > 0) {
+                $lambdaBody = substr($lambdaBody, 0, $lambdaEndPos);
+            } else {
+                // If no valid end found, try to find it by looking for the pattern
+                // Remove trailing closing parenthesis if it's the last character (from method chaining)
+                // But only if we have balanced parentheses
+                if (substr_count($lambdaBody, '(') > substr_count($lambdaBody, ')')) {
+                    // We're missing a closing parenthesis, don't remove anything
+                } else {
+                    $lambdaBody = rtrim($lambdaBody, ')');
+                }
+            }
             
             // If the expression seems incomplete (ends with incomplete type cast or variable), try to get more lines
             if (preg_match('/\(int\s*$|\(string\s*$|\(float\s*$|\(bool\s*$|\$\s*$/', $lambdaBody)) {
@@ -105,8 +164,6 @@ class ExpressionParser
                 }
             }
             
-            // Remove trailing closing parenthesis if present (from method chaining)
-            $lambdaBody = rtrim($lambdaBody, ')');
             // Remove any trailing -> operators
             $lambdaBody = preg_replace('/\s*->\s*$/', '', $lambdaBody);
             
@@ -125,8 +182,64 @@ class ExpressionParser
         // Remove function declaration and get expression
         // Pattern: fn($x) => $x->Property === value
         // Also handle incomplete expressions like: fn($x) => $x->Property === (int
-        if (preg_match('/=>\s*(.+?)(?:;|$|\n)/s', $code, $matches)) {
+        // Handle nested function calls like: fn($x) => in_array($x->Id, $ids)
+        if (preg_match('/=>\s*(.+)/s', $code, $matches)) {
             $expression = trim($matches[1]);
+            
+            // Find the correct end of the expression by counting parentheses
+            // We need to find where the expression actually ends (not just the first ; or newline)
+            $parenCount = 0;
+            $expressionEndPos = strlen($expression);
+            $inString = false;
+            $stringChar = '';
+            
+            for ($i = 0; $i < strlen($expression); $i++) {
+                $char = $expression[$i];
+                
+                // Handle string literals
+                if (($char === '"' || $char === "'") && ($i === 0 || $expression[$i - 1] !== '\\')) {
+                    if (!$inString) {
+                        $inString = true;
+                        $stringChar = $char;
+                    } elseif ($char === $stringChar) {
+                        $inString = false;
+                        $stringChar = '';
+                    }
+                    continue;
+                }
+                
+                if ($inString) {
+                    continue;
+                }
+                
+                // Count parentheses
+                if ($char === '(') {
+                    $parenCount++;
+                } elseif ($char === ')') {
+                    $parenCount--;
+                } elseif ($char === ';' && $parenCount === 0) {
+                    // End of statement
+                    $expressionEndPos = $i;
+                    break;
+                } elseif (preg_match('/\s*->(where|and|or|not)\s*\(/i', substr($expression, $i), $methodMatch) && $parenCount === 0) {
+                    // Method chaining detected
+                    $expressionEndPos = $i;
+                    break;
+                } elseif (($char === "\n" || $char === "\r") && $parenCount === 0 && $i > 0) {
+                    // End of line, but only if we're not inside parentheses
+                    // Check if next non-whitespace is method chaining or end of code
+                    $remaining = trim(substr($expression, $i));
+                    if (empty($remaining) || preg_match('/^->(where|and|or|not)\s*\(/i', $remaining)) {
+                        $expressionEndPos = $i;
+                        break;
+                    }
+                }
+            }
+            
+            // Truncate expression to the correct end position
+            if ($expressionEndPos < strlen($expression)) {
+                $expression = substr($expression, 0, $expressionEndPos);
+            }
             
             // If expression ends with incomplete type cast, try to complete it
             if (preg_match('/\(int\s*$|\(string\s*$|\(float\s*$|\(bool\s*$/', $expression)) {
@@ -144,8 +257,11 @@ class ExpressionParser
             
             // Remove any trailing ->where, ->and, ->or, etc. that might be part of method chaining
             $expression = preg_replace('/\s*->(where|and|or|not)\s*\(.*$/i', '', $expression);
-            // Remove any trailing closing parentheses that might be from method chaining
-            $expression = preg_replace('/\)\s*$/', '', $expression);
+            // Remove any trailing closing parentheses that might be from method chaining (but keep function call parentheses)
+            // Only remove if it's at the very end and we have balanced parentheses
+            if (preg_match('/\)\s*$/', $expression) && substr_count($expression, '(') === substr_count($expression, ')') - 1) {
+                $expression = rtrim($expression, ')');
+            }
             // Remove any trailing -> operators
             $expression = preg_replace('/\s*->\s*$/', '', $expression);
             return trim($expression);
@@ -192,7 +308,35 @@ class ExpressionParser
             // This is an incomplete expression, return as is and let comparison handle it
         }
         
-        // Handle comparison operators FIRST (before arithmetic, because === has higher precedence than -)
+        // Handle NOT in_array BEFORE everything else (special case: !in_array(...))
+        // Pattern: !in_array(...) should be handled by parseIn first, then wrapped with NOT
+        if (preg_match('/^!\s*in_array\(/i', $expression)) {
+            // Remove the ! and parse in_array, then wrap with NOT
+            $innerExpression = preg_replace('/^!\s*/', '', $expression);
+            $innerSql = $this->parseIn($innerExpression);
+            if ($innerSql !== null) {
+                $result = "NOT ({$innerSql})";
+                log_message('debug', "parseExpression - not in_array result: {$result}");
+                return $result;
+            }
+        }
+        
+        // Handle IN operator BEFORE comparison (in_array is a function call, not a comparison)
+        $sql = $this->parseIn($expression);
+        if ($sql !== null) {
+            log_message('debug', "parseExpression - in result: {$sql}");
+            return $sql;
+        }
+        
+        // Handle method calls (Contains, StartsWith, EndsWith, etc.) BEFORE comparison
+        // Method calls like ->startsWith() should be parsed before comparison operators
+        $sql = $this->parseMethodCall($expression);
+        if ($sql !== null) {
+            log_message('debug', "parseExpression - method call result: {$sql}");
+            return $sql;
+        }
+        
+        // Handle comparison operators (before arithmetic, because === has higher precedence than -)
         $sql = $this->parseComparison($expression);
         if ($sql !== null) {
             log_message('debug', "parseExpression - comparison result: {$sql}");
@@ -225,20 +369,6 @@ class ExpressionParser
         $sql = $this->parseNot($expression);
         if ($sql !== null) {
             log_message('debug', "parseExpression - not result: {$sql}");
-            return $sql;
-        }
-        
-        // Handle method calls (Contains, StartsWith, EndsWith, etc.)
-        $sql = $this->parseMethodCall($expression);
-        if ($sql !== null) {
-            log_message('debug', "parseExpression - method call result: {$sql}");
-            return $sql;
-        }
-        
-        // Handle IN operator
-        $sql = $this->parseIn($expression);
-        if ($sql !== null) {
-            log_message('debug', "parseExpression - in result: {$sql}");
             return $sql;
         }
         
@@ -275,6 +405,12 @@ class ExpressionParser
      */
     private function parseComparison(string $expression): ?string
     {
+        // If expression contains a method call (startsWith, contains, endsWith, etc.), 
+        // don't treat it as a comparison - let parseMethodCall handle it
+        if (preg_match('/->(startsWith|contains|endsWith|toLower|toUpper|length|substring|trim|lTrim|rTrim|replace)\(/i', $expression)) {
+            return null;
+        }
+        
         // Match: $x->Property === value, $x->Property == value, etc.
         $patterns = [
             '/^(.+?)\s*===\s*(.+)$/' => '=',
@@ -397,7 +533,12 @@ class ExpressionParser
         if (preg_match('/^(.+?)->contains\((.+?)\)$/i', $expression, $matches)) {
             $property = trim($matches[1]);
             $value = trim($matches[2]);
-            $propertySql = $this->parseExpression($property);
+            // Use parsePropertyAccess if it's a property access pattern, otherwise use parseExpression
+            if (preg_match('/^\$[a-zA-Z_][a-zA-Z0-9_]*(->\$?[a-zA-Z_][a-zA-Z0-9_]*)*$/', $property)) {
+                $propertySql = $this->parsePropertyAccess($property);
+            } else {
+                $propertySql = $this->parseExpression($property);
+            }
             $valueSql = $this->parseValue($value);
             return "{$propertySql} LIKE CONCAT('%', {$valueSql}, '%')";
         }
@@ -406,7 +547,12 @@ class ExpressionParser
         if (preg_match('/^(.+?)->startsWith\((.+?)\)$/i', $expression, $matches)) {
             $property = trim($matches[1]);
             $value = trim($matches[2]);
-            $propertySql = $this->parseExpression($property);
+            // Use parsePropertyAccess if it's a property access pattern, otherwise use parseExpression
+            if (preg_match('/^\$[a-zA-Z_][a-zA-Z0-9_]*(->\$?[a-zA-Z_][a-zA-Z0-9_]*)*$/', $property)) {
+                $propertySql = $this->parsePropertyAccess($property);
+            } else {
+                $propertySql = $this->parseExpression($property);
+            }
             $valueSql = $this->parseValue($value);
             return "{$propertySql} LIKE CONCAT({$valueSql}, '%')";
         }
@@ -415,7 +561,12 @@ class ExpressionParser
         if (preg_match('/^(.+?)->endsWith\((.+?)\)$/i', $expression, $matches)) {
             $property = trim($matches[1]);
             $value = trim($matches[2]);
-            $propertySql = $this->parseExpression($property);
+            // Use parsePropertyAccess if it's a property access pattern, otherwise use parseExpression
+            if (preg_match('/^\$[a-zA-Z_][a-zA-Z0-9_]*(->\$?[a-zA-Z_][a-zA-Z0-9_]*)*$/', $property)) {
+                $propertySql = $this->parsePropertyAccess($property);
+            } else {
+                $propertySql = $this->parseExpression($property);
+            }
             $valueSql = $this->parseValue($value);
             return "{$propertySql} LIKE CONCAT('%', {$valueSql})";
         }
@@ -589,13 +740,52 @@ class ExpressionParser
      */
     private function parseIn(string $expression): ?string
     {
-        // Pattern: in_array($x->Property, [1, 2, 3])
+        // Pattern 1: in_array($x->Property, [1, 2, 3]) - literal array
         if (preg_match('/^in_array\((.+?),\s*\[(.+?)\]\)$/i', $expression, $matches)) {
             $property = trim($matches[1]);
             $values = trim($matches[2]);
             $propertySql = $this->parsePropertyAccess($property);
             $valuesArray = $this->parseArray($values);
             return "{$propertySql} IN (" . implode(', ', $valuesArray) . ")";
+        }
+        
+        // Pattern 2: in_array($x->Property, $variable) - variable array
+        // Match: in_array($s->Id, $selectedShowIds) or in_array($s->Id, $selectedShowIds)
+        if (preg_match('/^in_array\((.+?),\s*\$([a-zA-Z_][a-zA-Z0-9_]*)\)$/i', $expression, $matches)) {
+            $property = trim($matches[1]);
+            $varName = trim($matches[2]);
+            $propertySql = $this->parsePropertyAccess($property);
+            
+            // Check if we have the array value in variableValues
+            if (isset($this->variableValues[$varName]) && is_array($this->variableValues[$varName])) {
+                $valuesArray = $this->variableValues[$varName];
+                $valuesSql = [];
+                foreach ($valuesArray as $value) {
+                    if (is_string($value)) {
+                        $value = str_replace("'", "''", $value);
+                        $valuesSql[] = "'{$value}'";
+                    } elseif (is_numeric($value)) {
+                        $valuesSql[] = (string)$value;
+                    } elseif (is_bool($value)) {
+                        $valuesSql[] = $value ? '1' : '0';
+                    } elseif (is_null($value)) {
+                        $valuesSql[] = 'NULL';
+                    } else {
+                        $value = str_replace("'", "''", (string)$value);
+                        $valuesSql[] = "'{$value}'";
+                    }
+                }
+                return "{$propertySql} IN (" . implode(', ', $valuesSql) . ")";
+            } else {
+                // Variable not found or not an array - use parameter binding
+                log_message('warning', "parseIn - variable \${$varName} not found in variableValues or not an array, using parameter binding");
+                $paramIndex = $this->parameterIndex++;
+                $paramName = 'param_' . $paramIndex;
+                $this->parameterMap[$paramName] = '$' . $varName;
+                // We'll need to handle this differently - for now, return a placeholder
+                // The actual binding will be done in AdvancedQueryBuilder
+                return "{$propertySql} IN (?)";
+            }
         }
         
         return null;
@@ -639,10 +829,16 @@ class ExpressionParser
                     }
                 }
             } elseif (preg_match('/\$([a-zA-Z_][a-zA-Z0-9_]*)/', $dynamicProperty, $varMatches)) {
-                // It's a variable - we can't resolve it at parse time
-                // Use a default property name (Id) or throw an error
-                log_message('warning', "parsePropertyAccess - cannot resolve dynamic property variable: {$dynamicProperty}");
-                $propertyName = 'Id'; // Fallback
+                // It's a variable - try to resolve it from variableValues
+                $varName = $varMatches[1];
+                if (isset($this->variableValues[$varName])) {
+                    $propertyName = $this->variableValues[$varName];
+                    log_message('debug', "parsePropertyAccess - resolved dynamic property variable \${$varName} to: {$propertyName}");
+                } else {
+                    // Variable not found - use a default property name (Id) or throw an error
+                    log_message('warning', "parsePropertyAccess - cannot resolve dynamic property variable: \${$varName}, using default 'Id'");
+                    $propertyName = 'Id'; // Fallback
+                }
             } else {
                 // It's a literal property name
                 $propertyName = trim($dynamicProperty);
@@ -664,15 +860,26 @@ class ExpressionParser
         
         log_message('debug', "parsePropertyAccess - after removing variable prefix: {$expression}");
         
-        // If there's still a $ sign, it means we have something like $e in the expression
-        // This can happen if the regex didn't match properly - remove it completely
-        if (preg_match('/\$[a-zA-Z_][a-zA-Z0-9_]*/', $expression)) {
-            // Remove any remaining variable references (but keep property names)
-            $expression = preg_replace('/\$[a-zA-Z_][a-zA-Z0-9_]*/', '', $expression);
-            // Clean up any leftover -> operators
-            $expression = preg_replace('/^->+/', '', $expression);
-            $expression = ltrim($expression);
-            log_message('debug', "parsePropertyAccess - after removing remaining variables: {$expression}");
+        // If there's still a $ sign, it means we have a dynamic property like $e->$field
+        // Try to resolve the variable from variableValues first
+        if (preg_match('/\$([a-zA-Z_][a-zA-Z0-9_]*)/', $expression, $varMatches)) {
+            $varName = $varMatches[1];
+            // Check if this variable has a value in variableValues (e.g., $field = "EmployeeID")
+            if (isset($this->variableValues[$varName])) {
+                $varValue = $this->variableValues[$varName];
+                log_message('debug', "parsePropertyAccess - resolving variable \${$varName} to: {$varValue}");
+                // Replace the variable with its value
+                $expression = preg_replace('/\$' . preg_quote($varName, '/') . '/', $varValue, $expression);
+                log_message('debug', "parsePropertyAccess - after resolving variable: {$expression}");
+            } else {
+                // Variable not found in variableValues - remove it (fallback behavior)
+                log_message('warning', "parsePropertyAccess - variable \${$varName} not found in variableValues, removing it");
+                $expression = preg_replace('/\$[a-zA-Z_][a-zA-Z0-9_]*/', '', $expression);
+                // Clean up any leftover -> operators
+                $expression = preg_replace('/^->+/', '', $expression);
+                $expression = ltrim($expression);
+                log_message('debug', "parsePropertyAccess - after removing unresolved variable: {$expression}");
+            }
         }
         
         // Remove ALL -> operators from the expression (they shouldn't be in SQL)
