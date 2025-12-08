@@ -756,6 +756,40 @@ class ExpressionParser
             $varName = trim($matches[2]);
             $propertySql = $this->parsePropertyAccess($property);
             
+            // Check if propertySql is a navigation property path (starts with "NAVIGATION:")
+            if (strpos($propertySql, 'NAVIGATION:') === 0) {
+                // Extract navigation property path
+                $navPath = substr($propertySql, 11); // Remove "NAVIGATION:" prefix
+                log_message('debug', "parseIn - navigation property path detected: {$navPath}");
+                
+                // Check if we have the array value in variableValues
+                if (isset($this->variableValues[$varName]) && is_array($this->variableValues[$varName])) {
+                    $valuesArray = $this->variableValues[$varName];
+                    $valuesSql = [];
+                    foreach ($valuesArray as $value) {
+                        if (is_string($value)) {
+                            $value = str_replace("'", "''", $value);
+                            $valuesSql[] = "'{$value}'";
+                        } elseif (is_numeric($value)) {
+                            $valuesSql[] = (string)$value;
+                        } elseif (is_bool($value)) {
+                            $valuesSql[] = $value ? '1' : '0';
+                        } elseif (is_null($value)) {
+                            $valuesSql[] = 'NULL';
+                        } else {
+                            $value = str_replace("'", "''", (string)$value);
+                            $valuesSql[] = "'{$value}'";
+                        }
+                    }
+                    // Return navigation property path with values for AdvancedQueryBuilder to handle
+                    return "NAVIGATION_IN:{$navPath}:" . implode(',', $valuesSql);
+                } else {
+                    // Variable not found or not an array - return navigation path for AdvancedQueryBuilder to handle
+                    log_message('warning', "parseIn - variable \${$varName} not found in variableValues or not an array, returning navigation path");
+                    return "NAVIGATION_IN:{$navPath}:?";
+                }
+            }
+            
             // Check if we have the array value in variableValues
             if (isset($this->variableValues[$varName]) && is_array($this->variableValues[$varName])) {
                 $valuesArray = $this->variableValues[$varName];
@@ -909,6 +943,15 @@ class ExpressionParser
             $parts = explode(' ', $expression);
             $expression = end($parts);
             log_message('debug', "parsePropertyAccess - after extracting last word: {$expression}");
+        }
+        
+        // Check if expression contains navigation property path (e.g., "EmployeeDepartments.Department.DepartmentID")
+        // Navigation property paths contain dots and represent nested navigation properties
+        if (strpos($expression, '.') !== false && preg_match('/^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+$/', $expression)) {
+            // This is a navigation property path - return it as-is for AdvancedQueryBuilder to handle
+            // Format: NAVIGATION:CollectionProperty.ReferenceProperty.Column
+            log_message('debug', "parsePropertyAccess - navigation property path detected: {$expression}");
+            return "NAVIGATION:{$expression}";
         }
         
         // Remove any remaining invalid characters (dots, dashes, etc. that shouldn't be in property name)
