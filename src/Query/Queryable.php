@@ -31,6 +31,18 @@ class Queryable implements IQueryable
         return $this;
     }
 
+    public function startGroup(): IQueryable
+    {
+        $this->queryBuilder->startGroup();
+        return $this;
+    }
+
+    public function endGroup(): IQueryable
+    {
+        $this->queryBuilder->endGroup();
+        return $this;
+    }
+
     public function select(callable $selector): IQueryable
     {
         $this->queryBuilder->select($selector);

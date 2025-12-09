@@ -16,6 +16,20 @@ interface IQueryable
     public function where(callable $predicate, bool $isOr = false): IQueryable;
 
     /**
+     * Start a WHERE clause group (opens parenthesis)
+     * Used to group WHERE conditions together, e.g., (A AND B) OR (C AND D)
+     * @return IQueryable
+     */
+    public function startGroup(): IQueryable;
+
+    /**
+     * End a WHERE clause group (closes parenthesis)
+     * Must be called after startGroup() to close the group
+     * @return IQueryable
+     */
+    public function endGroup(): IQueryable;
+
+    /**
      * Select/Project (Select)
      */
     public function select(callable $selector): IQueryable;

@@ -20,9 +20,10 @@ class AdvancedQueryBuilder
     private BaseConnection $connection;
     
     // Query building state
-    private array $wheres = []; // Array of ['predicate' => callable, 'isOr' => bool]
+    private array $wheres = []; // Array of ['predicate' => callable, 'isOr' => bool, 'groupStart' => bool, 'groupEnd' => bool]
     private array $whereGroups = []; // Groups of where clauses with OR logic
     private int $currentWhereIndex = 0; // Track current where clause index for OR logic
+    private bool $inGroup = false; // Track if we're currently in a group
     private $select = null; // callable|null
     private array $includes = [];
     private array $orderBys = [];
@@ -82,8 +83,51 @@ class AdvancedQueryBuilder
     public function where(callable $predicate, bool $isOr = false): self
     {
         log_message('debug', "AdvancedQueryBuilder::where() called with isOr=" . ($isOr ? 'true' : 'false'));
-        $this->wheres[] = ['predicate' => $predicate, 'isOr' => $isOr];
+        $this->wheres[] = [
+            'predicate' => $predicate, 
+            'isOr' => $isOr,
+            'groupStart' => false,
+            'groupEnd' => false
+        ];
         log_message('debug', "wheres array count: " . count($this->wheres) . ", last isOr: " . ($isOr ? 'true' : 'false'));
+        return $this;
+    }
+
+    /**
+     * Start a WHERE clause group (opens parenthesis)
+     */
+    public function startGroup(): self
+    {
+        if ($this->inGroup) {
+            throw new \RuntimeException('Cannot start a new group while already in a group. Call endGroup() first.');
+        }
+        $this->inGroup = true;
+        $this->wheres[] = [
+            'predicate' => null,
+            'isOr' => false,
+            'groupStart' => true,
+            'groupEnd' => false
+        ];
+        log_message('debug', "AdvancedQueryBuilder::startGroup() called");
+        return $this;
+    }
+
+    /**
+     * End a WHERE clause group (closes parenthesis)
+     */
+    public function endGroup(): self
+    {
+        if (!$this->inGroup) {
+            throw new \RuntimeException('Cannot end a group that was not started. Call startGroup() first.');
+        }
+        $this->inGroup = false;
+        $this->wheres[] = [
+            'predicate' => null,
+            'isOr' => false,
+            'groupStart' => false,
+            'groupEnd' => true
+        ];
+        log_message('debug', "AdvancedQueryBuilder::endGroup() called");
         return $this;
     }
 
@@ -353,7 +397,21 @@ class AdvancedQueryBuilder
         // First pass: Detect all navigation property paths
         $allNavigationPaths = [];
         foreach ($this->wheres as $whereItem) {
+            $groupStart = is_array($whereItem) && isset($whereItem['groupStart']) ? $whereItem['groupStart'] : false;
+            $groupEnd = is_array($whereItem) && isset($whereItem['groupEnd']) ? $whereItem['groupEnd'] : false;
+            
+            // Skip group markers (they don't have predicates)
+            if ($groupStart || $groupEnd) {
+                continue;
+            }
+            
             $where = is_array($whereItem) ? $whereItem['predicate'] : $whereItem;
+            
+            // Skip if predicate is null
+            if ($where === null) {
+                continue;
+            }
+            
             $paths = $this->detectNavigationPaths($where);
             foreach ($paths as $path) {
                 if (!in_array($path, $allNavigationPaths)) {
@@ -369,6 +427,21 @@ class AdvancedQueryBuilder
         
         // Second pass: Apply WHERE clauses (now JOINs are already added)
         foreach ($this->wheres as $index => $whereItem) {
+            $groupStart = is_array($whereItem) && isset($whereItem['groupStart']) ? $whereItem['groupStart'] : false;
+            $groupEnd = is_array($whereItem) && isset($whereItem['groupEnd']) ? $whereItem['groupEnd'] : false;
+            
+            if ($groupStart) {
+                $builder->groupStart();
+                log_message('debug', "count(): Group start at index #{$index}");
+                continue;
+            }
+            
+            if ($groupEnd) {
+                $builder->groupEnd();
+                log_message('debug', "count(): Group end at index #{$index}");
+                continue;
+            }
+            
             $where = is_array($whereItem) ? $whereItem['predicate'] : $whereItem;
             $isOr = is_array($whereItem) && isset($whereItem['isOr']) ? $whereItem['isOr'] : false;
             log_message('debug', "count(): Processing where item #{$index}, isOr=" . ($isOr ? 'true' : 'false'));
@@ -518,7 +591,22 @@ class AdvancedQueryBuilder
         $this->currentWhereIndex = 0;
         
         // Apply where clauses
-        foreach ($this->wheres as $whereItem) {
+        foreach ($this->wheres as $index => $whereItem) {
+            $groupStart = is_array($whereItem) && isset($whereItem['groupStart']) ? $whereItem['groupStart'] : false;
+            $groupEnd = is_array($whereItem) && isset($whereItem['groupEnd']) ? $whereItem['groupEnd'] : false;
+            
+            if ($groupStart) {
+                $builder->groupStart();
+                log_message('debug', "sum/average/min/max: Group start at index #{$index}");
+                continue;
+            }
+            
+            if ($groupEnd) {
+                $builder->groupEnd();
+                log_message('debug', "sum/average/min/max: Group end at index #{$index}");
+                continue;
+            }
+            
             $predicate = is_array($whereItem) ? $whereItem['predicate'] : $whereItem;
             $isOr = is_array($whereItem) && isset($whereItem['isOr']) ? $whereItem['isOr'] : false;
             $this->applyWhere($builder, $predicate, $isOr);
@@ -761,6 +849,21 @@ class AdvancedQueryBuilder
         
         // Apply WHERE clauses
         foreach ($this->wheres as $index => $whereItem) {
+            $groupStart = is_array($whereItem) && isset($whereItem['groupStart']) ? $whereItem['groupStart'] : false;
+            $groupEnd = is_array($whereItem) && isset($whereItem['groupEnd']) ? $whereItem['groupEnd'] : false;
+            
+            if ($groupStart) {
+                $builder->groupStart();
+                log_message('debug', "executeQuery: Group start at index #{$index}");
+                continue;
+            }
+            
+            if ($groupEnd) {
+                $builder->groupEnd();
+                log_message('debug', "executeQuery: Group end at index #{$index}");
+                continue;
+            }
+            
             $where = is_array($whereItem) ? $whereItem['predicate'] : $whereItem;
             $isOr = is_array($whereItem) && isset($whereItem['isOr']) ? $whereItem['isOr'] : false;
             log_message('debug', "executeQuery: Processing where item #{$index}, isOr=" . ($isOr ? 'true' : 'false'));
@@ -870,8 +973,45 @@ class AdvancedQueryBuilder
         // Build WHERE clauses
         $whereConditions = [];
         $whereParams = [];
+        $currentGroup = [];
+        $inGroup = false;
+        
         foreach ($this->wheres as $whereItem) {
+            $groupStart = is_array($whereItem) && isset($whereItem['groupStart']) ? $whereItem['groupStart'] : false;
+            $groupEnd = is_array($whereItem) && isset($whereItem['groupEnd']) ? $whereItem['groupEnd'] : false;
+            
+            if ($groupStart) {
+                if ($inGroup) {
+                    // Nested group - add current group to conditions and start new group
+                    if (!empty($currentGroup)) {
+                        $whereConditions[] = '(' . implode(' AND ', $currentGroup) . ')';
+                    }
+                    $currentGroup = [];
+                }
+                $inGroup = true;
+                continue;
+            }
+            
+            if ($groupEnd) {
+                if (!$inGroup) {
+                    log_message('warning', 'endGroup() called without startGroup()');
+                    continue;
+                }
+                if (!empty($currentGroup)) {
+                    $whereConditions[] = '(' . implode(' AND ', $currentGroup) . ')';
+                    $currentGroup = [];
+                }
+                $inGroup = false;
+                continue;
+            }
+            
             $where = is_array($whereItem) ? $whereItem['predicate'] : $whereItem;
+            $isOr = is_array($whereItem) && isset($whereItem['isOr']) ? $whereItem['isOr'] : false;
+            
+            if ($where === null) {
+                continue;
+            }
+            
             try {
                 $parser = new ExpressionParser($this->entityType, $mainAlias, $this->context);
                 
@@ -888,7 +1028,17 @@ class AdvancedQueryBuilder
                 
                 $sqlCondition = $parser->parse($where);
                 if (!empty($sqlCondition)) {
-                    $whereConditions[] = $sqlCondition;
+                    if ($inGroup) {
+                        $currentGroup[] = $sqlCondition;
+                    } else {
+                        if ($isOr && !empty($whereConditions)) {
+                            // For OR conditions, we need to handle them differently
+                            // For now, add as separate condition (can be enhanced)
+                            $whereConditions[] = $sqlCondition;
+                        } else {
+                            $whereConditions[] = $sqlCondition;
+                        }
+                    }
                     // Collect parameter values
                     $paramValues = $parser->getParameterValues();
                     $whereParams = array_merge($whereParams, $paramValues);
@@ -896,6 +1046,11 @@ class AdvancedQueryBuilder
             } catch (\Exception $e) {
                 log_message('debug', 'Error parsing WHERE clause: ' . $e->getMessage());
             }
+        }
+        
+        // Handle any remaining group
+        if ($inGroup && !empty($currentGroup)) {
+            $whereConditions[] = '(' . implode(' AND ', $currentGroup) . ')';
         }
         
         if (!empty($whereConditions)) {
@@ -1071,7 +1226,21 @@ class AdvancedQueryBuilder
     private function hasNavigationFilters(): bool
     {
         foreach ($this->wheres as $whereItem) {
+            $groupStart = is_array($whereItem) && isset($whereItem['groupStart']) ? $whereItem['groupStart'] : false;
+            $groupEnd = is_array($whereItem) && isset($whereItem['groupEnd']) ? $whereItem['groupEnd'] : false;
+            
+            // Skip group markers (they don't have predicates)
+            if ($groupStart || $groupEnd) {
+                continue;
+            }
+            
             $where = is_array($whereItem) ? $whereItem['predicate'] : $whereItem;
+            
+            // Skip if predicate is null
+            if ($where === null) {
+                continue;
+            }
+            
             $paths = $this->detectNavigationPaths($where);
             if (!empty($paths)) {
                 return true;
@@ -2710,7 +2879,21 @@ class AdvancedQueryBuilder
         $allNavigationPaths = [];
         $navigationPathsInWhere = []; // Track which paths are used in WHERE clauses
         foreach ($this->wheres as $index => $whereItem) {
+            $groupStart = is_array($whereItem) && isset($whereItem['groupStart']) ? $whereItem['groupStart'] : false;
+            $groupEnd = is_array($whereItem) && isset($whereItem['groupEnd']) ? $whereItem['groupEnd'] : false;
+            
+            // Skip group markers (they don't have predicates)
+            if ($groupStart || $groupEnd) {
+                continue;
+            }
+            
             $where = is_array($whereItem) ? $whereItem['predicate'] : $whereItem;
+            
+            // Skip if predicate is null
+            if ($where === null) {
+                continue;
+            }
+            
             $paths = $this->detectNavigationPaths($where);
             if (!empty($paths)) {
                 $navigationFilters[$index] = $where;
@@ -3063,21 +3246,72 @@ class AdvancedQueryBuilder
         
         // Build WHERE clause
         $whereConditions = [];
+        $currentGroup = [];
+        $inGroup = false;
+        
         foreach ($this->wheres as $index => $whereItem) {
+            $groupStart = is_array($whereItem) && isset($whereItem['groupStart']) ? $whereItem['groupStart'] : false;
+            $groupEnd = is_array($whereItem) && isset($whereItem['groupEnd']) ? $whereItem['groupEnd'] : false;
+            
+            if ($groupStart) {
+                if ($inGroup) {
+                    // Nested group - add current group to conditions and start new group
+                    if (!empty($currentGroup)) {
+                        $whereConditions[] = '(' . implode(' AND ', $currentGroup) . ')';
+                    }
+                    $currentGroup = [];
+                }
+                $inGroup = true;
+                continue;
+            }
+            
+            if ($groupEnd) {
+                if (!$inGroup) {
+                    log_message('warning', 'endGroup() called without startGroup() in buildEfCoreStyleQuery');
+                    continue;
+                }
+                if (!empty($currentGroup)) {
+                    $whereConditions[] = '(' . implode(' AND ', $currentGroup) . ')';
+                    $currentGroup = [];
+                }
+                $inGroup = false;
+                continue;
+            }
+            
             $where = is_array($whereItem) ? $whereItem['predicate'] : $whereItem;
+            $isOr = is_array($whereItem) && isset($whereItem['isOr']) ? $whereItem['isOr'] : false;
+            
+            if ($where === null) {
+                continue;
+            }
+            
+            $sqlWhere = null;
             if (isset($navigationFilters[$index])) {
                 $paths = $this->detectNavigationPaths($where);
                 // Pass referenceNavAliases to use correct aliases in WHERE clause
                 $sqlWhere = $this->convertNavigationWhereToSql($where, $paths, $referenceNavAliases);
-                if ($sqlWhere) {
-                    $whereConditions[] = $sqlWhere;
-                }
             } else {
                 $sqlWhere = $this->convertSimpleWhereToSql($where, $mainAlias, $referenceNavAliases);
-                if ($sqlWhere) {
-                    $whereConditions[] = $sqlWhere;
+            }
+            
+            if ($sqlWhere) {
+                if ($inGroup) {
+                    $currentGroup[] = $sqlWhere;
+                } else {
+                    if ($isOr && !empty($whereConditions)) {
+                        // For OR conditions, we need to handle them differently
+                        // For now, add as separate condition (can be enhanced)
+                        $whereConditions[] = $sqlWhere;
+                    } else {
+                        $whereConditions[] = $sqlWhere;
+                    }
                 }
             }
+        }
+        
+        // Handle any remaining group
+        if ($inGroup && !empty($currentGroup)) {
+            $whereConditions[] = '(' . implode(' AND ', $currentGroup) . ')';
         }
         
         $whereClause = !empty($whereConditions) ? 'WHERE ' . implode(' AND ', $whereConditions) : '';
