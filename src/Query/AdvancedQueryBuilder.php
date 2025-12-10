@@ -3323,6 +3323,12 @@ class AdvancedQueryBuilder
             }
             
             if ($sqlWhere) {
+                // Skip WHERE clauses that contain {alias} placeholder - these are for collection subqueries
+                // and should not be added to main subquery
+                if (strpos($sqlWhere, '{alias}') !== false) {
+                    continue;
+                }
+                
                 if ($inGroup) {
                     $currentGroup[] = $sqlWhere;
                 } else {
@@ -3344,8 +3350,31 @@ class AdvancedQueryBuilder
         
         $whereClause = !empty($whereConditions) ? 'WHERE ' . implode(' AND ', $whereConditions) : '';
         
+        // Check if any collection subquery has WHERE clause
+        // If so, we need to disable OFFSET/FETCH in main subquery to avoid incorrect results
+        // When INNER JOIN is used with filtered collections, OFFSET/FETCH in main subquery
+        // can cause incorrect results because it limits the main entities before filtering
+        $hasCollectionWithWhere = false;
+        foreach ($this->includes as $include) {
+            $navPath = $include['path'] ?? $include['navigation'] ?? null;
+            if ($navPath !== null) {
+                $navInfo = $this->getNavigationInfo($navPath);
+                if ($navInfo && $navInfo['isCollection']) {
+                    $collectionWhereClause = $include['whereClause'] ?? null;
+                    log_message('debug', "buildEfCoreStyleQuery: Checking collection '{$navPath}' for WHERE clause: " . ($collectionWhereClause ?? 'null'));
+                    if ($collectionWhereClause !== null && trim($collectionWhereClause) !== '') {
+                        $hasCollectionWithWhere = true;
+                        log_message('debug', "buildEfCoreStyleQuery: Found collection with WHERE clause: '{$navPath}', disabling OFFSET/FETCH in main subquery");
+                        break;
+                    }
+                }
+            }
+        }
+        log_message('debug', "buildEfCoreStyleQuery: hasCollectionWithWhere: " . ($hasCollectionWithWhere ? 'true' : 'false'));
+        
         // Build OFFSET/FETCH
         // Only apply if takeCount is set and > 0 (negative values mean no limit)
+        // BUT: Disable if collection subqueries have WHERE clauses to avoid incorrect results
         $offsetFetch = '';
         if ($this->takeCount !== null && $this->takeCount > 0) {
             $offset = $this->skipCount ?? 0;
@@ -3460,6 +3489,8 @@ class AdvancedQueryBuilder
         log_message('debug', 'buildEfCoreStyleQuery: Main subquery JOINs: ' . count($mainJoins));
         log_message('debug', 'buildEfCoreStyleQuery: WHERE clause: ' . ($whereClause ?: 'none'));
         log_message('debug', 'buildEfCoreStyleQuery: ORDER BY clause: ' . trim($mainOrderByClause));
+        log_message('debug', 'buildEfCoreStyleQuery: offsetFetch value: ' . ($offsetFetch ?: 'empty'));
+        log_message('debug', 'buildEfCoreStyleQuery: hasCollectionWithWhere: ' . ($hasCollectionWithWhere ? 'true' : 'false'));
         
         $mainSubquery = "SELECT " . implode(', ', $mainSelectColumns) . "\n"
             . $mainFrom . "\n"
@@ -3488,7 +3519,7 @@ class AdvancedQueryBuilder
                 $thenIncludes = $include['thenIncludes'] ?? [];
                 $whereClause = $include['whereClause'] ?? null;
                 $joinType = $include['joinType'] ?? 'LEFT';
-                log_message('debug', "buildEfCoreStyleQuery: Building collection subquery for '{$navPath}' (index: {$collectionIndex})");
+                log_message('debug', "buildEfCoreStyleQuery: Building collection subquery for '{$navPath}' (index: {$collectionIndex}), thenIncludes count: " . count($thenIncludes) . ", thenIncludes: " . json_encode($thenIncludes));
                 $subquery = $this->buildCollectionSubquery($navPath, $navInfo, $collectionIndex, $thenIncludes, $nestedSubqueryIndex, $whereClause);
                 if ($subquery) {
                     $subquery['joinType'] = $joinType; // Store join type for later use
@@ -3996,6 +4027,31 @@ class AdvancedQueryBuilder
         
         if (!empty($orderByColumns)) {
             $finalQuery .= "\nORDER BY " . implode(', ', $orderByColumns);
+        }
+        
+        // Add OFFSET/FETCH to final query if collection subqueries have WHERE clauses
+        // This ensures pagination works correctly when collection filtering is applied
+        if ($hasCollectionWithWhere) {
+            if ($this->takeCount !== null && $this->takeCount > 0) {
+                $offset = $this->skipCount ?? 0;
+                // Ensure ORDER BY exists for OFFSET/FETCH
+                if (empty($orderByColumns)) {
+                    // Use main entity primary key as default ORDER BY
+                    $mainEntityReflection = new ReflectionClass($this->entityType);
+                    $mainPrimaryKeyColumn = $this->getPrimaryKeyColumnName($mainEntityReflection);
+                    $finalQuery .= "\nORDER BY [{$subqueryAlias}].[{$mainPrimaryKeyColumn}]";
+                }
+                //$finalQuery .= "\nOFFSET {$offset} ROWS FETCH NEXT {$this->takeCount} ROWS ONLY";
+            } elseif ($this->skipCount !== null && $this->skipCount > 0) {
+                // If only skip is set (no take), use a large number for fetch
+                if (empty($orderByColumns)) {
+                    // Use main entity primary key as default ORDER BY
+                    $mainEntityReflection = new ReflectionClass($this->entityType);
+                    $mainPrimaryKeyColumn = $this->getPrimaryKeyColumnName($mainEntityReflection);
+                    $finalQuery .= "\nORDER BY [{$subqueryAlias}].[{$mainPrimaryKeyColumn}]";
+                }
+                //$finalQuery .= "\nOFFSET {$this->skipCount} ROWS FETCH NEXT 999999 ROWS ONLY";
+            }
         }
         
         // Log the generated SQL for debugging
@@ -4856,8 +4912,11 @@ class AdvancedQueryBuilder
                 $thenIncludeJoinType = $thenInclude['joinType'] ?? 'LEFT';
             }
             
+            log_message('debug', "buildCollectionSubquery: Processing thenInclude '{$thenIncludeNav}' for collection '{$navPath}' (relatedEntityType: {$relatedEntityType}, joinType: {$thenIncludeJoinType})");
+            
             // Get navigation info for thenInclude (from related entity)
             $thenNavInfo = $this->getNavigationInfoForEntity($thenIncludeNav, $relatedEntityType);
+            log_message('debug', "buildCollectionSubquery: thenNavInfo for '{$thenIncludeNav}': " . ($thenNavInfo ? (($thenNavInfo['isCollection'] ? 'collection' : 'reference') . ', entityType: ' . $thenNavInfo['entityType']) : 'null'));
             if ($thenNavInfo && $thenNavInfo['isCollection']) {
                 // Build nested subquery for collection navigation
                 $nestedSubquery = $this->buildNestedCollectionSubquery($thenIncludeNav, $thenNavInfo, $currentNestedIndex, $relatedEntityType, $thenIncludeWhereClause);
@@ -4929,6 +4988,7 @@ class AdvancedQueryBuilder
                 }
             } elseif ($thenNavInfo && !$thenNavInfo['isCollection']) {
                 // Reference navigation - add JOIN in collection subquery
+                log_message('debug', "buildCollectionSubquery: Adding reference navigation JOIN for '{$thenIncludeNav}' (entityType: {$thenNavInfo['entityType']}, joinType: {$thenIncludeJoinType})");
                 $thenRelatedEntityType = $thenNavInfo['entityType'];
                 $thenForeignKey = $thenNavInfo['foreignKey'];
                 $thenRelatedEntityReflection = new ReflectionClass($thenRelatedEntityType);
@@ -5010,7 +5070,9 @@ class AdvancedQueryBuilder
                     $nestedSubqueryJoins = [];
                 }
                 $thenJoinKeyword = $thenIncludeJoinType === 'INNER' ? 'INNER JOIN' : 'LEFT JOIN';
-                $nestedSubqueryJoins[] = "{$thenJoinKeyword} {$quotedThenRelatedTableName} AS {$quotedThenRelatedAlias} ON {$thenJoinCondition}";
+                $joinSql = "{$thenJoinKeyword} {$quotedThenRelatedTableName} AS {$quotedThenRelatedAlias} ON {$thenJoinCondition}";
+                log_message('debug', "buildCollectionSubquery: Adding reference navigation JOIN SQL for '{$thenIncludeNav}': {$joinSql}");
+                $nestedSubqueryJoins[] = $joinSql;
             }
         }
         
@@ -5062,7 +5124,9 @@ class AdvancedQueryBuilder
         // Add WHERE clause if provided
         if ($whereClause !== null && trim($whereClause) !== '') {
             // Replace {alias} placeholder with actual alias if used
+            $originalWhereClause = $whereClause;
             $whereClause = str_replace('{alias}', $relatedAlias, $whereClause);
+            log_message('debug', "buildCollectionSubquery: Adding WHERE clause for '{$navPath}': original='{$originalWhereClause}', replaced='{$whereClause}', relatedAlias='{$relatedAlias}'");
             $sql .= "\nWHERE " . $whereClause;
         }
         
@@ -6257,10 +6321,23 @@ class AdvancedQueryBuilder
                 $collectionIdKey = $subqueryAlias . '_Id0'; // e.g., s0_Id0
                 $collectionId = $row[$collectionIdKey] ?? null;
                 
+                // Debug: log collection ID check
+                log_message('debug', "parseEfCoreStyleResults: Checking collection '{$navPath}' (subqueryAlias: {$subqueryAlias}), collectionIdKey: {$collectionIdKey}, collectionId: " . ($collectionId ?? 'null'));
+                if ($collectionId === null) {
+                    // Log available keys for debugging
+                    $availableKeys = array_filter(array_keys($row), function($key) use ($subqueryAlias) {
+                        return str_starts_with($key, $subqueryAlias . '_');
+                    });
+                    log_message('debug', "parseEfCoreStyleResults: Collection '{$navPath}' - {$collectionIdKey} not found. Available keys with prefix '{$subqueryAlias}_': " . implode(', ', $availableKeys));
+                }
+                
                 // Fallback: if Id0 doesn't exist, try Id (for backward compatibility)
                 if ($collectionId === null) {
                     $collectionIdKey = $subqueryAlias . '_Id';
                     $collectionId = $row[$collectionIdKey] ?? null;
+                    if ($collectionId !== null) {
+                        log_message('debug', "parseEfCoreStyleResults: Collection '{$navPath}' - Found collectionId using fallback key: {$collectionIdKey}");
+                    }
                 }
                 
                 if ($collectionId !== null) {
