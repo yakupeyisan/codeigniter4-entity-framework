@@ -143,23 +143,40 @@ class AdvancedQueryBuilder
     /**
      * Add INCLUDE for eager loading
      */
-    public function include(string $navigationProperty): self
+    public function include(string $navigationProperty, ?string $whereClause = null, string $joinType = 'LEFT'): self
     {
-        $this->includes[] = ['path' => $navigationProperty, 'level' => 0];
+        $include = ['path' => $navigationProperty, 'level' => 0];
+        if ($whereClause !== null) {
+            $include['whereClause'] = $whereClause;
+        }
+        if ($joinType !== 'LEFT') {
+            $include['joinType'] = strtoupper($joinType);
+        }
+        $this->includes[] = $include;
         return $this;
     }
 
     /**
      * Add THEN INCLUDE for nested navigation properties
+     * @param string $navigationProperty Navigation property name
+     * @param string|null $whereClause Optional WHERE clause for collection subquery (e.g., "{alias}.AccessEventID IN (SELECT max(AccessEventID) FROM AccessEvent AS [ac] GROUP BY [ac].EmployeeID)"). Use {alias} placeholder for the entity alias.
+     * @param string $joinType Join type: 'LEFT' (default) or 'INNER'
      */
-    public function thenInclude(string $navigationProperty): self
+    public function thenInclude(string $navigationProperty, ?string $whereClause = null, string $joinType = 'LEFT'): self
     {
         if (empty($this->includes)) {
             throw new \RuntimeException('ThenInclude must be called after Include');
         }
         
         $lastInclude = &$this->includes[count($this->includes) - 1];
-        $lastInclude['thenIncludes'][] = $navigationProperty;
+        $thenIncludeData = ['navigation' => $navigationProperty];
+        if ($whereClause !== null) {
+            $thenIncludeData['whereClause'] = $whereClause;
+        }
+        if ($joinType !== 'LEFT') {
+            $thenIncludeData['joinType'] = strtoupper($joinType);
+        }
+        $lastInclude['thenIncludes'][] = $thenIncludeData;
         return $this;
     }
 
@@ -2307,7 +2324,9 @@ class AdvancedQueryBuilder
             // Load then includes
             if (isset($include['thenIncludes'])) {
                 foreach ($include['thenIncludes'] as $thenInclude) {
-                    $this->loadThenInclude($entities, $navigationProperty, $thenInclude);
+                    // Handle both string (backward compatibility) and array format
+                    $thenIncludeNav = is_string($thenInclude) ? $thenInclude : ($thenInclude['navigation'] ?? $thenInclude);
+                    $this->loadThenInclude($entities, $navigationProperty, $thenIncludeNav);
                 }
             }
         }
@@ -2918,11 +2937,14 @@ class AdvancedQueryBuilder
                 // Check for thenIncludes
                 $thenIncludes = $include['thenIncludes'] ?? [];
                 foreach ($thenIncludes as $thenInclude) {
+                    // Handle both string (backward compatibility) and array format
+                    $thenIncludeNav = is_string($thenInclude) ? $thenInclude : ($thenInclude['navigation'] ?? $thenInclude);
+                    
                     // Build full path: parentNav.thenInclude
-                    $fullPath = $navPath . '.' . $thenInclude;
+                    $fullPath = $navPath . '.' . $thenIncludeNav;
                     $thenIncludePaths[] = $fullPath;
                     // Also add just the thenInclude name for nested collection subqueries
-                    $thenIncludePaths[] = $thenInclude;
+                    $thenIncludePaths[] = $thenIncludeNav;
                 }
             }
         }
@@ -3037,7 +3059,10 @@ class AdvancedQueryBuilder
                 $thenIncludeNestedSubqueryIndex = 1;
                 $thenIncludeCollectionIndex = 1; // Index for reference thenInclude navigations (for alias generation, start at 1 to avoid conflicts)
                 foreach ($thenIncludes as $thenInclude) {
-                    $thenNavInfo = $this->getNavigationInfoForEntity($thenInclude, $navInfo['entityType']);
+                    // Handle both string (backward compatibility) and array format
+                    $thenIncludeNav = is_string($thenInclude) ? $thenInclude : ($thenInclude['navigation'] ?? $thenInclude);
+                    
+                    $thenNavInfo = $this->getNavigationInfoForEntity($thenIncludeNav, $navInfo['entityType']);
                     if ($thenNavInfo && $thenNavInfo['isCollection']) {
                         // Collection thenInclude - will create subquery later with correct index
                         // Store info for later processing
@@ -3045,7 +3070,7 @@ class AdvancedQueryBuilder
                             $referenceNavThenIncludeSubqueries[$navPath] = [];
                         }
                         $referenceNavThenIncludeSubqueries[$navPath][] = [
-                            'navigation' => $navPath . '.' . $thenInclude,
+                            'navigation' => $navPath . '.' . $thenIncludeNav,
                             'navInfo' => $thenNavInfo,
                             'nestedSubqueryIndex' => $thenIncludeNestedSubqueryIndex
                         ];
@@ -3056,7 +3081,7 @@ class AdvancedQueryBuilder
                         // For nested navigations, use the thenInclude name itself to generate unique alias
                         $nestedRefIndex = $referenceNavIndex * 100 + $thenIncludeCollectionIndex;
                         // Use thenInclude name (e.g., "CustomField") instead of full path to avoid conflicts
-                        $thenRefAlias = $this->getTableAlias($thenInclude, $nestedRefIndex);
+                        $thenRefAlias = $this->getTableAlias($thenIncludeNav, $nestedRefIndex);
                         $thenRefEntityReflection = new ReflectionClass($thenNavInfo['entityType']);
                         $thenRefColumnsWithProperties = $this->getEntityColumnsWithProperties($thenRefEntityReflection);
                         $thenRefPrimaryKeyColumn = $this->getPrimaryKeyColumnName($thenRefEntityReflection);
@@ -3209,11 +3234,14 @@ class AdvancedQueryBuilder
                             if (in_array($thenInclude, $processedThenIncludes)) {
                                 continue;
                             }
-                            $processedThenIncludes[] = $thenInclude;
-                            $thenNavInfo = $this->getNavigationInfoForEntity($thenInclude, $navInfo['entityType']);
+                            // Handle both string (backward compatibility) and array format
+                            $thenIncludeNav = is_string($thenInclude) ? $thenInclude : ($thenInclude['navigation'] ?? $thenInclude);
+                            
+                            $processedThenIncludes[] = $thenIncludeNav;
+                            $thenNavInfo = $this->getNavigationInfoForEntity($thenIncludeNav, $navInfo['entityType']);
                             if ($thenNavInfo && !$thenNavInfo['isCollection']) {
                                 // Reference navigation thenInclude - add nested JOIN
-                                $thenIncludePath = $navPath . '.' . $thenInclude;
+                                $thenIncludePath = $navPath . '.' . $thenIncludeNav;
                                 if (isset($referenceNavAliases[$thenIncludePath])) {
                                     $thenRefAlias = $referenceNavAliases[$thenIncludePath];
                                     log_message('debug', "buildEfCoreStyleQuery: For nested JOIN '{$thenIncludePath}', using alias '{$thenRefAlias}' from referenceNavAliases");
@@ -3458,8 +3486,13 @@ class AdvancedQueryBuilder
             if ($navInfo && $navInfo['isCollection']) {
                 // Check for thenIncludes
                 $thenIncludes = $include['thenIncludes'] ?? [];
+                $whereClause = $include['whereClause'] ?? null;
+                $joinType = $include['joinType'] ?? 'LEFT';
                 log_message('debug', "buildEfCoreStyleQuery: Building collection subquery for '{$navPath}' (index: {$collectionIndex})");
-                $subquery = $this->buildCollectionSubquery($navPath, $navInfo, $collectionIndex, $thenIncludes, $nestedSubqueryIndex);
+                $subquery = $this->buildCollectionSubquery($navPath, $navInfo, $collectionIndex, $thenIncludes, $nestedSubqueryIndex, $whereClause);
+                if ($subquery) {
+                    $subquery['joinType'] = $joinType; // Store join type for later use
+                }
                 if ($subquery) {
                     $collectionSubqueries[] = $subquery;
                     log_message('debug', "buildEfCoreStyleQuery: Added collection subquery for '{$navPath}'");
@@ -3830,7 +3863,11 @@ class AdvancedQueryBuilder
                 }
             }
             
-            $finalQuery .= "\nLEFT JOIN (\n"
+            // Determine join type (LEFT or INNER)
+            $joinType = $subquery['joinType'] ?? 'LEFT';
+            $joinKeyword = $joinType === 'INNER' ? 'INNER JOIN' : 'LEFT JOIN';
+            
+            $finalQuery .= "\n{$joinKeyword} (\n"
                 . "    " . str_replace("\n", "\n    ", $subquery['sql']) . "\n"
                 . ") AS [{$collectionSubqueryAlias}] ON {$joinCondition}";
         }
@@ -4533,7 +4570,7 @@ class AdvancedQueryBuilder
      * @param int $nestedSubqueryIndex Starting index for nested subqueries (1, etc.)
      * @return array|null Subquery info with SQL and metadata
      */
-    private function buildCollectionSubquery(string $navPath, array $navInfo, int $index, array $thenIncludes = [], int &$nestedSubqueryIndex = 1): ?array
+    private function buildCollectionSubquery(string $navPath, array $navInfo, int $index, array $thenIncludes = [], int &$nestedSubqueryIndex = 1, ?string $whereClause = null): ?array
     {
         if (!$navInfo['isCollection']) {
             return null;
@@ -4808,11 +4845,25 @@ class AdvancedQueryBuilder
         }
         
         foreach ($thenIncludes as $thenInclude) {
+            // Handle both string (backward compatibility) and array format
+            if (is_string($thenInclude)) {
+                $thenIncludeNav = $thenInclude;
+                $thenIncludeWhereClause = null;
+                $thenIncludeJoinType = 'LEFT';
+            } else {
+                $thenIncludeNav = $thenInclude['navigation'] ?? $thenInclude;
+                $thenIncludeWhereClause = $thenInclude['whereClause'] ?? null;
+                $thenIncludeJoinType = $thenInclude['joinType'] ?? 'LEFT';
+            }
+            
             // Get navigation info for thenInclude (from related entity)
-            $thenNavInfo = $this->getNavigationInfoForEntity($thenInclude, $relatedEntityType);
+            $thenNavInfo = $this->getNavigationInfoForEntity($thenIncludeNav, $relatedEntityType);
             if ($thenNavInfo && $thenNavInfo['isCollection']) {
                 // Build nested subquery for collection navigation
-                $nestedSubquery = $this->buildNestedCollectionSubquery($thenInclude, $thenNavInfo, $currentNestedIndex, $relatedEntityType);
+                $nestedSubquery = $this->buildNestedCollectionSubquery($thenIncludeNav, $thenNavInfo, $currentNestedIndex, $relatedEntityType, $thenIncludeWhereClause);
+                if ($nestedSubquery) {
+                    $nestedSubquery['joinType'] = $thenIncludeJoinType; // Store join type for later use
+                }
                 if ($nestedSubquery) {
                     $nestedSubqueries[] = $nestedSubquery;
                     // Add nested subquery columns to main collection subquery SELECT
@@ -4864,13 +4915,15 @@ class AdvancedQueryBuilder
                         }
                     }
                     
-                    // Build nested subquery LEFT JOIN condition
+                    // Build nested subquery JOIN condition
                     // For AuthorizationOperationClaims nested in Authorization, join on Authorization.Id
                     $parentEntityReflection = new ReflectionClass($relatedEntityType);
                     $parentIdColumn = 'Id';
                     $nestedJoinFkColumn = 'AuthorizationId'; // TODO: Make this dynamic based on thenInclude navigation
                     $nestedJoinCondition = "[{$relatedAlias}].[{$parentIdColumn}] = [{$nestedAlias}].[{$nestedJoinFkColumn}]";
-                    $nestedSubqueryJoins[] = "LEFT JOIN (\n    " . str_replace("\n", "\n    ", $nestedSubquery['sql']) . "\n) AS [{$nestedAlias}] ON {$nestedJoinCondition}";
+                    $nestedJoinType = $nestedSubquery['joinType'] ?? 'LEFT';
+                    $nestedJoinKeyword = $nestedJoinType === 'INNER' ? 'INNER JOIN' : 'LEFT JOIN';
+                    $nestedSubqueryJoins[] = "{$nestedJoinKeyword} (\n    " . str_replace("\n", "\n    ", $nestedSubquery['sql']) . "\n) AS [{$nestedAlias}] ON {$nestedJoinCondition}";
                     
                     $currentNestedIndex++;
                 }
@@ -4880,7 +4933,7 @@ class AdvancedQueryBuilder
                 $thenForeignKey = $thenNavInfo['foreignKey'];
                 $thenRelatedEntityReflection = new ReflectionClass($thenRelatedEntityType);
                 $thenRelatedTableName = $this->context->getTableName($thenRelatedEntityType);
-                $thenRelatedAlias = $this->getTableAlias($thenInclude, 0);
+                $thenRelatedAlias = $this->getTableAlias($thenIncludeNav, 0);
                 
                 // Get columns from thenInclude reference entity
                 $thenRelatedColumnsWithProperties = $this->getEntityColumnsWithProperties($thenRelatedEntityReflection);
@@ -4900,7 +4953,7 @@ class AdvancedQueryBuilder
                     if ($thenFirstCol && $col === $thenRelatedPrimaryKeyColumn) {
                         // Primary key gets alias - but we need to avoid conflicts
                         // Use a unique alias based on thenInclude name
-                        $thenIdAlias = "Id" . ucfirst($thenInclude) . "0";
+                        $thenIdAlias = "Id" . ucfirst($thenIncludeNav) . "0";
                         $nestedSelectColumns[] = "{$quotedThenRelatedAlias}.{$quotedThenCol} AS [{$thenIdAlias}]";
                         $existingColumnNames[strtolower($thenIdAlias)] = true;
                         $thenFirstCol = false;
@@ -4909,7 +4962,7 @@ class AdvancedQueryBuilder
                         $needsAlias = isset($existingColumnNames[$colLower]);
                         if ($needsAlias) {
                             // Use navigation name as prefix to avoid conflict
-                            $aliasCol = ucfirst($thenInclude) . ucfirst($col);
+                            $aliasCol = ucfirst($thenIncludeNav) . ucfirst($col);
                             $quotedAliasCol = $provider->escapeIdentifier($aliasCol);
                         }
                         
@@ -4956,7 +5009,8 @@ class AdvancedQueryBuilder
                 if (!isset($nestedSubqueryJoins)) {
                     $nestedSubqueryJoins = [];
                 }
-                $nestedSubqueryJoins[] = "LEFT JOIN {$quotedThenRelatedTableName} AS {$quotedThenRelatedAlias} ON {$thenJoinCondition}";
+                $thenJoinKeyword = $thenIncludeJoinType === 'INNER' ? 'INNER JOIN' : 'LEFT JOIN';
+                $nestedSubqueryJoins[] = "{$thenJoinKeyword} {$quotedThenRelatedTableName} AS {$quotedThenRelatedAlias} ON {$thenJoinCondition}";
             }
         }
         
@@ -5003,6 +5057,13 @@ class AdvancedQueryBuilder
             if (!empty($nestedSubqueryLeftJoins)) {
                 $sql .= "\n" . implode("\n", $nestedSubqueryLeftJoins);
             }
+        }
+        
+        // Add WHERE clause if provided
+        if ($whereClause !== null && trim($whereClause) !== '') {
+            // Replace {alias} placeholder with actual alias if used
+            $whereClause = str_replace('{alias}', $relatedAlias, $whereClause);
+            $sql .= "\nWHERE " . $whereClause;
         }
         
         return [
@@ -5110,6 +5171,15 @@ class AdvancedQueryBuilder
         $sql = "SELECT " . implode(', ', $selectColumns) . "\n"
             . "FROM {$quotedJoinTableName} AS {$quotedJoinAlias}\n"
             . "INNER JOIN {$quotedRelatedTableName} AS {$quotedRelatedAlias} ON {$joinCondition}";
+        
+        // Add WHERE clause if provided
+        if ($whereClause !== null && trim($whereClause) !== '') {
+            // Replace {alias} placeholder with actual alias if used
+            // For nested subqueries, we need to replace both join and related aliases
+            $whereClause = str_replace('{alias}', $joinAlias, $whereClause);
+            $whereClause = str_replace('{relatedAlias}', $relatedAlias, $whereClause);
+            $sql .= "\nWHERE " . $whereClause;
+        }
         
         return [
             'navigation' => $navPath,
@@ -5846,10 +5916,13 @@ class AdvancedQueryBuilder
                 // This is a reference navigation with thenIncludes
                 $thenIncludeCollectionIndex = 1; // Start at 1 to match alias generation
                 foreach ($include['thenIncludes'] as $thenInclude) {
-                    $thenNavInfo = $this->getNavigationInfoForEntity($thenInclude, $navInfo['entityType']);
+                    // Handle both string (backward compatibility) and array format
+                    $thenIncludeNav = is_string($thenInclude) ? $thenInclude : ($thenInclude['navigation'] ?? $thenInclude);
+                    
+                    $thenNavInfo = $this->getNavigationInfoForEntity($thenIncludeNav, $navInfo['entityType']);
                     if ($thenNavInfo && !$thenNavInfo['isCollection']) {
                         // Nested reference navigation
-                        $thenIncludePath = $navPath . '.' . $thenInclude;
+                        $thenIncludePath = $navPath . '.' . $thenIncludeNav;
                         // Use stored index from SQL building if available, otherwise calculate
                         if (isset($this->referenceNavIndexes[$thenIncludePath])) {
                             $nestedIndex = $this->referenceNavIndexes[$thenIncludePath];
@@ -6463,7 +6536,10 @@ class AdvancedQueryBuilder
         $nestedSubqueryIndex = $parentIndex + 1; // e.g., if parent is s1, nested starts at s1 (which is the nested subquery alias)
         
         foreach ($thenIncludes as $thenInclude) {
-            $thenNavInfo = $this->getNavigationInfoForEntity($thenInclude, $relatedEntityType);
+            // Handle both string (backward compatibility) and array format
+            $thenIncludeNav = is_string($thenInclude) ? $thenInclude : ($thenInclude['navigation'] ?? $thenInclude);
+            
+            $thenNavInfo = $this->getNavigationInfoForEntity($thenIncludeNav, $relatedEntityType);
             if (!$thenNavInfo) {
                 continue;
             }
@@ -6471,7 +6547,7 @@ class AdvancedQueryBuilder
             // Handle reference navigation (many-to-one or one-to-one)
             if (!$thenNavInfo['isCollection']) {
                 // Reference navigation: e.g., Department in UserDepartment
-                $navProperty = $relatedEntityReflection->getProperty($thenInclude);
+                $navProperty = $relatedEntityReflection->getProperty($thenIncludeNav);
                 $navProperty->setAccessible(true);
                 
                 // The related entity data should already be in the row with prefix from parent subquery
@@ -6485,7 +6561,7 @@ class AdvancedQueryBuilder
                 continue;
             }
             
-            $navProperty = $relatedEntityReflection->getProperty($thenInclude);
+            $navProperty = $relatedEntityReflection->getProperty($thenIncludeNav);
             $navProperty->setAccessible(true);
             $collection = $navProperty->getValue($relatedEntity) ?? [];
             

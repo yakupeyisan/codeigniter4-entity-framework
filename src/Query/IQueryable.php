@@ -36,13 +36,19 @@ interface IQueryable
 
     /**
      * Include navigation property (Eager Loading)
+     * @param string $navigationProperty Navigation property name
+     * @param string|null $whereClause Optional WHERE clause for collection subquery (e.g., "{alias}.AccessEventID IN (SELECT max(AccessEventID) FROM AccessEvent AS [ac] GROUP BY [ac].EmployeeID)"). Use {alias} placeholder for the entity alias.
+     * @param string $joinType Join type: 'LEFT' (default) or 'INNER'
      */
-    public function include(string $navigationProperty): IQueryable;
+    public function include(string $navigationProperty, ?string $whereClause = null, string $joinType = 'LEFT'): IQueryable;
 
     /**
      * ThenInclude for nested navigation properties
+     * @param string $navigationProperty Navigation property name
+     * @param string|null $whereClause Optional WHERE clause for collection subquery (e.g., "{alias}.AccessEventID IN (SELECT max(AccessEventID) FROM AccessEvent AS [ac] GROUP BY [ac].EmployeeID)"). Use {alias} placeholder for the entity alias, {relatedAlias} for related entity alias in nested subqueries.
+     * @param string $joinType Join type: 'LEFT' (default) or 'INNER'
      */
-    public function thenInclude(string $navigationProperty): IQueryable;
+    public function thenInclude(string $navigationProperty, ?string $whereClause = null, string $joinType = 'LEFT'): IQueryable;
 
     /**
      * Order by ascending

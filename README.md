@@ -192,6 +192,24 @@ $users = $context->Users()
     ->orderBy(fn($u) => $u->LastName)
     ->toList();
 
+// Include with WHERE clause and JOIN type
+// Sadece en son AccessEvent'i getirmek için
+$employees = $context->Employees()
+    ->include('AccessEvents', 
+        '{alias}.AccessEventID IN (SELECT max(AccessEventID) FROM AccessEvent AS [ac] WHERE [ac].EmployeeID = {alias}.EmployeeID GROUP BY [ac].EmployeeID)', 
+        'INNER'
+    )
+    ->toList();
+
+// ThenInclude with WHERE clause and JOIN type
+$employees = $context->Employees()
+    ->include('AccessEvents')
+    ->thenInclude('Terminal', 
+        '{alias}.Status = 1', 
+        'INNER'
+    )
+    ->toList();
+
 // First or default
 $user = $context->Users()
     ->where(fn($u) => $u->Id === 1)
@@ -208,6 +226,167 @@ $count = $context->Users()->count();
 // Any
 $hasUsers = $context->Users()->any();
 ```
+
+### Eager Loading (Include / ThenInclude) with WHERE Clause and JOIN Type
+
+`include()` ve `thenInclude()` metodlarına WHERE clause ve JOIN type desteği eklendi. Bu özellik sayesinde collection navigation'lar için filtreleme yapabilir ve JOIN tipini (LEFT veya INNER) belirleyebilirsiniz.
+
+#### Include with WHERE Clause
+
+```php
+use App\EntityFramework\ApplicationDbContext;
+
+$context = new ApplicationDbContext();
+
+// Sadece en son AccessEvent'i getirmek için
+$employees = $context->Employees()
+    ->include('AccessEvents', 
+        '{alias}.AccessEventID IN (SELECT max(AccessEventID) FROM AccessEvent AS [ac] WHERE [ac].EmployeeID = {alias}.EmployeeID GROUP BY [ac].EmployeeID)', 
+        'INNER'
+    )
+    ->toList();
+
+// WHERE clause'da {alias} placeholder'ı otomatik olarak entity alias'ı ile değiştirilir
+// JOIN type: 'LEFT' (varsayılan) veya 'INNER'
+```
+
+#### ThenInclude with WHERE Clause
+
+```php
+use App\EntityFramework\ApplicationDbContext;
+
+$context = new ApplicationDbContext();
+
+// Collection navigation için nested collection subquery'ye WHERE clause ekleme
+$employees = $context->Employees()
+    ->include('AccessEvents')
+    ->thenInclude('Terminal', 
+        '{alias}.Status = 1',  // WHERE clause
+        'INNER'                // JOIN type
+    )
+    ->toList();
+
+// Reference navigation için JOIN'e WHERE clause ekleme
+$employees = $context->Employees()
+    ->include('AccessEvents')
+    ->thenInclude('Terminal', 
+        '{alias}.ReaderID IN (SELECT ReaderID FROM Terminals WHERE Status = 1)', 
+        'INNER'
+    )
+    ->toList();
+```
+
+#### Placeholder Kullanımı
+
+WHERE clause'da aşağıdaki placeholder'ları kullanabilirsiniz:
+
+- **`{alias}`**: Collection subquery'deki entity alias'ı (örn: `u2`, `u1`)
+- **`{relatedAlias}`**: Nested collection subquery'lerde related entity alias'ı (örn: `o`)
+
+**Örnek:**
+
+```php
+// Collection subquery için
+$employees = $context->Employees()
+    ->include('AccessEvents', 
+        '{alias}.AccessEventID IN (SELECT max(AccessEventID) FROM AccessEvent AS [ac] GROUP BY [ac].EmployeeID)'
+    )
+    ->toList();
+
+// Nested collection subquery için
+$employees = $context->Employees()
+    ->include('AccessEvents')
+    ->thenInclude('Terminal', 
+        '{alias}.Status = 1 AND {relatedAlias}.IsActive = 1'
+    )
+    ->toList();
+```
+
+#### JOIN Type Seçimi
+
+- **`'LEFT'`** (varsayılan): LEFT JOIN kullanır, eşleşmeyen kayıtlar da gelir
+- **`'INNER'`**: INNER JOIN kullanır, sadece eşleşen kayıtlar gelir
+
+**Örnek:**
+
+```php
+// LEFT JOIN (varsayılan) - Tüm employee'ler gelir, AccessEvent olmayanlar da
+$employees = $context->Employees()
+    ->include('AccessEvents', null, 'LEFT')
+    ->toList();
+
+// INNER JOIN - Sadece AccessEvent'i olan employee'ler gelir
+$employees = $context->Employees()
+    ->include('AccessEvents', null, 'INNER')
+    ->toList();
+```
+
+#### Geriye Dönük Uyumluluk
+
+Mevcut `include()` ve `thenInclude()` çağrıları geriye dönük uyumludur. WHERE clause ve JOIN type parametreleri opsiyoneldir:
+
+```php
+// Eski kullanım hala çalışır
+$users = $context->Users()
+    ->include('Company')
+    ->include('UserDepartments')
+        ->thenInclude('Department')
+    ->toList();
+
+// Yeni özellikler opsiyonel
+$users = $context->Users()
+    ->include('Company')  // WHERE clause ve JOIN type yok
+    ->include('UserDepartments', '{alias}.IsActive = 1', 'INNER')  // Yeni özellikler
+        ->thenInclude('Department')  // WHERE clause ve JOIN type yok
+    ->toList();
+```
+
+#### Kullanım Senaryoları
+
+**Senaryo 1: Sadece En Son Kayıtları Getirme**
+
+```php
+// Her çalışan için sadece en son geçtiği kapının AccessEvent bilgilerini getir
+$employees = $context->Employees()
+    ->include('AccessEvents', 
+        '{alias}.AccessEventID IN (SELECT max(AccessEventID) FROM AccessEvent AS [ac] WHERE [ac].EmployeeID = {alias}.EmployeeID GROUP BY [ac].EmployeeID)', 
+        'INNER'
+    )
+    ->toList();
+```
+
+**Senaryo 2: Aktif Kayıtları Filtreleme**
+
+```php
+// Sadece aktif terminal'leri getir
+$employees = $context->Employees()
+    ->include('AccessEvents')
+    ->thenInclude('Terminal', 
+        '{alias}.Status = 1 AND {alias}.IsActive = 1', 
+        'INNER'
+    )
+    ->toList();
+```
+
+**Senaryo 3: Tarih Aralığı Filtreleme**
+
+```php
+// Son 30 gün içindeki AccessEvent'leri getir
+$employees = $context->Employees()
+    ->include('AccessEvents', 
+        '{alias}.EventTime >= DATEADD(DAY, -30, GETDATE())', 
+        'INNER'
+    )
+    ->toList();
+```
+
+#### Notlar
+
+1. **WHERE Clause**: WHERE clause SQL Server syntax'ına uygun olmalıdır
+2. **Placeholder**: `{alias}` ve `{relatedAlias}` placeholder'ları otomatik olarak doğru alias'larla değiştirilir
+3. **JOIN Type**: Collection navigation'lar için LEFT veya INNER JOIN seçilebilir
+4. **Performance**: WHERE clause ile filtreleme yaparak gereksiz veri yüklemeyi önleyebilirsiniz
+5. **Güvenlik**: WHERE clause'da SQL injection'dan korunmak için parametreli sorgular kullanın (şu an için raw SQL string kullanılıyor)
 
 ### Advanced WHERE Clause (Expression Tree Parsing)
 

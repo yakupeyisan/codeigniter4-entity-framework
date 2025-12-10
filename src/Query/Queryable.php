@@ -49,15 +49,15 @@ class Queryable implements IQueryable
         return $this;
     }
 
-    public function include(string $navigationProperty): IQueryable
+    public function include(string $navigationProperty, ?string $whereClause = null, string $joinType = 'LEFT'): IQueryable
     {
-        $this->queryBuilder->include($navigationProperty);
+        $this->queryBuilder->include($navigationProperty, $whereClause, $joinType);
         return $this;
     }
 
-    public function thenInclude(string $navigationProperty): IQueryable
+    public function thenInclude(string $navigationProperty, ?string $whereClause = null, string $joinType = 'LEFT'): IQueryable
     {
-        $this->queryBuilder->thenInclude($navigationProperty);
+        $this->queryBuilder->thenInclude($navigationProperty, $whereClause, $joinType);
         return $this;
     }
 
