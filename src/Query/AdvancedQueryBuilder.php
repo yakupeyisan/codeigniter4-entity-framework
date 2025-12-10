@@ -4584,10 +4584,12 @@ class AdvancedQueryBuilder
             
             // Build SELECT
             $selectColumns = [];
+            $selectColumnNames = []; // Track column names to detect duplicates
             $quotedJoinAlias = $provider->escapeIdentifier($joinAlias);
             foreach ($joinColumns as $col) {
                 $quotedJoinCol = $provider->escapeIdentifier($col);
                 $selectColumns[] = "{$quotedJoinAlias}.{$quotedJoinCol}";
+                $selectColumnNames[strtolower($col)] = true;
             }
             $relatedIdx = 0;
             $firstCol = true;
@@ -4602,6 +4604,7 @@ class AdvancedQueryBuilder
                 if ($firstCol && $col === 'Id') {
                     $quotedIdAlias = $provider->escapeIdentifier("Id{$relatedIdx}");
                     $selectColumns[] = "{$quotedRelatedAlias}.{$quotedRelatedCol} AS {$quotedIdAlias}";
+                    $selectColumnNames[strtolower("Id{$relatedIdx}")] = true;
                     $firstCol = false;
                 } else {
                     // Apply masking for sensitive columns in related entity
@@ -4616,9 +4619,11 @@ class AdvancedQueryBuilder
                             $sensitiveAttr->customMask
                         );
                         $selectColumns[] = "({$maskedExpression}) AS {$quotedRelatedCol}";
+                        $selectColumnNames[strtolower($col)] = true;
                     } else {
                         // No masking
                         $selectColumns[] = "{$quotedRelatedAlias}.{$quotedRelatedCol}";
+                        $selectColumnNames[strtolower($col)] = true;
                     }
                 }
             }
@@ -4709,6 +4714,7 @@ class AdvancedQueryBuilder
             
             // Build SELECT - only related entity columns
             $selectColumns = [];
+            $selectColumnNames = []; // Track column names to detect duplicates
             $relatedIdx = 0;
             $firstCol = true;
             $quotedRelatedAlias = $provider->escapeIdentifier($relatedAlias);
@@ -4724,6 +4730,7 @@ class AdvancedQueryBuilder
                 if ($firstCol && $col === $relatedPrimaryKeyColumn) {
                     $quotedIdAlias = $provider->escapeIdentifier("Id{$relatedIdx}");
                     $selectColumns[] = "{$quotedRelatedAlias}.{$quotedRelatedCol} AS {$quotedIdAlias}";
+                    $selectColumnNames[strtolower("Id{$relatedIdx}")] = true;
                     $firstCol = false;
                 } else {
                     // Apply masking for sensitive columns in related entity
@@ -4738,9 +4745,11 @@ class AdvancedQueryBuilder
                             $sensitiveAttr->customMask
                         );
                         $selectColumns[] = "({$maskedExpression}) AS {$quotedRelatedCol}";
+                        $selectColumnNames[strtolower($col)] = true;
                     } else {
                         // No masking
                         $selectColumns[] = "{$quotedRelatedAlias}.{$quotedRelatedCol}";
+                        $selectColumnNames[strtolower($col)] = true;
                     }
                 }
             }
@@ -4777,6 +4786,26 @@ class AdvancedQueryBuilder
         $nestedSubqueryJoins = [];
         $nestedSelectColumns = [];
         $currentNestedIndex = $nestedSubqueryIndex;
+        
+        // Use tracked column names from selectColumns (or extract if not tracked)
+        $existingColumnNames = isset($selectColumnNames) ? $selectColumnNames : [];
+        if (empty($existingColumnNames)) {
+            // Fallback: extract column names from selectColumns if not tracked
+            foreach ($selectColumns as $selectCol) {
+                // Extract column name from SELECT expression
+                // Format: [alias].[column] or [alias].[column] AS [alias] or (expression) AS [column]
+                if (preg_match('/\bAS\s+\[?([^\]]+)\]?\s*$/i', $selectCol, $matches)) {
+                    // Has alias - use the alias as the column name
+                    $existingColumnNames[strtolower($matches[1])] = true;
+                } elseif (preg_match('/\[([^\]]+)\]$/', $selectCol, $matches)) {
+                    // No alias, extract column name from last bracket
+                    $existingColumnNames[strtolower($matches[1])] = true;
+                } elseif (preg_match('/\.\[?([^\]]+)\]?\s*$/', $selectCol, $matches)) {
+                    // Extract column name after dot
+                    $existingColumnNames[strtolower($matches[1])] = true;
+                }
+            }
+        }
         
         foreach ($thenIncludes as $thenInclude) {
             // Get navigation info for thenInclude (from related entity)
@@ -4866,14 +4895,24 @@ class AdvancedQueryBuilder
                     $sensitiveAttributes = $property->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\SensitiveValue::class);
                     
                     $quotedThenCol = $provider->escapeIdentifier($col);
+                    $colLower = strtolower($col);
                     
                     if ($thenFirstCol && $col === $thenRelatedPrimaryKeyColumn) {
                         // Primary key gets alias - but we need to avoid conflicts
                         // Use a unique alias based on thenInclude name
                         $thenIdAlias = "Id" . ucfirst($thenInclude) . "0";
                         $nestedSelectColumns[] = "{$quotedThenRelatedAlias}.{$quotedThenCol} AS [{$thenIdAlias}]";
+                        $existingColumnNames[strtolower($thenIdAlias)] = true;
                         $thenFirstCol = false;
                     } else {
+                        // Check if column name already exists
+                        $needsAlias = isset($existingColumnNames[$colLower]);
+                        if ($needsAlias) {
+                            // Use navigation name as prefix to avoid conflict
+                            $aliasCol = ucfirst($thenInclude) . ucfirst($col);
+                            $quotedAliasCol = $provider->escapeIdentifier($aliasCol);
+                        }
+                        
                         // Apply masking if needed
                         if (!empty($sensitiveAttributes) && !$this->isSensitive) {
                             $sensitiveAttr = $sensitiveAttributes[0]->newInstance();
@@ -4885,9 +4924,21 @@ class AdvancedQueryBuilder
                                 $sensitiveAttr->visibleEnd,
                                 $sensitiveAttr->customMask
                             );
-                            $nestedSelectColumns[] = "({$maskedExpression}) AS {$quotedThenCol}";
+                            if ($needsAlias) {
+                                $nestedSelectColumns[] = "({$maskedExpression}) AS {$quotedAliasCol}";
+                                $existingColumnNames[strtolower($aliasCol)] = true;
+                            } else {
+                                $nestedSelectColumns[] = "({$maskedExpression}) AS {$quotedThenCol}";
+                                $existingColumnNames[$colLower] = true;
+                            }
                         } else {
-                            $nestedSelectColumns[] = "{$quotedThenRelatedAlias}.{$quotedThenCol}";
+                            if ($needsAlias) {
+                                $nestedSelectColumns[] = "{$quotedThenRelatedAlias}.{$quotedThenCol} AS {$quotedAliasCol}";
+                                $existingColumnNames[strtolower($aliasCol)] = true;
+                            } else {
+                                $nestedSelectColumns[] = "{$quotedThenRelatedAlias}.{$quotedThenCol}";
+                                $existingColumnNames[$colLower] = true;
+                            }
                         }
                     }
                 }
@@ -6149,7 +6200,7 @@ class AdvancedQueryBuilder
                         // Cache ID property accessor for this class
                         if (!isset($idPropertyCache[$itemClass])) {
                             $itemReflection = new ReflectionClass($itemClass);
-                            $idProperty = $itemReflection->getProperty('Id');
+                            $idProperty = $itemReflection->getProperty($this->getPrimaryKeyColumnName($itemReflection));
                             $idProperty->setAccessible(true);
                             $idPropertyCache[$itemClass] = $idProperty;
                         }
