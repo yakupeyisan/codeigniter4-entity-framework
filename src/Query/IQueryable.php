@@ -39,16 +39,18 @@ interface IQueryable
      * @param string $navigationProperty Navigation property name
      * @param string|null $whereClause Optional WHERE clause for collection subquery (e.g., "{alias}.AccessEventID IN (SELECT max(AccessEventID) FROM AccessEvent AS [ac] GROUP BY [ac].EmployeeID)"). Use {alias} placeholder for the entity alias.
      * @param string $joinType Join type: 'LEFT' (default) or 'INNER'
+     * @param string|null $joinCondition Optional custom SQL join condition (e.g., "{alias}.DeviceSerial = {relatedAlias}.SerialNumber"). Use {alias} for main entity alias, {relatedAlias} for related entity alias. If not provided, uses default foreign key relationship. Only applicable for reference navigation properties.
      */
-    public function include(string $navigationProperty, ?string $whereClause = null, string $joinType = 'LEFT'): IQueryable;
+    public function include(string $navigationProperty, ?string $whereClause = null, string $joinType = 'LEFT', ?string $joinCondition = null): IQueryable;
 
     /**
      * ThenInclude for nested navigation properties
      * @param string $navigationProperty Navigation property name
      * @param string|null $whereClause Optional WHERE clause for collection subquery (e.g., "{alias}.AccessEventID IN (SELECT max(AccessEventID) FROM AccessEvent AS [ac] GROUP BY [ac].EmployeeID)"). Use {alias} placeholder for the entity alias, {relatedAlias} for related entity alias in nested subqueries.
      * @param string $joinType Join type: 'LEFT' (default) or 'INNER'
+     * @param string|null $joinCondition Optional custom SQL join condition (e.g., "{alias}.DeviceSerial = {relatedAlias}.SerialNumber"). Use {alias} for parent entity alias, {relatedAlias} for related entity alias. If not provided, uses default foreign key relationship.
      */
-    public function thenInclude(string $navigationProperty, ?string $whereClause = null, string $joinType = 'LEFT'): IQueryable;
+    public function thenInclude(string $navigationProperty, ?string $whereClause = null, string $joinType = 'LEFT', ?string $joinCondition = null): IQueryable;
 
     /**
      * Order by ascending

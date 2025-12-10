@@ -52,12 +52,12 @@ abstract class Entity implements \JsonSerializable
      */
     public function markAsModified(): void
     {
-        log_message('debug', "Marking as modified: " . $this->entityState);
+        //log_message('debug', "Marking as modified: " . $this->entityState);
         if ($this->entityState !== self::STATE_ADDED) {
-            log_message('debug', "Setting state to modified");
+            //log_message('debug', "Setting state to modified");
             $this->entityState = self::STATE_MODIFIED;
         }
-        log_message('debug', "State after modification: " . $this->entityState);
+        //log_message('debug', "State after modification: " . $this->entityState);
     }
 
     /**

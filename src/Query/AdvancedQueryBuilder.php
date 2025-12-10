@@ -82,14 +82,14 @@ class AdvancedQueryBuilder
      */
     public function where(callable $predicate, bool $isOr = false): self
     {
-        log_message('debug', "AdvancedQueryBuilder::where() called with isOr=" . ($isOr ? 'true' : 'false'));
+        //log_message('debug', "AdvancedQueryBuilder::where() called with isOr=" . ($isOr ? 'true' : 'false'));
         $this->wheres[] = [
             'predicate' => $predicate, 
             'isOr' => $isOr,
             'groupStart' => false,
             'groupEnd' => false
         ];
-        log_message('debug', "wheres array count: " . count($this->wheres) . ", last isOr: " . ($isOr ? 'true' : 'false'));
+        //log_message('debug', "wheres array count: " . count($this->wheres) . ", last isOr: " . ($isOr ? 'true' : 'false'));
         return $this;
     }
 
@@ -108,7 +108,7 @@ class AdvancedQueryBuilder
             'groupStart' => true,
             'groupEnd' => false
         ];
-        log_message('debug', "AdvancedQueryBuilder::startGroup() called");
+        //log_message('debug', "AdvancedQueryBuilder::startGroup() called");
         return $this;
     }
 
@@ -127,7 +127,7 @@ class AdvancedQueryBuilder
             'groupStart' => false,
             'groupEnd' => true
         ];
-        log_message('debug', "AdvancedQueryBuilder::endGroup() called");
+        //log_message('debug', "AdvancedQueryBuilder::endGroup() called");
         return $this;
     }
 
@@ -143,7 +143,7 @@ class AdvancedQueryBuilder
     /**
      * Add INCLUDE for eager loading
      */
-    public function include(string $navigationProperty, ?string $whereClause = null, string $joinType = 'LEFT'): self
+    public function include(string $navigationProperty, ?string $whereClause = null, string $joinType = 'LEFT', ?string $joinCondition = null): self
     {
         $include = ['path' => $navigationProperty, 'level' => 0];
         if ($whereClause !== null) {
@@ -151,6 +151,9 @@ class AdvancedQueryBuilder
         }
         if ($joinType !== 'LEFT') {
             $include['joinType'] = strtoupper($joinType);
+        }
+        if ($joinCondition !== null) {
+            $include['joinCondition'] = $joinCondition;
         }
         $this->includes[] = $include;
         return $this;
@@ -162,7 +165,7 @@ class AdvancedQueryBuilder
      * @param string|null $whereClause Optional WHERE clause for collection subquery (e.g., "{alias}.AccessEventID IN (SELECT max(AccessEventID) FROM AccessEvent AS [ac] GROUP BY [ac].EmployeeID)"). Use {alias} placeholder for the entity alias.
      * @param string $joinType Join type: 'LEFT' (default) or 'INNER'
      */
-    public function thenInclude(string $navigationProperty, ?string $whereClause = null, string $joinType = 'LEFT'): self
+    public function thenInclude(string $navigationProperty, ?string $whereClause = null, string $joinType = 'LEFT', ?string $joinCondition = null): self
     {
         if (empty($this->includes)) {
             throw new \RuntimeException('ThenInclude must be called after Include');
@@ -175,6 +178,9 @@ class AdvancedQueryBuilder
         }
         if ($joinType !== 'LEFT') {
             $thenIncludeData['joinType'] = strtoupper($joinType);
+        }
+        if ($joinCondition !== null) {
+            $thenIncludeData['joinCondition'] = $joinCondition;
         }
         $lastInclude['thenIncludes'][] = $thenIncludeData;
         return $this;
@@ -290,7 +296,7 @@ class AdvancedQueryBuilder
         // Note: This might require custom handling in query execution
         $builder->join($joinClause, null, '', false);
         
-        log_message('debug', "Added RAW JOIN ({$joinType}): ({$rawSql}) AS {$alias} ON {$joinCondition}");
+        //log_message('debug', "Added RAW JOIN ({$joinType}): ({$rawSql}) AS {$alias} ON {$joinCondition}");
     }
 
     /**
@@ -401,9 +407,9 @@ class AdvancedQueryBuilder
                 $row = $result->getRowArray();
                 return (int)($row['count'] ?? 0);
             } catch (\Exception $e) {
-                log_message('error', 'SQL Query Error: ' . $e->getMessage());
-                log_message('error', 'Failed SQL Query: ' . $sql);
-                log_message('error', 'SQL Parameters: ' . json_encode($this->rawSqlParameters));
+                //log_message('error', 'SQL Query Error: ' . $e->getMessage());
+                //log_message('error', 'Failed SQL Query: ' . $sql);
+                //log_message('error', 'SQL Parameters: ' . json_encode($this->rawSqlParameters));
                 throw $e;
             }
         }
@@ -449,19 +455,19 @@ class AdvancedQueryBuilder
             
             if ($groupStart) {
                 $builder->groupStart();
-                log_message('debug', "count(): Group start at index #{$index}");
+                //log_message('debug', "count(): Group start at index #{$index}");
                 continue;
             }
             
             if ($groupEnd) {
                 $builder->groupEnd();
-                log_message('debug', "count(): Group end at index #{$index}");
+                //log_message('debug', "count(): Group end at index #{$index}");
                 continue;
             }
             
             $where = is_array($whereItem) ? $whereItem['predicate'] : $whereItem;
             $isOr = is_array($whereItem) && isset($whereItem['isOr']) ? $whereItem['isOr'] : false;
-            log_message('debug', "count(): Processing where item #{$index}, isOr=" . ($isOr ? 'true' : 'false'));
+            //log_message('debug', "count(): Processing where item #{$index}, isOr=" . ($isOr ? 'true' : 'false'));
             $paths = $this->detectNavigationPaths($where);
             if (!empty($paths)) {
                 // Navigation property filter - convert to SQL
@@ -472,7 +478,7 @@ class AdvancedQueryBuilder
             }
         }
         
-        log_message('debug', 'COUNT Query: ' . $builder->getCompiledSelect(false));
+        //log_message('debug', 'COUNT Query: ' . $builder->getCompiledSelect(false));
         return $builder->countAllResults();
     }
 
@@ -614,13 +620,13 @@ class AdvancedQueryBuilder
             
             if ($groupStart) {
                 $builder->groupStart();
-                log_message('debug', "sum/average/min/max: Group start at index #{$index}");
+                //log_message('debug', "sum/average/min/max: Group start at index #{$index}");
                 continue;
             }
             
             if ($groupEnd) {
                 $builder->groupEnd();
-                log_message('debug', "sum/average/min/max: Group end at index #{$index}");
+                //log_message('debug', "sum/average/min/max: Group end at index #{$index}");
                 continue;
             }
             
@@ -848,13 +854,13 @@ class AdvancedQueryBuilder
                 $sensitiveAttributes = $property->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\SensitiveValue::class);
                 if (!empty($sensitiveAttributes)) {
                     $hasSensitiveColumns = true;
-                    log_message('debug', "Found sensitive column: {$colInfo['property']} -> {$colInfo['column']}");
+                    //log_message('debug', "Found sensitive column: {$colInfo['property']} -> {$colInfo['column']}");
                     break;
                 }
             }
         }
         
-        log_message('debug', "hasSensitiveColumns: " . ($hasSensitiveColumns ? 'true' : 'false') . ", isSensitive: " . ($this->isSensitive ? 'true' : 'false'));
+        //log_message('debug', "hasSensitiveColumns: " . ($hasSensitiveColumns ? 'true' : 'false') . ", isSensitive: " . ($this->isSensitive ? 'true' : 'false'));
         
         // If has sensitive columns, build SQL manually with masking
         if ($hasSensitiveColumns) {
@@ -871,19 +877,19 @@ class AdvancedQueryBuilder
             
             if ($groupStart) {
                 $builder->groupStart();
-                log_message('debug', "executeQuery: Group start at index #{$index}");
+                //log_message('debug', "executeQuery: Group start at index #{$index}");
                 continue;
             }
             
             if ($groupEnd) {
                 $builder->groupEnd();
-                log_message('debug', "executeQuery: Group end at index #{$index}");
+                //log_message('debug', "executeQuery: Group end at index #{$index}");
                 continue;
             }
             
             $where = is_array($whereItem) ? $whereItem['predicate'] : $whereItem;
             $isOr = is_array($whereItem) && isset($whereItem['isOr']) ? $whereItem['isOr'] : false;
-            log_message('debug', "executeQuery: Processing where item #{$index}, isOr=" . ($isOr ? 'true' : 'false'));
+            //log_message('debug', "executeQuery: Processing where item #{$index}, isOr=" . ($isOr ? 'true' : 'false'));
             $this->applyWhere($builder, $where, $isOr);
         }
         
@@ -916,8 +922,8 @@ class AdvancedQueryBuilder
             $results = $query->getResultArray();
         } catch (\Exception $e) {
             $sql = $builder->getCompiledSelect(false);
-            log_message('error', 'SQL Query Error: ' . $e->getMessage());
-            log_message('error', 'Failed SQL Query: ' . $sql);
+            //log_message('error', 'SQL Query Error: ' . $e->getMessage());
+            //log_message('error', 'Failed SQL Query: ' . $sql);
             throw $e;
         }
         $entities = $this->mapToEntities($results);
@@ -985,7 +991,7 @@ class AdvancedQueryBuilder
         $sql .= "FROM {$quotedTableName} AS {$quotedAliasForFrom}";
         
         // Debug log
-        log_message('debug', 'SensitiveValue masking SQL: ' . substr($sql, 0, 500));
+        //log_message('debug', 'SensitiveValue masking SQL: ' . substr($sql, 0, 500));
         
         // Build WHERE clauses
         $whereConditions = [];
@@ -1011,7 +1017,7 @@ class AdvancedQueryBuilder
             
             if ($groupEnd) {
                 if (!$inGroup) {
-                    log_message('warning', 'endGroup() called without startGroup()');
+                    //log_message('warning', 'endGroup() called without startGroup()');
                     continue;
                 }
                 if (!empty($currentGroup)) {
@@ -1061,7 +1067,7 @@ class AdvancedQueryBuilder
                     $whereParams = array_merge($whereParams, $paramValues);
                 }
             } catch (\Exception $e) {
-                log_message('debug', 'Error parsing WHERE clause: ' . $e->getMessage());
+                //log_message('debug', 'Error parsing WHERE clause: ' . $e->getMessage());
             }
         }
         
@@ -1096,13 +1102,13 @@ class AdvancedQueryBuilder
             $query = $this->connection->query($sql);
             $results = $query->getResultArray();
         } catch (\Exception $e) {
-            log_message('error', 'SQL Query Error: ' . $e->getMessage());
-            log_message('error', 'Failed SQL Query: ' . $sql);
+            //log_message('error', 'SQL Query Error: ' . $e->getMessage());
+            //log_message('error', 'Failed SQL Query: ' . $sql);
             throw $e;
         }
         } catch (\Exception $e) {
-            log_message('error', 'SQL Query Error: ' . $e->getMessage());
-            log_message('error', 'Failed SQL Query: ' . $sql);
+            //log_message('error', 'SQL Query Error: ' . $e->getMessage());
+            //log_message('error', 'Failed SQL Query: ' . $sql);
             throw $e;
         }
         
@@ -1182,7 +1188,7 @@ class AdvancedQueryBuilder
                     $whereConditions[] = $sqlCondition;
                 }
             } catch (\Exception $e) {
-                log_message('debug', 'Error parsing WHERE clause: ' . $e->getMessage());
+                //log_message('debug', 'Error parsing WHERE clause: ' . $e->getMessage());
             }
         }
         
@@ -1211,13 +1217,13 @@ class AdvancedQueryBuilder
             $query = $this->connection->query($sql);
             $results = $query->getResultArray();
         } catch (\Exception $e) {
-            log_message('error', 'SQL Query Error: ' . $e->getMessage());
-            log_message('error', 'Failed SQL Query: ' . $sql);
+            //log_message('error', 'SQL Query Error: ' . $e->getMessage());
+            //log_message('error', 'Failed SQL Query: ' . $sql);
             throw $e;
         }
         } catch (\Exception $e) {
-            log_message('error', 'SQL Query Error: ' . $e->getMessage());
-            log_message('error', 'Failed SQL Query: ' . $sql);
+            //log_message('error', 'SQL Query Error: ' . $e->getMessage());
+            //log_message('error', 'Failed SQL Query: ' . $sql);
             throw $e;
         }
         
@@ -1293,30 +1299,30 @@ class AdvancedQueryBuilder
             $query = $this->connection->query($sql);
             $results = $query->getResultArray();
         } catch (\Exception $e) {
-            log_message('error', 'SQL Query Error: ' . $e->getMessage());
-            log_message('error', 'Failed SQL Query: ' . $sql);
+            //log_message('error', 'SQL Query Error: ' . $e->getMessage());
+            //log_message('error', 'Failed SQL Query: ' . $sql);
             throw $e;
         }
         } catch (\Exception $e) {
-            log_message('error', 'SQL Query Error: ' . $e->getMessage());
-            log_message('error', 'Failed SQL Query: ' . $sql);
+            //log_message('error', 'SQL Query Error: ' . $e->getMessage());
+            //log_message('error', 'Failed SQL Query: ' . $sql);
             throw $e;
         }
         
         // Log actual SQL executed
-        log_message('debug', 'EF Core Style SQL executed: ' . substr($sql, 0, 500) . '...');
+        //log_message('debug', 'EF Core Style SQL executed: ' . substr($sql, 0, 500) . '...');
         
         // Log first result row structure for debugging
         if (!empty($results)) {
             $firstRow = $results[0];
-            log_message('debug', 'First result row keys: ' . implode(', ', array_keys($firstRow)));
-            log_message('debug', 'First result row sample: ' . json_encode(array_slice($firstRow, 0, 10)));
+            //log_message('debug', 'First result row keys: ' . implode(', ', array_keys($firstRow)));
+            //log_message('debug', 'First result row sample: ' . json_encode(array_slice($firstRow, 0, 10)));
         }
         
         // Parse flat result set into hierarchical entities
         $entities = $this->parseEfCoreStyleResults($results);
         
-        log_message('debug', 'Parsed entities count: ' . count($entities));
+        //log_message('debug', 'Parsed entities count: ' . count($entities));
         
         // Apply change tracking and lazy loading proxies
         if ($this->isTracking && !$this->isNoTracking) {
@@ -1345,9 +1351,9 @@ class AdvancedQueryBuilder
             $query = $this->connection->query($this->rawSql, $this->rawSqlParameters);
             $results = $query->getResultArray();
         } catch (\Exception $e) {
-            log_message('error', 'SQL Query Error: ' . $e->getMessage());
-            log_message('error', 'Failed SQL Query: ' . $this->rawSql);
-            log_message('error', 'SQL Parameters: ' . json_encode($this->rawSqlParameters));
+            //log_message('error', 'SQL Query Error: ' . $e->getMessage());
+            //log_message('error', 'Failed SQL Query: ' . $this->rawSql);
+            //log_message('error', 'SQL Parameters: ' . json_encode($this->rawSqlParameters));
             throw $e;
         }
         $entities = $this->mapToEntities($results);
@@ -1451,7 +1457,7 @@ class AdvancedQueryBuilder
                 try {
                     return new \DateTime($value);
                 } catch (\Exception $e) {
-                    log_message('error', "Failed to convert value '{$value}' to DateTime: " . $e->getMessage());
+                    //log_message('error', "Failed to convert value '{$value}' to DateTime: " . $e->getMessage());
                     return null;
                 }
             }
@@ -1504,7 +1510,7 @@ class AdvancedQueryBuilder
      */
     private function applySimpleWhereWithParser($builder, callable $predicate, bool $isOr = false): void
     {
-        log_message('debug', "applySimpleWhereWithParser called with isOr=" . ($isOr ? 'true' : 'false'));
+        //log_message('debug', "applySimpleWhereWithParser called with isOr=" . ($isOr ? 'true' : 'false'));
         try {
             $parser = new ExpressionParser($this->entityType, $this->getTableAliasForParser(), $this->context);
             
@@ -1561,8 +1567,8 @@ class AdvancedQueryBuilder
             // Try to get variable values from calling scope using eval (dangerous but necessary)
             // Actually, we can't safely do this. Instead, we'll let the user pass variables explicitly
             // For now, log what we found
-            log_message('debug', 'Use variable names found: ' . json_encode($useVarNames));
-            log_message('debug', 'Variable values extracted: ' . json_encode($variableValues));
+            //log_message('debug', 'Use variable names found: ' . json_encode($useVarNames));
+            //log_message('debug', 'Variable values extracted: ' . json_encode($variableValues));
             
             $parser->setVariableValues($variableValues);
             
@@ -1621,7 +1627,7 @@ class AdvancedQueryBuilder
                         }
                         
                         if ($sqlCondition !== null) {
-                            log_message('debug', 'Method call detected: ' . $methodName . ' -> SQL: ' . $sqlCondition);
+                            //log_message('debug', 'Method call detected: ' . $methodName . ' -> SQL: ' . $sqlCondition);
                         }
                     }
                 }
@@ -1632,7 +1638,7 @@ class AdvancedQueryBuilder
                 $sqlCondition = $parser->parse($predicate);
             }
             
-            log_message('debug', 'Parsed SQL condition (before cleanup): ' . $sqlCondition);
+            //log_message('debug', 'Parsed SQL condition (before cleanup): ' . $sqlCondition);
             
             if (!empty($sqlCondition)) {
                 // Check if SQL condition is a navigation property path (NAVIGATION:...)
@@ -1651,7 +1657,7 @@ class AdvancedQueryBuilder
                             $columnName = $matches[2]; // e.g., "CustomField01"
                             $sqlOperator = $matches[3]; // e.g., "LIKE CONCAT('%', '4006', '%')"
                             
-                            log_message('debug', "applySimpleWhereWithParser - navigation property path detected: {$navigationProperty}.{$columnName}, SQL operator: {$sqlOperator}");
+                            //log_message('debug', "applySimpleWhereWithParser - navigation property path detected: {$navigationProperty}.{$columnName}, SQL operator: {$sqlOperator}");
                             
                             // Get navigation info for reference navigation property
                             $navInfo = $this->getNavigationInfo($navigationProperty);
@@ -1674,7 +1680,7 @@ class AdvancedQueryBuilder
                                     // Use table name instead of alias (for CodeIgniter Query Builder)
                                     $refTableName = $this->context->getTableName($navInfo['entityType']);
                                     $joinAlias = $refTableName;
-                                    log_message('debug', "applySimpleWhereWithParser - join alias not found for '{$navigationProperty}', using table name: {$joinAlias}");
+                                    //log_message('debug', "applySimpleWhereWithParser - join alias not found for '{$navigationProperty}', using table name: {$joinAlias}");
                                 }
                                 
                                 // Get column name from reference entity
@@ -1688,7 +1694,7 @@ class AdvancedQueryBuilder
                                 // Build SQL condition using JOIN alias
                                 $sqlCondition = "{$quotedJoinAlias}.{$quotedRefColumn} {$sqlOperator}";
                                 
-                                log_message('debug', "applySimpleWhereWithParser - generated reference navigation SQL condition: {$sqlCondition}");
+                                //log_message('debug', "applySimpleWhereWithParser - generated reference navigation SQL condition: {$sqlCondition}");
                             }
                         }
                     }
@@ -1702,7 +1708,7 @@ class AdvancedQueryBuilder
                         $navPath = $parts[1]; // e.g., "EmployeeDepartments.Department.DepartmentID"
                         $values = isset($parts[2]) ? $parts[2] : '?'; // e.g., "1,2" or "?"
                         
-                        log_message('debug', "applySimpleWhereWithParser - navigation property path detected: {$navPath}, values: {$values}");
+                        //log_message('debug', "applySimpleWhereWithParser - navigation property path detected: {$navPath}, values: {$values}");
                         
                         // Parse navigation property path
                         $pathParts = explode('.', $navPath);
@@ -1733,7 +1739,7 @@ class AdvancedQueryBuilder
                                     // Use table name instead of alias (for CodeIgniter Query Builder)
                                     $refTableName = $this->context->getTableName($navInfo['entityType']);
                                     $joinAlias = $refTableName;
-                                    log_message('debug', "applySimpleWhereWithParser - join alias not found for '{$navigationProperty}', using table name: {$joinAlias}");
+                                    //log_message('debug', "applySimpleWhereWithParser - join alias not found for '{$navigationProperty}', using table name: {$joinAlias}");
                                 }
                                 
                                 // Get column name from reference entity
@@ -1751,7 +1757,7 @@ class AdvancedQueryBuilder
                                     $sqlCondition = "{$quotedJoinAlias}.{$quotedRefColumn} IN (?)";
                                 }
                                 
-                                log_message('debug', "applySimpleWhereWithParser - generated reference navigation IN clause: {$sqlCondition}");
+                                //log_message('debug', "applySimpleWhereWithParser - generated reference navigation IN clause: {$sqlCondition}");
                             }
                         }
                         // Handle collection navigation property (e.g., "EmployeeDepartments.Department.DepartmentID")
@@ -1811,7 +1817,7 @@ class AdvancedQueryBuilder
                                         $sqlCondition = "EXISTS (SELECT 1 FROM {$quotedCollectionTable} AS [ed] INNER JOIN {$quotedRefTable} AS [d] ON [ed].{$quotedRefFk} = [d].{$quotedRefFk} WHERE [ed].{$quotedCollectionFk} = {$quotedMainTable}.{$quotedMainPk} AND [d].{$quotedRefColumn} IN (?))";
                                     }
                                     
-                                    log_message('debug', "applySimpleWhereWithParser - generated EXISTS subquery: {$sqlCondition}");
+                                    //log_message('debug', "applySimpleWhereWithParser - generated EXISTS subquery: {$sqlCondition}");
                                 }
                             }
                         }
@@ -1832,9 +1838,9 @@ class AdvancedQueryBuilder
                 $sqlCondition = preg_replace('/\s+/', ' ', $sqlCondition);
                 $sqlCondition = trim($sqlCondition);
                 
-                log_message('debug', 'Parsed SQL condition (after cleanup): ' . $sqlCondition);
-                log_message('debug', 'Parameter map: ' . json_encode($parameterMap));
-                log_message('debug', 'Variable values: ' . json_encode($variableValues));
+                //log_message('debug', 'Parsed SQL condition (after cleanup): ' . $sqlCondition);
+                //log_message('debug', 'Parameter map: ' . json_encode($parameterMap));
+                //log_message('debug', 'Variable values: ' . json_encode($variableValues));
                 
                 // Only apply if we have a valid condition (not empty after cleanup)
                 // Check if condition is not just whitespace or -> operators
@@ -1879,7 +1885,7 @@ class AdvancedQueryBuilder
                             }
                             return $value;
                         }, $sqlCondition);
-                        log_message('debug', 'SQL condition after parameter replacement: ' . $sqlCondition);
+                        //log_message('debug', 'SQL condition after parameter replacement: ' . $sqlCondition);
                     }
                     
                     // Apply the parsed SQL condition
@@ -1887,26 +1893,26 @@ class AdvancedQueryBuilder
                     if ($isOr) {
                         // Use orWhere for OR conditions (after the first where clause)
                         $builder->orWhere($sqlCondition, null, false);
-                        log_message('debug', 'OR WHERE clause applied: ' . $sqlCondition);
+                        //log_message('debug', 'OR WHERE clause applied: ' . $sqlCondition);
                     } else {
                         // Use where for AND conditions or first OR condition
                         $builder->where($sqlCondition, null, false);
-                        log_message('debug', 'WHERE clause applied: ' . $sqlCondition);
+                        //log_message('debug', 'WHERE clause applied: ' . $sqlCondition);
                     }
                 } else {
-                    log_message('debug', 'SQL condition empty or invalid after cleanup, using fallback');
+                    //log_message('debug', 'SQL condition empty or invalid after cleanup, using fallback');
                     // Fallback if cleanup resulted in empty condition
                     $this->applySimpleWhereFallback($builder, $predicate);
                 }
             } else {
-                log_message('debug', 'SQL condition empty from parser, using fallback');
+                //log_message('debug', 'SQL condition empty from parser, using fallback');
                 // Fallback to old method if parsing fails
                 $this->applySimpleWhereFallback($builder, $predicate);
             }
         } catch (\Exception $e) {
             // If parsing fails, fall back to old method
-            log_message('debug', 'ExpressionParser failed: ' . $e->getMessage());
-            log_message('debug', 'Exception trace: ' . $e->getTraceAsString());
+            //log_message('debug', 'ExpressionParser failed: ' . $e->getMessage());
+            //log_message('debug', 'Exception trace: ' . $e->getTraceAsString());
             $this->applySimpleWhereFallback($builder, $predicate);
         }
     }
@@ -1998,7 +2004,7 @@ class AdvancedQueryBuilder
             $lines = file($file);
             $code = implode('', array_slice($lines, $start - 1, $end - $start + 1));
             
-            log_message('debug', "Parsing predicate code: " . substr($code, 0, 200));
+            //log_message('debug', "Parsing predicate code: " . substr($code, 0, 200));
             
             // Extract patterns like $u->Company->Name or $u->CustomField->CustomField01
             // Pattern: $var->NavProp->Property (NavProp is the navigation property)
@@ -2009,9 +2015,9 @@ class AdvancedQueryBuilder
                         $paths[] = $navProp;
                     }
                 }
-                log_message('debug', "Detected navigation paths: " . implode(', ', $paths));
+                //log_message('debug', "Detected navigation paths: " . implode(', ', $paths));
             } else {
-                log_message('debug', "No navigation paths detected in predicate");
+                //log_message('debug', "No navigation paths detected in predicate");
             }
         }
         
@@ -2026,30 +2032,30 @@ class AdvancedQueryBuilder
         // Check if join already added
         $joinKey = $navigationProperty;
         if (isset($this->requiredJoins[$joinKey])) {
-            log_message('debug', "addJoinForNavigationPath - join already added for '{$navigationProperty}'");
+            //log_message('debug', "addJoinForNavigationPath - join already added for '{$navigationProperty}'");
             return;
         }
         
-        log_message('debug', "addJoinForNavigationPath - adding JOIN for '{$navigationProperty}'");
+        //log_message('debug', "addJoinForNavigationPath - adding JOIN for '{$navigationProperty}'");
         
         $entityReflection = new ReflectionClass($this->entityType);
         
         if (!$entityReflection->hasProperty($navigationProperty)) {
-            log_message('debug', "addJoinForNavigationPath - property '{$navigationProperty}' not found in entity");
+            //log_message('debug', "addJoinForNavigationPath - property '{$navigationProperty}' not found in entity");
             return;
         }
         
         // Get navigation info using getNavigationInfo (which correctly parses @var annotations)
         $navInfo = $this->getNavigationInfo($navigationProperty);
         if ($navInfo === null) {
-            log_message('debug', "addJoinForNavigationPath - navigation info is null for '{$navigationProperty}'");
+            //log_message('debug', "addJoinForNavigationPath - navigation info is null for '{$navigationProperty}'");
             return;
         }
         
         $relatedEntityType = $navInfo['entityType'];
         $isCollection = $navInfo['isCollection'];
         
-        log_message('debug', "addJoinForNavigationPath - relatedEntityType: {$relatedEntityType}, isCollection: " . ($isCollection ? 'true' : 'false'));
+        //log_message('debug', "addJoinForNavigationPath - relatedEntityType: {$relatedEntityType}, isCollection: " . ($isCollection ? 'true' : 'false'));
         
         // Get foreign key
         $foreignKey = $this->getForeignKeyForNavigation($entityReflection, $navigationProperty, $isCollection, $this->entityType);
@@ -2077,19 +2083,19 @@ class AdvancedQueryBuilder
             // One-to-many: Join on related table's foreign key
             $joinCondition = "{$quotedRelatedTable}.{$quotedFkColumn} = {$quotedMainTable}.{$quotedMainIdColumn}";
             $builder->join($relatedTableName, $joinCondition, 'LEFT');
-            log_message('debug', "Added JOIN (collection): {$relatedTableName} ON {$joinCondition}");
+            //log_message('debug', "Added JOIN (collection): {$relatedTableName} ON {$joinCondition}");
         } else {
             // Check if FK is in main entity or related entity
             if ($entityReflection->hasProperty($foreignKey)) {
                 // Many-to-one: FK in main entity
                 $joinCondition = "{$quotedMainTable}.{$quotedFkColumn} = {$quotedRelatedTable}.{$quotedRelatedIdColumn}";
                 $builder->join($relatedTableName, $joinCondition, 'LEFT');
-                log_message('debug', "Added JOIN (many-to-one): {$relatedTableName} ON {$joinCondition}");
+                //log_message('debug', "Added JOIN (many-to-one): {$relatedTableName} ON {$joinCondition}");
             } else {
                 // One-to-one: FK in related entity
                 $joinCondition = "{$quotedRelatedTable}.{$quotedFkColumn} = {$quotedMainTable}.{$quotedMainIdColumn}";
                 $builder->join($relatedTableName, $joinCondition, 'LEFT');
-                log_message('debug', "Added JOIN (one-to-one): {$relatedTableName} ON {$joinCondition}");
+                //log_message('debug', "Added JOIN (one-to-one): {$relatedTableName} ON {$joinCondition}");
             }
         }
         
@@ -2129,21 +2135,21 @@ class AdvancedQueryBuilder
             // Find conditions involving this navigation property
             $pattern = '/\$[a-zA-Z_][a-zA-Z0-9_]*->' . preg_quote($navProp, '/') . '->([A-Za-z0-9_]+)\s*(===|==|!=|<>)\s*["\']([^"\']+)["\']/';
             
-            log_message('debug', "Looking for pattern in code for navProp: {$navProp}, pattern: {$pattern}");
-            log_message('debug', "Code snippet: " . substr($code, 0, 200));
+            //log_message('debug', "Looking for pattern in code for navProp: {$navProp}, pattern: {$pattern}");
+            //log_message('debug', "Code snippet: " . substr($code, 0, 200));
             
             if (preg_match_all($pattern, $code, $matches, PREG_SET_ORDER)) {
-                log_message('debug', "Found " . count($matches) . " matches for navProp: {$navProp}");
+                //log_message('debug', "Found " . count($matches) . " matches for navProp: {$navProp}");
                 foreach ($matches as $match) {
                     $property = $match[1];
                     $operator = $match[2] === '===' || $match[2] === '==' ? '=' : ($match[2] === '!=' || $match[2] === '<>' ? '!=' : $match[2]);
                     $value = $match[3];
                     
-                    log_message('debug', "Match found: property={$property}, operator={$operator}, value={$value}");
+                    //log_message('debug', "Match found: property={$property}, operator={$operator}, value={$value}");
                     
                     // Get related table name
                     $joinInfo = $this->requiredJoins[$navProp] ?? null;
-                    log_message('debug', "joinInfo for {$navProp}: " . ($joinInfo ? json_encode($joinInfo) : 'NULL'));
+                    //log_message('debug', "joinInfo for {$navProp}: " . ($joinInfo ? json_encode($joinInfo) : 'NULL'));
                     
                     if ($joinInfo) {
                         $relatedTableName = $joinInfo['table'];
@@ -2162,20 +2168,20 @@ class AdvancedQueryBuilder
                         $whereCondition = "{$quotedTableName}.{$quotedColumnName}";
                         
                         if ($operator === '=') {
-                            log_message('debug', "Applying WHERE condition: {$whereCondition} = {$value}");
+                            //log_message('debug', "Applying WHERE condition: {$whereCondition} = {$value}");
                             $builder->where($whereCondition, $value);
                         } else {
                             // For non-equality operators, we need to use where() with the operator in the condition
                             $whereConditionWithOp = "{$whereCondition} {$operator}";
-                            log_message('debug', "Applying WHERE condition: {$whereConditionWithOp} {$value}");
+                            //log_message('debug', "Applying WHERE condition: {$whereConditionWithOp} {$value}");
                             $builder->where($whereConditionWithOp, $value, false);
                         }
                     } else {
-                        log_message('debug', "WARNING: No join info found for navigation property: {$navProp}");
+                        //log_message('debug', "WARNING: No join info found for navigation property: {$navProp}");
                     }
                 }
             } else {
-                log_message('debug', "No matches found for navProp: {$navProp}");
+                //log_message('debug', "No matches found for navProp: {$navProp}");
             }
         }
     }
@@ -2199,7 +2205,7 @@ class AdvancedQueryBuilder
                 $navigationProperty = $parts[0];
                 if (!in_array($navigationProperty, $navigationPaths)) {
                     $navigationPaths[] = $navigationProperty;
-                    log_message('debug', "applyOrderBy: Detected navigation property from static variable: {$navigationProperty}");
+                    //log_message('debug', "applyOrderBy: Detected navigation property from static variable: {$navigationProperty}");
                 }
             }
         }
@@ -2304,14 +2310,14 @@ class AdvancedQueryBuilder
             }
 
             if ($relatedEntityType === null) {
-                log_message('debug', "Could not resolve entity type for navigation property: {$navigationProperty}");
+                //log_message('debug', "Could not resolve entity type for navigation property: {$navigationProperty}");
                 continue;
             }
 
             // Get foreign key from attributes or property name
             $foreignKey = $this->getForeignKeyForNavigation($entityReflection, $navigationProperty, $isCollection, $this->entityType);
             
-            log_message('debug', "Loading navigation: {$navigationProperty} (type: " . ($isCollection ? 'collection' : 'reference') . ", entity: {$relatedEntityType}, FK: {$foreignKey})");
+            //log_message('debug', "Loading navigation: {$navigationProperty} (type: " . ($isCollection ? 'collection' : 'reference') . ", entity: {$relatedEntityType}, FK: {$foreignKey})");
 
             if ($isCollection) {
                 // Load collection navigation (one-to-many)
@@ -2420,8 +2426,8 @@ class AdvancedQueryBuilder
             $relatedResults = $query->getResultArray();
         } catch (\Exception $e) {
             $sql = $builder->getCompiledSelect(false);
-            log_message('error', 'SQL Query Error (Navigation): ' . $e->getMessage());
-            log_message('error', 'Failed SQL Query: ' . $sql);
+            //log_message('error', 'SQL Query Error (Navigation): ' . $e->getMessage());
+            //log_message('error', 'Failed SQL Query: ' . $sql);
             throw $e;
         }
         
@@ -2476,7 +2482,7 @@ class AdvancedQueryBuilder
             
             // Check if foreign key exists in related entity
             if (!$relatedReflection->hasProperty($foreignKey)) {
-                log_message('error', "Foreign key '{$foreignKey}' not found in related entity '{$relatedEntityType}'");
+                //log_message('error', "Foreign key '{$foreignKey}' not found in related entity '{$relatedEntityType}'");
                 return;
             }
             
@@ -2490,12 +2496,12 @@ class AdvancedQueryBuilder
                 $relatedResults = $query->getResultArray();
             } catch (\Exception $e) {
                 $sql = $builder->getCompiledSelect(false);
-                log_message('error', 'SQL Query Error (Navigation): ' . $e->getMessage());
-                log_message('error', 'Failed SQL Query: ' . $sql);
+                //log_message('error', 'SQL Query Error (Navigation): ' . $e->getMessage());
+                //log_message('error', 'Failed SQL Query: ' . $sql);
                 throw $e;
             }
             
-            log_message('debug', "Loading one-to-one navigation (FK in related): {$navigationProperty} from {$relatedTableName} where {$fkColumnName} IN (" . implode(',', $entityIds) . ") - Found " . count($relatedResults) . " results");
+            //log_message('debug', "Loading one-to-one navigation (FK in related): {$navigationProperty} from {$relatedTableName} where {$fkColumnName} IN (" . implode(',', $entityIds) . ") - Found " . count($relatedResults) . " results");
             
             // Map to entities
             $relatedEntities = $this->mapToEntities($relatedResults, $relatedEntityType);
@@ -2568,13 +2574,13 @@ class AdvancedQueryBuilder
             $relatedResults = $query->getResultArray();
         } catch (\Exception $e) {
             $sql = $builder->getCompiledSelect(false);
-            log_message('error', 'SQL Query Error (Navigation): ' . $e->getMessage());
-            log_message('error', 'Failed SQL Query: ' . $sql);
+            //log_message('error', 'SQL Query Error (Navigation): ' . $e->getMessage());
+            //log_message('error', 'Failed SQL Query: ' . $sql);
             throw $e;
         }
         
         // Debug log
-        log_message('debug', "Loading collection navigation: {$navigationProperty} from {$relatedTableName} where {$foreignKey} IN (" . implode(',', $entityIds) . ") - Found " . count($relatedResults) . " results");
+        //log_message('debug', "Loading collection navigation: {$navigationProperty} from {$relatedTableName} where {$foreignKey} IN (" . implode(',', $entityIds) . ") - Found " . count($relatedResults) . " results");
 
         // Map to entities
         $relatedEntities = $this->mapToEntities($relatedResults, $relatedEntityType);
@@ -2885,13 +2891,13 @@ class AdvancedQueryBuilder
      */
     private function buildEfCoreStyleQuery(): string
     {
-        log_message('debug', 'buildEfCoreStyleQuery: Starting query build for entity ' . $this->entityType);
+        //log_message('debug', 'buildEfCoreStyleQuery: Starting query build for entity ' . $this->entityType);
         
         $tableName = $this->context->getTableName($this->entityType);
         $mainAlias = 'u'; // Main entity alias
         $subqueryAlias = 's'; // Subquery alias
         
-        log_message('debug', "buildEfCoreStyleQuery: Table name: {$tableName}, Main alias: {$mainAlias}, Subquery alias: {$subqueryAlias}");
+        //log_message('debug', "buildEfCoreStyleQuery: Table name: {$tableName}, Main alias: {$mainAlias}, Subquery alias: {$subqueryAlias}");
         
         // Detect navigation paths for WHERE clauses
         $navigationFilters = [];
@@ -2927,7 +2933,7 @@ class AdvancedQueryBuilder
             }
         }
         
-        log_message('debug', 'buildEfCoreStyleQuery: Navigation paths from WHERE clauses: ' . implode(', ', $allNavigationPaths));
+        //log_message('debug', 'buildEfCoreStyleQuery: Navigation paths from WHERE clauses: ' . implode(', ', $allNavigationPaths));
         
         // Track which navigation paths are from thenIncludes
         $thenIncludePaths = [];
@@ -2957,14 +2963,14 @@ class AdvancedQueryBuilder
             }
         }
         
-        log_message('debug', 'buildEfCoreStyleQuery: All navigation paths (includes + WHERE): ' . implode(', ', $allNavigationPaths));
+        //log_message('debug', 'buildEfCoreStyleQuery: All navigation paths (includes + WHERE): ' . implode(', ', $allNavigationPaths));
         
         // Get all entity columns
         $entityReflection = new ReflectionClass($this->entityType);
         $entityColumns = $this->getEntityColumns($entityReflection);
         $columnsWithProperties = $this->getEntityColumnsWithProperties($entityReflection);
         
-        log_message('debug', 'buildEfCoreStyleQuery: Found ' . count($entityColumns) . ' entity columns: ' . implode(', ', $entityColumns));
+        //log_message('debug', 'buildEfCoreStyleQuery: Found ' . count($entityColumns) . ' entity columns: ' . implode(', ', $entityColumns));
         
         // Build main subquery SELECT columns with masking support
         $mainSelectColumns = [];
@@ -3006,12 +3012,12 @@ class AdvancedQueryBuilder
         $referenceNavThenIncludeSubqueries = []; // [navPath => [subquery1, subquery2, ...]]
         foreach ($allNavigationPaths as $navPath) {
             $navInfo = $this->getNavigationInfo($navPath);
-            log_message('debug', "buildEfCoreStyleQuery: Navigation path '{$navPath}' - navInfo: " . ($navInfo ? json_encode($navInfo) : 'null'));
+            //log_message('debug', "buildEfCoreStyleQuery: Navigation path '{$navPath}' - navInfo: " . ($navInfo ? json_encode($navInfo) : 'null'));
             if ($navInfo && !$navInfo['isCollection']) {
                 $refAlias = $this->getTableAlias($navPath, $referenceNavIndex);
                 $referenceNavAliases[$navPath] = $refAlias;
                 $this->referenceNavIndexes[$navPath] = $referenceNavIndex; // Store index for ORDER BY and parsing
-                log_message('debug', "buildEfCoreStyleQuery: Added reference navigation alias '{$refAlias}' for '{$navPath}' (index: {$referenceNavIndex})");
+                //log_message('debug', "buildEfCoreStyleQuery: Added reference navigation alias '{$refAlias}' for '{$navPath}' (index: {$referenceNavIndex})");
                 $refEntityReflection = new ReflectionClass($navInfo['entityType']);
                 $refColumnsWithProperties = $this->getEntityColumnsWithProperties($refEntityReflection);
                 
@@ -3206,12 +3212,32 @@ class AdvancedQueryBuilder
             $navInfo = $this->getNavigationInfo($navPath);
             if ($navInfo && !$navInfo['isCollection']) {
                 if (!isset($referenceNavAliases[$navPath])) {
-                    log_message('error', "buildEfCoreStyleQuery: Missing alias for navigation path '{$navPath}'");
+                    //log_message('error', "buildEfCoreStyleQuery: Missing alias for navigation path '{$navPath}'");
                     continue;
                 }
                 $refAlias = $referenceNavAliases[$navPath];
                 $refTableName = $this->context->getTableName($navInfo['entityType']);
-                $joinCondition = $this->buildJoinCondition($mainAlias, $refAlias, $navPath, $navInfo);
+                
+                // Check if custom joinCondition is provided in include
+                $customJoinCondition = null;
+                foreach ($this->includes as $include) {
+                    $includeNavPath = $include['path'] ?? $include['navigation'] ?? null;
+                    if ($includeNavPath === $navPath && isset($include['joinCondition'])) {
+                        $customJoinCondition = $include['joinCondition'];
+                        break;
+                    }
+                }
+                
+                // Use custom join condition if provided, otherwise use default foreign key relationship
+                if ($customJoinCondition !== null && trim($customJoinCondition) !== '') {
+                    // Replace placeholders with actual aliases
+                    $joinCondition = str_replace('{alias}', $mainAlias, $customJoinCondition);
+                    $joinCondition = str_replace('{relatedAlias}', $refAlias, $joinCondition);
+                    //log_message('debug', "buildEfCoreStyleQuery: Using custom join condition for '{$navPath}': original='{$customJoinCondition}', replaced='{$joinCondition}'");
+                } else {
+                    $joinCondition = $this->buildJoinCondition($mainAlias, $refAlias, $navPath, $navInfo);
+                }
+                
                 // Check if this path is used in WHERE clause (should be INNER JOIN) or is a thenInclude
                 $isInWhere = in_array($navPath, $navigationPathsInWhere);
                 $isThenInclude = in_array($navPath, $thenIncludePaths);
@@ -3220,7 +3246,7 @@ class AdvancedQueryBuilder
                 $quotedRefAlias = $provider->escapeIdentifier($refAlias);
                 $joinSql = "{$joinType} {$quotedRefTableName} AS {$quotedRefAlias} ON {$joinCondition}";
                 $mainJoins[] = $joinSql;
-                log_message('debug', "buildEfCoreStyleQuery: Added JOIN for '{$navPath}': {$joinSql}");
+                //log_message('debug', "buildEfCoreStyleQuery: Added JOIN for '{$navPath}': {$joinSql}");
                 
                 // Add JOINs for thenInclude reference navigations
                 // Multiple includes can have the same navigation path with different thenIncludes
@@ -3244,7 +3270,7 @@ class AdvancedQueryBuilder
                                 $thenIncludePath = $navPath . '.' . $thenIncludeNav;
                                 if (isset($referenceNavAliases[$thenIncludePath])) {
                                     $thenRefAlias = $referenceNavAliases[$thenIncludePath];
-                                    log_message('debug', "buildEfCoreStyleQuery: For nested JOIN '{$thenIncludePath}', using alias '{$thenRefAlias}' from referenceNavAliases");
+                                    //log_message('debug', "buildEfCoreStyleQuery: For nested JOIN '{$thenIncludePath}', using alias '{$thenRefAlias}' from referenceNavAliases");
                                     $thenRefTableName = $this->context->getTableName($thenNavInfo['entityType']);
                                     
                                     // Build JOIN condition using buildJoinCondition method
@@ -3257,7 +3283,7 @@ class AdvancedQueryBuilder
                                     $quotedThenRefAlias = $provider->escapeIdentifier($thenRefAlias);
                                     $thenJoinSql = "LEFT JOIN {$quotedThenRefTableName} AS {$quotedThenRefAlias} ON {$thenJoinCondition}";
                                     $mainJoins[] = $thenJoinSql;
-                                    log_message('debug', "buildEfCoreStyleQuery: Added nested JOIN for '{$thenIncludePath}': {$thenJoinSql}");
+                                    //log_message('debug', "buildEfCoreStyleQuery: Added nested JOIN for '{$thenIncludePath}': {$thenJoinSql}");
                                 }
                             }
                         }
@@ -3265,9 +3291,9 @@ class AdvancedQueryBuilder
                 }
             } else {
                 if ($navInfo && $navInfo['isCollection']) {
-                    log_message('debug', "buildEfCoreStyleQuery: Skipping JOIN for collection navigation '{$navPath}' (will be loaded via subquery)");
+                    //log_message('debug', "buildEfCoreStyleQuery: Skipping JOIN for collection navigation '{$navPath}' (will be loaded via subquery)");
                 } else {
-                    log_message('warning', "buildEfCoreStyleQuery: getNavigationInfo returned null for '{$navPath}'");
+                    //log_message('warning', "buildEfCoreStyleQuery: getNavigationInfo returned null for '{$navPath}'");
                 }
             }
         }
@@ -3295,7 +3321,7 @@ class AdvancedQueryBuilder
             
             if ($groupEnd) {
                 if (!$inGroup) {
-                    log_message('warning', 'endGroup() called without startGroup() in buildEfCoreStyleQuery');
+                    //log_message('warning', 'endGroup() called without startGroup() in buildEfCoreStyleQuery');
                     continue;
                 }
                 if (!empty($currentGroup)) {
@@ -3361,16 +3387,16 @@ class AdvancedQueryBuilder
                 $navInfo = $this->getNavigationInfo($navPath);
                 if ($navInfo && $navInfo['isCollection']) {
                     $collectionWhereClause = $include['whereClause'] ?? null;
-                    log_message('debug', "buildEfCoreStyleQuery: Checking collection '{$navPath}' for WHERE clause: " . ($collectionWhereClause ?? 'null'));
+                    //log_message('debug', "buildEfCoreStyleQuery: Checking collection '{$navPath}' for WHERE clause: " . ($collectionWhereClause ?? 'null'));
                     if ($collectionWhereClause !== null && trim($collectionWhereClause) !== '') {
                         $hasCollectionWithWhere = true;
-                        log_message('debug', "buildEfCoreStyleQuery: Found collection with WHERE clause: '{$navPath}', disabling OFFSET/FETCH in main subquery");
+                        //log_message('debug', "buildEfCoreStyleQuery: Found collection with WHERE clause: '{$navPath}', disabling OFFSET/FETCH in main subquery");
                         break;
                     }
                 }
             }
         }
-        log_message('debug', "buildEfCoreStyleQuery: hasCollectionWithWhere: " . ($hasCollectionWithWhere ? 'true' : 'false'));
+        //log_message('debug', "buildEfCoreStyleQuery: hasCollectionWithWhere: " . ($hasCollectionWithWhere ? 'true' : 'false'));
         
         // Build OFFSET/FETCH
         // Only apply if takeCount is set and > 0 (negative values mean no limit)
@@ -3382,6 +3408,9 @@ class AdvancedQueryBuilder
         } elseif ($this->skipCount !== null && $this->skipCount > 0) {
             // If only skip is set (no take), use a large number for fetch
             $offsetFetch = "OFFSET {$this->skipCount} ROWS FETCH NEXT 999999 ROWS ONLY";
+            // Explicitly ensure offsetFetch is empty when hasCollectionWithWhere is true
+            $offsetFetch = '';
+            //log_message('debug', "buildEfCoreStyleQuery: Collection has WHERE clause, explicitly setting offsetFetch to empty");
         }
         
         // Build ORDER BY for main subquery
@@ -3409,7 +3438,7 @@ class AdvancedQueryBuilder
                             $navigationProperty = $parts[0];
                             if (!in_array($navigationProperty, $navigationPaths)) {
                                 $navigationPaths[] = $navigationProperty;
-                                log_message('debug', "buildEfCoreStyleQuery: Detected navigation property from static variable for ORDER BY: {$navigationProperty}");
+                                //log_message('debug', "buildEfCoreStyleQuery: Detected navigation property from static variable for ORDER BY: {$navigationProperty}");
                             }
                         }
                     }
@@ -3426,11 +3455,11 @@ class AdvancedQueryBuilder
                                     'alias' => $referenceNavAliases[$navPath] ?? $navPath,
                                     'entityType' => $navInfo['entityType']
                                 ];
-                                log_message('debug', "buildEfCoreStyleQuery: Added requiredJoins for ORDER BY navigation '{$navPath}': table={$refTableName}, alias={$this->requiredJoins[$navPath]['alias']}");
+                                //log_message('debug', "buildEfCoreStyleQuery: Added requiredJoins for ORDER BY navigation '{$navPath}': table={$refTableName}, alias={$this->requiredJoins[$navPath]['alias']}");
                             } else if ($navInfo && $navInfo['isCollection']) {
                                 // Collection navigation property - will be handled via collection subquery
                                 // We'll need to find the collection subquery later in convertOrderByToSql
-                                log_message('debug', "buildEfCoreStyleQuery: Navigation property '{$navPath}' is a collection, will be handled via collection subquery");
+                                //log_message('debug', "buildEfCoreStyleQuery: Navigation property '{$navPath}' is a collection, will be handled via collection subquery");
                             }
                         }
                     }
@@ -3457,7 +3486,7 @@ class AdvancedQueryBuilder
                                 $thenNavInfo = $this->getNavigationInfoForEntity($firstNavProp, $navInfo['entityType']);
                                 if ($thenNavInfo) {
                                     $isCollectionNav = true;
-                                    log_message('debug', "buildEfCoreStyleQuery: Skipping collection navigation ORDER BY '{$staticVariables['field']}' in main subquery (will be used in final query)");
+                                    //log_message('debug', "buildEfCoreStyleQuery: Skipping collection navigation ORDER BY '{$staticVariables['field']}' in main subquery (will be used in final query)");
                                     break;
                                 }
                             }
@@ -3484,13 +3513,13 @@ class AdvancedQueryBuilder
         }
         
         // Build main subquery
-        log_message('debug', 'buildEfCoreStyleQuery: Building main subquery with ' . count($mainSelectColumns) . ' columns');
-        log_message('debug', 'buildEfCoreStyleQuery: Main subquery FROM: ' . $mainFrom);
-        log_message('debug', 'buildEfCoreStyleQuery: Main subquery JOINs: ' . count($mainJoins));
-        log_message('debug', 'buildEfCoreStyleQuery: WHERE clause: ' . ($whereClause ?: 'none'));
-        log_message('debug', 'buildEfCoreStyleQuery: ORDER BY clause: ' . trim($mainOrderByClause));
-        log_message('debug', 'buildEfCoreStyleQuery: offsetFetch value: ' . ($offsetFetch ?: 'empty'));
-        log_message('debug', 'buildEfCoreStyleQuery: hasCollectionWithWhere: ' . ($hasCollectionWithWhere ? 'true' : 'false'));
+        //log_message('debug', 'buildEfCoreStyleQuery: Building main subquery with ' . count($mainSelectColumns) . ' columns');
+        //log_message('debug', 'buildEfCoreStyleQuery: Main subquery FROM: ' . $mainFrom);
+        //log_message('debug', 'buildEfCoreStyleQuery: Main subquery JOINs: ' . count($mainJoins));
+        //log_message('debug', 'buildEfCoreStyleQuery: WHERE clause: ' . ($whereClause ?: 'none'));
+        //log_message('debug', 'buildEfCoreStyleQuery: ORDER BY clause: ' . trim($mainOrderByClause));
+        //log_message('debug', 'buildEfCoreStyleQuery: offsetFetch value: ' . ($offsetFetch ?: 'empty'));
+        //log_message('debug', 'buildEfCoreStyleQuery: hasCollectionWithWhere: ' . ($hasCollectionWithWhere ? 'true' : 'false'));
         
         $mainSubquery = "SELECT " . implode(', ', $mainSelectColumns) . "\n"
             . $mainFrom . "\n"
@@ -3499,7 +3528,7 @@ class AdvancedQueryBuilder
             . $mainOrderByClause
             . (!empty($offsetFetch) ? $offsetFetch . "\n" : '');
         
-        log_message('debug', 'buildEfCoreStyleQuery: Main subquery built, length: ' . strlen($mainSubquery) . ' characters');
+        //log_message('debug', 'buildEfCoreStyleQuery: Main subquery built, length: ' . strlen($mainSubquery) . ' characters');
         
         // Build collection navigation subqueries
         // IMPORTANT: Collection index must match EF Core's indexing (s0, s2, s3, etc.)
@@ -3513,33 +3542,33 @@ class AdvancedQueryBuilder
                 continue;
             }
             $navInfo = $this->getNavigationInfo($navPath);
-            log_message('debug', "buildEfCoreStyleQuery: Processing include '{$navPath}' - navInfo: " . ($navInfo ? json_encode($navInfo) : 'null'));
+            //log_message('debug', "buildEfCoreStyleQuery: Processing include '{$navPath}' - navInfo: " . ($navInfo ? json_encode($navInfo) : 'null'));
             if ($navInfo && $navInfo['isCollection']) {
                 // Check for thenIncludes
                 $thenIncludes = $include['thenIncludes'] ?? [];
                 $whereClause = $include['whereClause'] ?? null;
                 $joinType = $include['joinType'] ?? 'LEFT';
-                log_message('debug', "buildEfCoreStyleQuery: Building collection subquery for '{$navPath}' (index: {$collectionIndex}), thenIncludes count: " . count($thenIncludes) . ", thenIncludes: " . json_encode($thenIncludes));
+                //log_message('debug', "buildEfCoreStyleQuery: Building collection subquery for '{$navPath}' (index: {$collectionIndex}), thenIncludes count: " . count($thenIncludes) . ", thenIncludes: " . json_encode($thenIncludes));
                 $subquery = $this->buildCollectionSubquery($navPath, $navInfo, $collectionIndex, $thenIncludes, $nestedSubqueryIndex, $whereClause);
                 if ($subquery) {
                     $subquery['joinType'] = $joinType; // Store join type for later use
                 }
                 if ($subquery) {
                     $collectionSubqueries[] = $subquery;
-                    log_message('debug', "buildEfCoreStyleQuery: Added collection subquery for '{$navPath}'");
+                    //log_message('debug', "buildEfCoreStyleQuery: Added collection subquery for '{$navPath}'");
                     // Update nested subquery index if nested subqueries were added
                     if (isset($subquery['nestedSubqueryIndex'])) {
                         $nestedSubqueryIndex = $subquery['nestedSubqueryIndex'];
                     }
                     $collectionIndex++;
                 } else {
-                    log_message('warning', "buildEfCoreStyleQuery: buildCollectionSubquery returned null for '{$navPath}'");
+                    //log_message('warning', "buildEfCoreStyleQuery: buildCollectionSubquery returned null for '{$navPath}'");
                 }
             } else {
                 if (!$navInfo) {
-                    log_message('warning', "buildEfCoreStyleQuery: getNavigationInfo returned null for include '{$navPath}'");
+                    //log_message('warning', "buildEfCoreStyleQuery: getNavigationInfo returned null for include '{$navPath}'");
                 } elseif (!$navInfo['isCollection']) {
-                    log_message('debug', "buildEfCoreStyleQuery: Skipping collection subquery for reference navigation '{$navPath}' (will be loaded via JOIN)");
+                    //log_message('debug', "buildEfCoreStyleQuery: Skipping collection subquery for reference navigation '{$navPath}' (will be loaded via JOIN)");
                     
                     // Add thenInclude collection subqueries for this reference navigation
                     if (isset($referenceNavThenIncludeSubqueries[$navPath])) {
@@ -3554,7 +3583,7 @@ class AdvancedQueryBuilder
                             );
                             if ($thenIncludeSubquery) {
                                 $collectionSubqueries[] = $thenIncludeSubquery;
-                                log_message('debug', "buildEfCoreStyleQuery: Added thenInclude collection subquery for '{$navPath}': {$thenIncludeInfo['navigation']} (index: {$collectionIndex})");
+                                //log_message('debug', "buildEfCoreStyleQuery: Added thenInclude collection subquery for '{$navPath}': {$thenIncludeInfo['navigation']} (index: {$collectionIndex})");
                                 $collectionIndex++;
                             }
                         }
@@ -3607,7 +3636,20 @@ class AdvancedQueryBuilder
                 if ($navInfo && !$navInfo['isCollection']) {
                     $refAlias = $referenceNavAliases[$navPath];
                     $refTableName = $this->context->getTableName($navInfo['entityType']);
-                    $joinCondition = $this->buildJoinCondition($mainAlias, $refAlias, $navPath, $navInfo);
+                    
+                    // Check if custom joinCondition is provided in include
+                    $customJoinCondition = $include['joinCondition'] ?? null;
+                    
+                    // Use custom join condition if provided, otherwise use default foreign key relationship
+                    if ($customJoinCondition !== null && trim($customJoinCondition) !== '') {
+                        // Replace placeholders with actual aliases
+                        $joinCondition = str_replace('{alias}', $mainAlias, $customJoinCondition);
+                        $joinCondition = str_replace('{relatedAlias}', $refAlias, $joinCondition);
+                        //log_message('debug', "buildEfCoreStyleQuery: Using custom join condition for '{$navPath}': original='{$customJoinCondition}', replaced='{$joinCondition}'");
+                    } else {
+                        $joinCondition = $this->buildJoinCondition($mainAlias, $refAlias, $navPath, $navInfo);
+                    }
+                    
                     // Check if this path is used in WHERE clause (should be INNER JOIN) or is a thenInclude
                     $isInWhere = in_array($navPath, $navigationPathsInWhere);
                     $isThenInclude = in_array($navPath, $thenIncludePaths);
@@ -3748,15 +3790,15 @@ class AdvancedQueryBuilder
         }
         
         // Build final query with LEFT JOINs for collections
-        log_message('debug', 'buildEfCoreStyleQuery: Building final query with ' . count($finalSelectColumns) . ' final select columns');
-        log_message('debug', 'buildEfCoreStyleQuery: Collection subqueries: ' . count($collectionSubqueries));
+        //log_message('debug', 'buildEfCoreStyleQuery: Building final query with ' . count($finalSelectColumns) . ' final select columns');
+        //log_message('debug', 'buildEfCoreStyleQuery: Collection subqueries: ' . count($collectionSubqueries));
         
         $finalQuery = "SELECT " . implode(', ', $finalSelectColumns) . "\n"
             . "FROM (\n"
             . "    " . str_replace("\n", "\n    ", $mainSubquery) . "\n"
             . ") AS [{$subqueryAlias}]";
         
-        log_message('debug', 'buildEfCoreStyleQuery: Final query base built');
+        //log_message('debug', 'buildEfCoreStyleQuery: Final query base built');
         
         // Add LEFT JOINs for collection subqueries
         foreach ($collectionSubqueries as $idx => $subquery) {
@@ -3811,7 +3853,7 @@ class AdvancedQueryBuilder
                 }
                 
                 // Join condition: main subquery primary key = collection subquery FK (in join entity)
-                log_message('debug', "buildEfCoreStyleQuery: Using primary key column '{$mainPrimaryKeyColumn}' for join condition with collection subquery (join entity FK: {$fkColumn})");
+                //log_message('debug', "buildEfCoreStyleQuery: Using primary key column '{$mainPrimaryKeyColumn}' for join condition with collection subquery (join entity FK: {$fkColumn})");
                 $joinCondition = "[{$subqueryAlias}].[{$mainPrimaryKeyColumn}] = [{$collectionSubqueryAlias}].[{$fkColumn}]";
             } else {
                 // No join entity - FK is directly in related entity (e.g., EmployeeDepartment.EmployeeId)
@@ -3880,16 +3922,16 @@ class AdvancedQueryBuilder
                         $parentPrimaryKeyColumn = $this->getPrimaryKeyColumnName($parentEntityReflection);
                         $parentRefIndex = $this->referenceNavIndexes[$parentNavPath] ?? 0;
                         // Reference navigation primary key is aliased as Id0, Id1, etc. in main subquery
-                        log_message('debug', "buildEfCoreStyleQuery: Using reference navigation primary key 'Id{$parentRefIndex}' for join condition with thenInclude collection subquery (FK property: '{$fkPropertyName}', column: '{$fkColumn}', alias: " . ($fkColumnAlias !== null ? "'{$fkColumnAlias}'" : "none") . ")");
+                        //log_message('debug', "buildEfCoreStyleQuery: Using reference navigation primary key 'Id{$parentRefIndex}' for join condition with thenInclude collection subquery (FK property: '{$fkPropertyName}', column: '{$fkColumn}', alias: " . ($fkColumnAlias !== null ? "'{$fkColumnAlias}'" : "none") . ")");
                         $joinCondition = "[{$subqueryAlias}].[Id{$parentRefIndex}] = [{$collectionSubqueryAlias}].[{$fkColumnForJoin}]";
                     } else {
                         // Fallback to main entity primary key
-                        log_message('debug', "buildEfCoreStyleQuery: Using primary key column '{$mainPrimaryKeyColumn}' for join condition with collection subquery (related entity FK property: '{$fkPropertyName}', column: '{$fkColumn}', alias: " . ($fkColumnAlias !== null ? "'{$fkColumnAlias}'" : "none") . ")");
+                        //log_message('debug', "buildEfCoreStyleQuery: Using primary key column '{$mainPrimaryKeyColumn}' for join condition with collection subquery (related entity FK property: '{$fkPropertyName}', column: '{$fkColumn}', alias: " . ($fkColumnAlias !== null ? "'{$fkColumnAlias}'" : "none") . ")");
                         $joinCondition = "[{$subqueryAlias}].[{$mainPrimaryKeyColumn}] = [{$collectionSubqueryAlias}].[{$fkColumnForJoin}]";
                     }
                 } else {
                     // Regular collection subquery - join on main entity primary key
-                    log_message('debug', "buildEfCoreStyleQuery: Using primary key column '{$mainPrimaryKeyColumn}' for join condition with collection subquery (related entity FK property: '{$fkPropertyName}', column: '{$fkColumn}', alias: " . ($fkColumnAlias !== null ? "'{$fkColumnAlias}'" : "none") . ")");
+                    //log_message('debug', "buildEfCoreStyleQuery: Using primary key column '{$mainPrimaryKeyColumn}' for join condition with collection subquery (related entity FK property: '{$fkPropertyName}', column: '{$fkColumn}', alias: " . ($fkColumnAlias !== null ? "'{$fkColumnAlias}'" : "none") . ")");
                     $joinCondition = "[{$subqueryAlias}].[{$mainPrimaryKeyColumn}] = [{$collectionSubqueryAlias}].[{$fkColumnForJoin}]";
                 }
             }
@@ -3940,7 +3982,7 @@ class AdvancedQueryBuilder
                                 $collectionColumnName = $this->getColumnNameFromProperty($thenEntityReflection, $nestedProp);
                                 $collectionSubqueryAlias = 's' . $idx;
                                 $isCollectionNav = true;
-                                log_message('debug', "buildEfCoreStyleQuery: Found collection navigation ORDER BY: {$firstNavProp}.{$nestedProp} via collection '{$collectionNavPath}' -> collection subquery alias: {$collectionSubqueryAlias}, column: {$collectionColumnName}");
+                                //log_message('debug', "buildEfCoreStyleQuery: Found collection navigation ORDER BY: {$firstNavProp}.{$nestedProp} via collection '{$collectionNavPath}' -> collection subquery alias: {$collectionSubqueryAlias}, column: {$collectionColumnName}");
                                 break;
                             }
                         }
@@ -3957,7 +3999,7 @@ class AdvancedQueryBuilder
                         $direction = 'ASC';
                     }
                     $orderBySql = "{$quotedAlias}.{$quotedColumn} {$direction}";
-                    log_message('debug', "buildEfCoreStyleQuery: Generated ORDER BY SQL for collection navigation: {$orderBySql}");
+                    //log_message('debug', "buildEfCoreStyleQuery: Generated ORDER BY SQL for collection navigation: {$orderBySql}");
                     $orderByColumns[] = $orderBySql;
                 } else {
                     // Regular ORDER BY - use convertOrderByToSql
@@ -3974,7 +4016,7 @@ class AdvancedQueryBuilder
             // Get primary key column name for main entity
             $mainEntityReflection = new ReflectionClass($this->entityType);
             $mainPrimaryKeyColumn = $this->getPrimaryKeyColumnName($mainEntityReflection);
-            log_message('debug', "buildEfCoreStyleQuery: Using primary key column '{$mainPrimaryKeyColumn}' for ORDER BY");
+            //log_message('debug', "buildEfCoreStyleQuery: Using primary key column '{$mainPrimaryKeyColumn}' for ORDER BY");
             $orderByColumns[] = "[{$subqueryAlias}].[{$mainPrimaryKeyColumn}]";
             
             foreach ($referenceNavAliases as $navPath => $refAlias) {
@@ -3986,7 +4028,7 @@ class AdvancedQueryBuilder
                         $refEntityReflection = new ReflectionClass($navInfo['entityType']);
                         $refPrimaryKeyColumn = $this->getPrimaryKeyColumnName($refEntityReflection);
                         $refIndex = $referenceNavIndexes[$navPath]; // Use stored index
-                        log_message('debug', "buildEfCoreStyleQuery: Adding reference navigation ORDER BY for '{$navPath}' with primary key '{$refPrimaryKeyColumn}' (index: {$refIndex})");
+                        //log_message('debug', "buildEfCoreStyleQuery: Adding reference navigation ORDER BY for '{$navPath}' with primary key '{$refPrimaryKeyColumn}' (index: {$refIndex})");
                         // Reference navigation Id columns are aliased as Id0, Id1, etc. in the main subquery
                         $orderByColumns[] = "[{$subqueryAlias}].[Id{$refIndex}]";
                     }
@@ -4015,11 +4057,11 @@ class AdvancedQueryBuilder
                     if ($primaryKeyAlias === null) {
                         $primaryKeyAlias = $relatedPrimaryKeyColumn;
                     }
-                    log_message('debug', "buildEfCoreStyleQuery: Adding collection navigation ORDER BY for subquery '{$collectionSubqueryAlias}' with primary key '{$primaryKeyAlias}' (actual column: '{$relatedPrimaryKeyColumn}')");
+                    //log_message('debug', "buildEfCoreStyleQuery: Adding collection navigation ORDER BY for subquery '{$collectionSubqueryAlias}' with primary key '{$primaryKeyAlias}' (actual column: '{$relatedPrimaryKeyColumn}')");
                     $orderByColumns[] = "[{$collectionSubqueryAlias}].[{$primaryKeyAlias}]";
                 } else {
                     // Fallback to Id0 if entityType not available
-                    log_message('warning', "buildEfCoreStyleQuery: Collection subquery '{$collectionSubqueryAlias}' has no entityType, using default 'Id0'");
+                    //log_message('warning', "buildEfCoreStyleQuery: Collection subquery '{$collectionSubqueryAlias}' has no entityType, using default 'Id0'");
                     $orderByColumns[] = "[{$collectionSubqueryAlias}].[Id0]";
                 }
             }
@@ -4056,7 +4098,7 @@ class AdvancedQueryBuilder
         
         // Log the generated SQL for debugging
         log_message('debug', 'Generated EF Core Style SQL: ' . $finalQuery);
-        log_message('debug', 'buildEfCoreStyleQuery: ORDER BY columns: ' . implode(', ', $orderByColumns));
+        //log_message('debug', 'buildEfCoreStyleQuery: ORDER BY columns: ' . implode(', ', $orderByColumns));
         
         return $finalQuery;
     }
@@ -4388,7 +4430,7 @@ class AdvancedQueryBuilder
     {
         $entityReflection = new ReflectionClass($this->entityType);
         if (!$entityReflection->hasProperty($navigationProperty)) {
-            log_message('debug', "getNavigationInfo: Property '{$navigationProperty}' not found in entity {$this->entityType}");
+            //log_message('debug', "getNavigationInfo: Property '{$navigationProperty}' not found in entity {$this->entityType}");
             return null;
         }
         
@@ -4405,16 +4447,16 @@ class AdvancedQueryBuilder
             $relatedEntityType = $matches[1];
             $isCollection = !empty($matches[2]);
             
-            log_message('debug', "getNavigationInfo: Found @var annotation for '{$navigationProperty}': {$relatedEntityType}" . ($isCollection ? '[]' : ''));
+            //log_message('debug', "getNavigationInfo: Found @var annotation for '{$navigationProperty}': {$relatedEntityType}" . ($isCollection ? '[]' : ''));
             
             // Resolve namespace using use statements (only if not fully qualified)
             if ($relatedEntityType && !str_starts_with($relatedEntityType, '\\')) {
                 $resolved = $this->resolveEntityType($relatedEntityType, $entityReflection);
                 if ($resolved !== null) {
-                    log_message('debug', "getNavigationInfo: Resolved '{$relatedEntityType}' to '{$resolved}'");
+                    //log_message('debug', "getNavigationInfo: Resolved '{$relatedEntityType}' to '{$resolved}'");
                     $relatedEntityType = $resolved;
                 } else {
-                    log_message('warning', "getNavigationInfo: Failed to resolve '{$relatedEntityType}' for '{$navigationProperty}'");
+                    //log_message('warning', "getNavigationInfo: Failed to resolve '{$relatedEntityType}' for '{$navigationProperty}'");
                 }
             }
         } 
@@ -4426,13 +4468,13 @@ class AdvancedQueryBuilder
                 // Check if it's a collection by checking if property type is array
                 $isCollection = $type->getName() === 'array';
                 
-                log_message('debug', "getNavigationInfo: Found type hint for '{$navigationProperty}': {$relatedEntityType}" . ($isCollection ? '[]' : ''));
+                //log_message('debug', "getNavigationInfo: Found type hint for '{$navigationProperty}': {$relatedEntityType}" . ($isCollection ? '[]' : ''));
                 
                 // If not fully qualified, resolve namespace
                 if ($relatedEntityType && !str_starts_with($relatedEntityType, '\\')) {
                     $resolved = $this->resolveEntityType($relatedEntityType, $entityReflection);
                     if ($resolved !== null) {
-                        log_message('debug', "getNavigationInfo: Resolved type hint '{$relatedEntityType}' to '{$resolved}'");
+                        //log_message('debug', "getNavigationInfo: Resolved type hint '{$relatedEntityType}' to '{$resolved}'");
                         $relatedEntityType = $resolved;
                     }
                 }
@@ -4440,16 +4482,16 @@ class AdvancedQueryBuilder
         }
         
         if ($relatedEntityType === null) {
-            log_message('warning', "getNavigationInfo: No @var annotation or type hint found for '{$navigationProperty}' in entity {$this->entityType}");
+            //log_message('warning', "getNavigationInfo: No @var annotation or type hint found for '{$navigationProperty}' in entity {$this->entityType}");
         }
         
         if ($relatedEntityType === null) {
-            log_message('debug', "getNavigationInfo: relatedEntityType is null for '{$navigationProperty}'");
+            //log_message('debug', "getNavigationInfo: relatedEntityType is null for '{$navigationProperty}'");
             return null;
         }
         
         if (!class_exists($relatedEntityType)) {
-            log_message('error', "getNavigationInfo: Class '{$relatedEntityType}' does not exist for '{$navigationProperty}'");
+            //log_message('error', "getNavigationInfo: Class '{$relatedEntityType}' does not exist for '{$navigationProperty}'");
             return null;
         }
         
@@ -4475,7 +4517,7 @@ class AdvancedQueryBuilder
             'joinEntityType' => $isCollection ? $this->getJoinEntityType($navigationProperty) : null
         ];
         
-        log_message('debug', "getNavigationInfo: Returning info for '{$navigationProperty}': " . json_encode($result));
+        //log_message('debug', "getNavigationInfo: Returning info for '{$navigationProperty}': " . json_encode($result));
         
         return $result;
     }
@@ -4564,14 +4606,14 @@ class AdvancedQueryBuilder
             // - If [Column] attribute exists and name is set, use that name
             // - Otherwise, use property name
             $refIdColumn = $refPrimaryKeyProperty ? $this->getColumnNameFromProperty($refEntityReflection, $refPrimaryKeyProperty) : 'Id';
-            log_message('debug', "buildJoinCondition: For navigation '{$navPath}', primary key property: '{$refPrimaryKeyProperty}', column name from property: '{$refIdColumn}'");
+            //log_message('debug', "buildJoinCondition: For navigation '{$navPath}', primary key property: '{$refPrimaryKeyProperty}', column name from property: '{$refIdColumn}'");
             
             $quotedMainAlias = $provider->escapeIdentifier($mainAlias);
             $quotedFkColumn = $provider->escapeIdentifier($fkColumn);
             $quotedRefAlias = $provider->escapeIdentifier($refAlias);
             $quotedRefIdColumn = $provider->escapeIdentifier($refIdColumn);
             $joinCondition = "{$quotedMainAlias}.{$quotedFkColumn} = {$quotedRefAlias}.{$quotedRefIdColumn}";
-            log_message('debug', "buildJoinCondition: Final JOIN condition for '{$navPath}': {$joinCondition}");
+            //log_message('debug', "buildJoinCondition: Final JOIN condition for '{$navPath}': {$joinCondition}");
             return $joinCondition;
         } else {
             // One-to-one: FK in related entity
@@ -4646,7 +4688,7 @@ class AdvancedQueryBuilder
             $relatedEntityType = $this->findRelatedEntityFromJoinEntity($joinEntityType, $navPath);
             
             if ($relatedEntityType === null) {
-                log_message('error', "buildCollectionSubquery: Could not determine related entity from join entity {$joinEntityType} for navigation {$navPath}");
+                //log_message('error', "buildCollectionSubquery: Could not determine related entity from join entity {$joinEntityType} for navigation {$navPath}");
                 return null;
             }
             
@@ -4673,7 +4715,7 @@ class AdvancedQueryBuilder
             $joinColumns = $this->getEntityColumns($joinEntityReflection);
             $relatedColumnsWithProperties = $this->getEntityColumnsWithProperties($relatedEntityReflection);
             
-            log_message('debug', "buildCollectionSubquery: Join entity: {$joinEntityType}, Related entity: {$relatedEntityType}");
+            //log_message('debug', "buildCollectionSubquery: Join entity: {$joinEntityType}, Related entity: {$relatedEntityType}");
             
             // Build SELECT
             $selectColumns = [];
@@ -4728,14 +4770,14 @@ class AdvancedQueryBuilder
             $relatedEntityShortName = (new ReflectionClass($relatedEntityType))->getShortName();
             $expectedFkName = $relatedEntityShortName . 'Id'; // e.g., DepartmentId
             
-            log_message('debug', "buildCollectionSubquery: Looking for FK in join entity {$joinEntityType} pointing to {$relatedEntityType} (expected: {$expectedFkName})");
+            //log_message('debug', "buildCollectionSubquery: Looking for FK in join entity {$joinEntityType} pointing to {$relatedEntityType} (expected: {$expectedFkName})");
             
             // First, try to find FK by convention (RelatedEntityName + "Id")
             if ($joinEntityReflection->hasProperty($expectedFkName)) {
                 $joinFk = $expectedFkName;
-                log_message('debug', "buildCollectionSubquery: Found FK by convention: {$joinFk}");
+                //log_message('debug', "buildCollectionSubquery: Found FK by convention: {$joinFk}");
             } else {
-                log_message('debug', "buildCollectionSubquery: Property {$expectedFkName} not found, checking ForeignKey attributes");
+                //log_message('debug', "buildCollectionSubquery: Property {$expectedFkName} not found, checking ForeignKey attributes");
                 
                 // Check ForeignKey attribute on properties
                 foreach ($joinEntityReflection->getProperties() as $property) {
@@ -4749,7 +4791,7 @@ class AdvancedQueryBuilder
                         if ($fkAttr->navigationProperty === $relatedEntityShortName || 
                             $propName === $expectedFkName) {
                             $joinFk = $propName;
-                            log_message('debug', "buildCollectionSubquery: Found FK by ForeignKey attribute: {$joinFk} (navigationProperty: {$fkAttr->navigationProperty})");
+                            //log_message('debug', "buildCollectionSubquery: Found FK by ForeignKey attribute: {$joinFk} (navigationProperty: {$fkAttr->navigationProperty})");
                             break;
                         }
                     }
@@ -4758,7 +4800,7 @@ class AdvancedQueryBuilder
             
             // Fallback: try to find property that matches related entity name pattern
             if ($joinFk === null) {
-                log_message('debug', "buildCollectionSubquery: Trying pattern matching for FK");
+                //log_message('debug', "buildCollectionSubquery: Trying pattern matching for FK");
                 foreach ($joinEntityReflection->getProperties() as $property) {
                     $propName = $property->getName();
                     if (str_ends_with($propName, 'Id') && $propName !== 'Id') {
@@ -4766,7 +4808,7 @@ class AdvancedQueryBuilder
                         $possibleEntityName = str_replace('Id', '', $propName);
                         if (strcasecmp($possibleEntityName, $relatedEntityShortName) === 0) {
                             $joinFk = $propName;
-                            log_message('debug', "buildCollectionSubquery: Found FK by pattern matching: {$joinFk}");
+                            //log_message('debug', "buildCollectionSubquery: Found FK by pattern matching: {$joinFk}");
                             break;
                         }
                     }
@@ -4776,23 +4818,23 @@ class AdvancedQueryBuilder
             if ($joinFk === null) {
                 // Last resort: use convention
                 $joinFk = $expectedFkName;
-                log_message('debug', "buildCollectionSubquery: Using convention as last resort: {$joinFk}");
+                //log_message('debug', "buildCollectionSubquery: Using convention as last resort: {$joinFk}");
             }
             
             // Verify the property exists before getting column name
             if (!$joinEntityReflection->hasProperty($joinFk)) {
-                log_message('error', "buildCollectionSubquery: FK property {$joinFk} does not exist in {$joinEntityType}");
+                //log_message('error', "buildCollectionSubquery: FK property {$joinFk} does not exist in {$joinEntityType}");
                 // List all properties for debugging
                 $allProps = [];
                 foreach ($joinEntityReflection->getProperties() as $prop) {
                     $allProps[] = $prop->getName();
                 }
-                log_message('debug', "buildCollectionSubquery: Available properties in {$joinEntityType}: " . implode(', ', $allProps));
+                //log_message('debug', "buildCollectionSubquery: Available properties in {$joinEntityType}: " . implode(', ', $allProps));
                 throw new \RuntimeException("Foreign key property {$joinFk} not found in join entity {$joinEntityType}");
             }
             
             $joinFkColumn = $this->getColumnNameFromProperty($joinEntityReflection, $joinFk);
-            log_message('debug', "buildCollectionSubquery: Using FK column: {$joinFkColumn} for join condition");
+            //log_message('debug', "buildCollectionSubquery: Using FK column: {$joinFkColumn} for join condition");
             $quotedJoinFkColumn = $provider->escapeIdentifier($joinFkColumn);
             $quotedRelatedId = $provider->escapeIdentifier('Id');
             $joinCondition = "{$quotedJoinAlias}.{$quotedJoinFkColumn} = {$quotedRelatedAlias}.{$quotedRelatedId}";
@@ -4803,7 +4845,7 @@ class AdvancedQueryBuilder
             // Get columns from related entity only
             $relatedColumnsWithProperties = $this->getEntityColumnsWithProperties($relatedEntityReflection);
             
-            log_message('debug', "buildCollectionSubquery: No join entity, Related entity: {$relatedEntityType}");
+            //log_message('debug', "buildCollectionSubquery: No join entity, Related entity: {$relatedEntityType}");
             
             // Build SELECT - only related entity columns
             $selectColumns = [];
@@ -4865,7 +4907,7 @@ class AdvancedQueryBuilder
             $mainEntityReflection = new ReflectionClass($this->entityType);
             $mainPrimaryKeyColumn = $this->getPrimaryKeyColumnName($mainEntityReflection);
             
-            log_message('debug', "buildCollectionSubquery: Using FK column: {$foreignKeyColumn} in related entity pointing to main entity primary key: {$mainPrimaryKeyColumn}");
+            //log_message('debug', "buildCollectionSubquery: Using FK column: {$foreignKeyColumn} in related entity pointing to main entity primary key: {$mainPrimaryKeyColumn}");
             
             $quotedFkColumn = $provider->escapeIdentifier($foreignKeyColumn);
             $quotedMainPkColumn = $provider->escapeIdentifier($mainPrimaryKeyColumn);
@@ -4906,17 +4948,19 @@ class AdvancedQueryBuilder
                 $thenIncludeNav = $thenInclude;
                 $thenIncludeWhereClause = null;
                 $thenIncludeJoinType = 'LEFT';
+                $thenIncludeJoinCondition = null;
             } else {
                 $thenIncludeNav = $thenInclude['navigation'] ?? $thenInclude;
                 $thenIncludeWhereClause = $thenInclude['whereClause'] ?? null;
                 $thenIncludeJoinType = $thenInclude['joinType'] ?? 'LEFT';
+                $thenIncludeJoinCondition = $thenInclude['joinCondition'] ?? null;
             }
             
-            log_message('debug', "buildCollectionSubquery: Processing thenInclude '{$thenIncludeNav}' for collection '{$navPath}' (relatedEntityType: {$relatedEntityType}, joinType: {$thenIncludeJoinType})");
+            //log_message('debug', "buildCollectionSubquery: Processing thenInclude '{$thenIncludeNav}' for collection '{$navPath}' (relatedEntityType: {$relatedEntityType}, joinType: {$thenIncludeJoinType}, joinCondition: " . ($thenIncludeJoinCondition ?? 'default') . ")");
             
             // Get navigation info for thenInclude (from related entity)
             $thenNavInfo = $this->getNavigationInfoForEntity($thenIncludeNav, $relatedEntityType);
-            log_message('debug', "buildCollectionSubquery: thenNavInfo for '{$thenIncludeNav}': " . ($thenNavInfo ? (($thenNavInfo['isCollection'] ? 'collection' : 'reference') . ', entityType: ' . $thenNavInfo['entityType']) : 'null'));
+            //log_message('debug', "buildCollectionSubquery: thenNavInfo for '{$thenIncludeNav}': " . ($thenNavInfo ? (($thenNavInfo['isCollection'] ? 'collection' : 'reference') . ', entityType: ' . $thenNavInfo['entityType']) : 'null'));
             if ($thenNavInfo && $thenNavInfo['isCollection']) {
                 // Build nested subquery for collection navigation
                 $nestedSubquery = $this->buildNestedCollectionSubquery($thenIncludeNav, $thenNavInfo, $currentNestedIndex, $relatedEntityType, $thenIncludeWhereClause);
@@ -4988,7 +5032,7 @@ class AdvancedQueryBuilder
                 }
             } elseif ($thenNavInfo && !$thenNavInfo['isCollection']) {
                 // Reference navigation - add JOIN in collection subquery
-                log_message('debug', "buildCollectionSubquery: Adding reference navigation JOIN for '{$thenIncludeNav}' (entityType: {$thenNavInfo['entityType']}, joinType: {$thenIncludeJoinType})");
+                //log_message('debug', "buildCollectionSubquery: Adding reference navigation JOIN for '{$thenIncludeNav}' (entityType: {$thenNavInfo['entityType']}, joinType: {$thenIncludeJoinType})");
                 $thenRelatedEntityType = $thenNavInfo['entityType'];
                 $thenForeignKey = $thenNavInfo['foreignKey'];
                 $thenRelatedEntityReflection = new ReflectionClass($thenRelatedEntityType);
@@ -5057,21 +5101,32 @@ class AdvancedQueryBuilder
                 }
                 
                 // Build JOIN condition
-                $thenFkColumn = $this->getColumnNameFromProperty($relatedEntityReflection, $thenForeignKey);
-                $thenRelatedPkColumn = $this->getPrimaryKeyColumnName($thenRelatedEntityReflection);
-                $quotedThenFkColumn = $provider->escapeIdentifier($thenFkColumn);
-                $quotedThenRelatedPkColumn = $provider->escapeIdentifier($thenRelatedPkColumn);
                 $quotedThenRelatedTableName = $provider->escapeIdentifier($thenRelatedTableName);
                 
+                // Use custom join condition if provided, otherwise use default foreign key relationship
+                if ($thenIncludeJoinCondition !== null && trim($thenIncludeJoinCondition) !== '') {
+                    // Replace placeholders with actual aliases
+                    $thenJoinCondition = str_replace('{alias}', $quotedRelatedAlias, $thenIncludeJoinCondition);
+                    $thenJoinCondition = str_replace('{relatedAlias}', $quotedThenRelatedAlias, $thenJoinCondition);
+                    //log_message('debug', "buildCollectionSubquery: Using custom join condition for '{$thenIncludeNav}': original='{$thenIncludeJoinCondition}', replaced='{$thenJoinCondition}'");
+                } else {
+                    // Use default foreign key relationship
+                    $thenFkColumn = $this->getColumnNameFromProperty($relatedEntityReflection, $thenForeignKey);
+                    $thenRelatedPkColumn = $this->getPrimaryKeyColumnName($thenRelatedEntityReflection);
+                    $quotedThenFkColumn = $provider->escapeIdentifier($thenFkColumn);
+                    $quotedThenRelatedPkColumn = $provider->escapeIdentifier($thenRelatedPkColumn);
+                    $thenJoinCondition = "{$quotedRelatedAlias}.{$quotedThenFkColumn} = {$quotedThenRelatedAlias}.{$quotedThenRelatedPkColumn}";
+                    //log_message('debug', "buildCollectionSubquery: Using default foreign key join condition for '{$thenIncludeNav}': {$thenJoinCondition}");
+                }
+                
                 // Add JOIN to SQL (will be added after FROM clause)
-                $thenJoinCondition = "{$quotedRelatedAlias}.{$quotedThenFkColumn} = {$quotedThenRelatedAlias}.{$quotedThenRelatedPkColumn}";
                 // Store join info for later
                 if (!isset($nestedSubqueryJoins)) {
                     $nestedSubqueryJoins = [];
                 }
                 $thenJoinKeyword = $thenIncludeJoinType === 'INNER' ? 'INNER JOIN' : 'LEFT JOIN';
                 $joinSql = "{$thenJoinKeyword} {$quotedThenRelatedTableName} AS {$quotedThenRelatedAlias} ON {$thenJoinCondition}";
-                log_message('debug', "buildCollectionSubquery: Adding reference navigation JOIN SQL for '{$thenIncludeNav}': {$joinSql}");
+                //log_message('debug', "buildCollectionSubquery: Adding reference navigation JOIN SQL for '{$thenIncludeNav}': {$joinSql}");
                 $nestedSubqueryJoins[] = $joinSql;
             }
         }
@@ -5126,7 +5181,7 @@ class AdvancedQueryBuilder
             // Replace {alias} placeholder with actual alias if used
             $originalWhereClause = $whereClause;
             $whereClause = str_replace('{alias}', $relatedAlias, $whereClause);
-            log_message('debug', "buildCollectionSubquery: Adding WHERE clause for '{$navPath}': original='{$originalWhereClause}', replaced='{$whereClause}', relatedAlias='{$relatedAlias}'");
+            //log_message('debug', "buildCollectionSubquery: Adding WHERE clause for '{$navPath}': original='{$originalWhereClause}', replaced='{$whereClause}', relatedAlias='{$relatedAlias}'");
             $sql .= "\nWHERE " . $whereClause;
         }
         
@@ -5291,7 +5346,7 @@ class AdvancedQueryBuilder
                 
                 // Return if it's not the parent entity
                 if ($entityShortName !== $parentEntityShortName) {
-                    log_message('debug', "findRelatedEntityFromJoinEntityForParent: Found related entity {$entityType} (not parent entity {$parentEntityShortName})");
+                    //log_message('debug', "findRelatedEntityFromJoinEntityForParent: Found related entity {$entityType} (not parent entity {$parentEntityShortName})");
                     return $entityType;
                 }
             }
@@ -5437,7 +5492,7 @@ class AdvancedQueryBuilder
                             $columnName = $matches[2]; // e.g., "CustomField01"
                             $sqlOperator = $matches[3]; // e.g., "LIKE CONCAT('%', '4006', '%')"
                             
-                            log_message('debug', "convertSimpleWhereToSql - navigation property path detected: {$navigationProperty}.{$columnName}, SQL operator: {$sqlOperator}");
+                            //log_message('debug', "convertSimpleWhereToSql - navigation property path detected: {$navigationProperty}.{$columnName}, SQL operator: {$sqlOperator}");
                             
                             // Get navigation info for reference navigation property
                             $navInfo = $this->getNavigationInfo($navigationProperty);
@@ -5456,7 +5511,7 @@ class AdvancedQueryBuilder
                                 if ($joinAlias === null) {
                                     // Try to generate alias based on navigation property name
                                     $joinAlias = strtolower(substr($navigationProperty, 0, 1)) . '1'; // e.g., "c4" for "CustomField"
-                                    log_message('warning', "convertSimpleWhereToSql - join alias not found for '{$navigationProperty}', using fallback: {$joinAlias}");
+                                    //log_message('warning', "convertSimpleWhereToSql - join alias not found for '{$navigationProperty}', using fallback: {$joinAlias}");
                                 }
                                 
                                 // Get column name from reference entity
@@ -5470,7 +5525,7 @@ class AdvancedQueryBuilder
                                 // Build SQL condition using JOIN alias
                                 $sqlCondition = "{$quotedJoinAlias}.{$quotedRefColumn} {$sqlOperator}";
                                 
-                                log_message('debug', "convertSimpleWhereToSql - generated reference navigation SQL condition: {$sqlCondition}");
+                                //log_message('debug', "convertSimpleWhereToSql - generated reference navigation SQL condition: {$sqlCondition}");
                                 return $sqlCondition;
                             }
                         }
@@ -5485,7 +5540,7 @@ class AdvancedQueryBuilder
                         $navPath = $parts[1]; // e.g., "EmployeeDepartments.Department.DepartmentID"
                         $values = isset($parts[2]) ? $parts[2] : '?'; // e.g., "1,2" or "?"
                         
-                        log_message('debug', "convertSimpleWhereToSql - navigation property path detected: {$navPath}, values: {$values}");
+                        //log_message('debug', "convertSimpleWhereToSql - navigation property path detected: {$navPath}, values: {$values}");
                         
                         // Parse navigation property path
                         $pathParts = explode('.', $navPath);
@@ -5512,7 +5567,7 @@ class AdvancedQueryBuilder
                                 if ($joinAlias === null) {
                                     // Try to generate alias based on navigation property name
                                     $joinAlias = strtolower(substr($navigationProperty, 0, 1)) . '1'; // e.g., "k1" for "Kadro"
-                                    log_message('warning', "convertSimpleWhereToSql - join alias not found for '{$navigationProperty}', using fallback: {$joinAlias}");
+                                    //log_message('warning', "convertSimpleWhereToSql - join alias not found for '{$navigationProperty}', using fallback: {$joinAlias}");
                                 }
                                 
                                 // Get column name from reference entity
@@ -5530,7 +5585,7 @@ class AdvancedQueryBuilder
                                     $sqlCondition = "{$quotedJoinAlias}.{$quotedRefColumn} IN (?)";
                                 }
                                 
-                                log_message('debug', "convertSimpleWhereToSql - generated reference navigation IN clause: {$sqlCondition}");
+                                //log_message('debug', "convertSimpleWhereToSql - generated reference navigation IN clause: {$sqlCondition}");
                                 return $sqlCondition;
                             }
                         }
@@ -5582,7 +5637,7 @@ class AdvancedQueryBuilder
                                         $sqlCondition = "EXISTS (SELECT 1 FROM {$quotedCollectionTable} AS [ed] INNER JOIN {$quotedRefTable} AS [d] ON [ed].{$quotedRefFk} = [d].{$quotedRefFk} WHERE [ed].{$quotedCollectionFk} = {$quotedMainTable}.{$quotedMainPk} AND [d].{$quotedRefColumn} IN (?))";
                                     }
                                     
-                                    log_message('debug', "convertSimpleWhereToSql - generated EXISTS subquery: {$sqlCondition}");
+                                    //log_message('debug', "convertSimpleWhereToSql - generated EXISTS subquery: {$sqlCondition}");
                                     return $sqlCondition;
                                 }
                             }
@@ -5665,8 +5720,8 @@ class AdvancedQueryBuilder
                 }
             }
         } catch (\Exception $e) {
-            log_message('debug', 'convertSimpleWhereToSql failed: ' . $e->getMessage());
-            log_message('debug', 'Exception trace: ' . $e->getTraceAsString());
+            //log_message('debug', 'convertSimpleWhereToSql failed: ' . $e->getMessage());
+            //log_message('debug', 'Exception trace: ' . $e->getTraceAsString());
         }
         
         return null;
@@ -5681,7 +5736,7 @@ class AdvancedQueryBuilder
             $reflection = new \ReflectionFunction($keySelector);
             $staticVariables = $reflection->getStaticVariables();
             
-            log_message('debug', 'convertOrderByToSql: staticVariables = ' . json_encode(array_keys($staticVariables)));
+            //log_message('debug', 'convertOrderByToSql: staticVariables = ' . json_encode(array_keys($staticVariables)));
             
             // Try to extract field name from closure's static variables (for $e->$field pattern)
             $fieldName = null;
@@ -5698,7 +5753,7 @@ class AdvancedQueryBuilder
                     if (count($parts) === 2) {
                         $navigationProperty = $parts[0];
                         $nestedProperty = $parts[1];
-                        log_message('debug', "convertOrderByToSql: Found navigation property from static variable '{$varName}': {$navigationProperty}.{$nestedProperty}");
+                        //log_message('debug', "convertOrderByToSql: Found navigation property from static variable '{$varName}': {$navigationProperty}.{$nestedProperty}");
                         break;
                     }
                 }
@@ -5741,14 +5796,14 @@ class AdvancedQueryBuilder
             
             // Handle navigation property (e.g., Kadro.Name)
             if ($navigationProperty !== null && $nestedProperty !== null) {
-                log_message('debug', "convertOrderByToSql: Navigation property detected: {$navigationProperty}.{$nestedProperty}");
-                log_message('debug', "convertOrderByToSql: requiredJoins keys: " . implode(', ', array_keys($this->requiredJoins)));
-                log_message('debug', "convertOrderByToSql: alias parameter: {$alias}");
+                //log_message('debug', "convertOrderByToSql: Navigation property detected: {$navigationProperty}.{$nestedProperty}");
+                //log_message('debug', "convertOrderByToSql: requiredJoins keys: " . implode(', ', array_keys($this->requiredJoins)));
+                //log_message('debug', "convertOrderByToSql: alias parameter: {$alias}");
                 
                 // Get join info for navigation property
                 $joinInfo = $this->requiredJoins[$navigationProperty] ?? null;
                 if ($joinInfo) {
-                    log_message('debug', "convertOrderByToSql: Found join info for {$navigationProperty}: " . json_encode($joinInfo));
+                    //log_message('debug', "convertOrderByToSql: Found join info for {$navigationProperty}: " . json_encode($joinInfo));
                     $relatedTableName = $joinInfo['table'];
                     $relatedEntityType = $joinInfo['entityType'];
                     
@@ -5789,7 +5844,7 @@ class AdvancedQueryBuilder
                             }
                             
                             $orderBySql = "{$quotedAlias}.{$quotedColumnAlias} {$direction}";
-                            log_message('debug', "convertOrderByToSql: Generated ORDER BY SQL for final query: {$orderBySql}");
+                            //log_message('debug', "convertOrderByToSql: Generated ORDER BY SQL for final query: {$orderBySql}");
                             return $orderBySql;
                         }
                     }
@@ -5809,7 +5864,7 @@ class AdvancedQueryBuilder
                         }
                         
                         $orderBySql = "{$quotedJoinAlias}.{$quotedColumn} {$direction}";
-                        log_message('debug', "convertOrderByToSql: Generated ORDER BY SQL for main subquery using JOIN alias: {$orderBySql}");
+                        //log_message('debug', "convertOrderByToSql: Generated ORDER BY SQL for main subquery using JOIN alias: {$orderBySql}");
                         return $orderBySql;
                     } else {
                         // Fallback to table.column if alias not available
@@ -5824,7 +5879,7 @@ class AdvancedQueryBuilder
                         }
                         
                         $orderBySql = "{$quotedTable}.{$quotedColumn} {$direction}";
-                        log_message('debug', "convertOrderByToSql: Generated ORDER BY SQL for main subquery (fallback to table name): {$orderBySql}");
+                        //log_message('debug', "convertOrderByToSql: Generated ORDER BY SQL for main subquery (fallback to table name): {$orderBySql}");
                         return $orderBySql;
                     }
                 } else {
@@ -5832,14 +5887,14 @@ class AdvancedQueryBuilder
                     // Check if it's a collection navigation property accessed via nested path
                     // e.g., "Department.DepartmentName" where "Department" is accessed via "EmployeeDepartments" collection
                     // In this case, we need to find the collection subquery that contains this navigation
-                    log_message('debug', "convertOrderByToSql: No join info found for {$navigationProperty}, checking if it's a collection navigation property");
+                    //log_message('debug', "convertOrderByToSql: No join info found for {$navigationProperty}, checking if it's a collection navigation property");
                     
                     // For final query, check if this navigation property is in a collection subquery
                     if ($alias === 's' || $alias === $this->context->getTableName($this->entityType)) {
                         // Try to find collection subquery that contains this navigation property
                         // Collection subqueries are built in buildEfCoreStyleQuery, but we don't have access here
                         // Instead, we'll use ExpressionParser fallback which should handle this case
-                        log_message('debug', "convertOrderByToSql: Final query ORDER BY for collection navigation property, will use ExpressionParser fallback");
+                        //log_message('debug', "convertOrderByToSql: Final query ORDER BY for collection navigation property, will use ExpressionParser fallback");
                     }
                 }
             }
@@ -5915,8 +5970,8 @@ class AdvancedQueryBuilder
                 return "{$sqlExpression} {$direction}";
             }
         } catch (\Exception $e) {
-            log_message('debug', 'convertOrderByToSql failed: ' . $e->getMessage());
-            log_message('debug', 'Exception trace: ' . $e->getTraceAsString());
+            //log_message('debug', 'convertOrderByToSql failed: ' . $e->getMessage());
+            //log_message('debug', 'Exception trace: ' . $e->getTraceAsString());
         }
         
         return null;
@@ -6056,7 +6111,7 @@ class AdvancedQueryBuilder
         
         // Get primary key column name
         $primaryKeyColumn = $this->getPrimaryKeyColumnName($entityReflection);
-        log_message('debug', "parseEfCoreStyleResults: Using primary key column '{$primaryKeyColumn}' for entity " . $entityReflection->getName());
+        //log_message('debug', "parseEfCoreStyleResults: Using primary key column '{$primaryKeyColumn}' for entity " . $entityReflection->getName());
         
         // Cache ReflectionClass and entity columns for collection navigation info to avoid recreating them for each row
         $reflectionCache = [];
@@ -6119,8 +6174,8 @@ class AdvancedQueryBuilder
             $prefixedPrimaryKey = 's_' . $primaryKeyColumn;
             $entityId = $row[$prefixedPrimaryKey] ?? null;
             if ($entityId === null) {
-                log_message('debug', "parseEfCoreStyleResults: Entity ID is null, looking for '{$prefixedPrimaryKey}'. Row keys: " . implode(', ', array_keys($row)));
-                log_message('debug', "parseEfCoreStyleResults: Available prefixed columns: " . implode(', ', array_filter(array_keys($row), function($key) { return str_starts_with($key, 's_'); })));
+                //log_message('debug', "parseEfCoreStyleResults: Entity ID is null, looking for '{$prefixedPrimaryKey}'. Row keys: " . implode(', ', array_keys($row)));
+                //log_message('debug', "parseEfCoreStyleResults: Available prefixed columns: " . implode(', ', array_filter(array_keys($row), function($key) { return str_starts_with($key, 's_'); })));
                 continue;
             }
             
@@ -6322,13 +6377,13 @@ class AdvancedQueryBuilder
                 $collectionId = $row[$collectionIdKey] ?? null;
                 
                 // Debug: log collection ID check
-                log_message('debug', "parseEfCoreStyleResults: Checking collection '{$navPath}' (subqueryAlias: {$subqueryAlias}), collectionIdKey: {$collectionIdKey}, collectionId: " . ($collectionId ?? 'null'));
+                //log_message('debug', "parseEfCoreStyleResults: Checking collection '{$navPath}' (subqueryAlias: {$subqueryAlias}), collectionIdKey: {$collectionIdKey}, collectionId: " . ($collectionId ?? 'null'));
                 if ($collectionId === null) {
                     // Log available keys for debugging
                     $availableKeys = array_filter(array_keys($row), function($key) use ($subqueryAlias) {
                         return str_starts_with($key, $subqueryAlias . '_');
                     });
-                    log_message('debug', "parseEfCoreStyleResults: Collection '{$navPath}' - {$collectionIdKey} not found. Available keys with prefix '{$subqueryAlias}_': " . implode(', ', $availableKeys));
+                    //log_message('debug', "parseEfCoreStyleResults: Collection '{$navPath}' - {$collectionIdKey} not found. Available keys with prefix '{$subqueryAlias}_': " . implode(', ', $availableKeys));
                 }
                 
                 // Fallback: if Id0 doesn't exist, try Id (for backward compatibility)
@@ -6336,7 +6391,7 @@ class AdvancedQueryBuilder
                     $collectionIdKey = $subqueryAlias . '_Id';
                     $collectionId = $row[$collectionIdKey] ?? null;
                     if ($collectionId !== null) {
-                        log_message('debug', "parseEfCoreStyleResults: Collection '{$navPath}' - Found collectionId using fallback key: {$collectionIdKey}");
+                        //log_message('debug', "parseEfCoreStyleResults: Collection '{$navPath}' - Found collectionId using fallback key: {$collectionIdKey}");
                     }
                 }
                 
@@ -6416,12 +6471,12 @@ class AdvancedQueryBuilder
                                 $collectionItemReflection = new ReflectionClass($info['entityType']);
                                 // Get all properties including inherited ones
                                 $collectionItemProps = $collectionItemReflection->getProperties();
-                                log_message('debug', "parseEfCoreStyleResults: Collection item type: {$info['entityType']}, properties count: " . count($collectionItemProps));
+                                //log_message('debug', "parseEfCoreStyleResults: Collection item type: {$info['entityType']}, properties count: " . count($collectionItemProps));
                                 foreach ($collectionItemProps as $prop) {
                                     $docComment = $prop->getDocComment();
-                                    log_message('debug', "parseEfCoreStyleResults: Checking property '{$prop->getName()}', has docComment: " . ($docComment ? 'yes' : 'no'));
+                                    //log_message('debug', "parseEfCoreStyleResults: Checking property '{$prop->getName()}', has docComment: " . ($docComment ? 'yes' : 'no'));
                                     if ($docComment) {
-                                        log_message('debug', "parseEfCoreStyleResults: Property '{$prop->getName()}' docComment: " . trim($docComment));
+                                        //log_message('debug', "parseEfCoreStyleResults: Property '{$prop->getName()}' docComment: " . trim($docComment));
                                     }
                                     if (!$docComment) {
                                         continue;
@@ -6430,7 +6485,7 @@ class AdvancedQueryBuilder
                                     // Check if this is a reference navigation property (not a collection)
                                     // First check if it's a collection (ends with [])
                                     if (preg_match('/\[\]$/', $docComment)) {
-                                        log_message('debug', "parseEfCoreStyleResults: Property '{$prop->getName()}' is a collection, skipping");
+                                        //log_message('debug', "parseEfCoreStyleResults: Property '{$prop->getName()}' is a collection, skipping");
                                         continue;
                                     }
                                     
@@ -6439,7 +6494,7 @@ class AdvancedQueryBuilder
                                     // Updated regex to handle fully qualified class names starting with \
                                     if (preg_match('/@var\s+((?:\\\\?[A-Za-z_][A-Za-z0-9_]*)(?:\\\\[A-Za-z_][A-Za-z0-9_]*)*)/', $docComment, $matches)) {
                                         $navPropType = $matches[1];
-                                        log_message('debug', "parseEfCoreStyleResults: Found navigation property '{$prop->getName()}' with type '{$navPropType}'");
+                                        //log_message('debug', "parseEfCoreStyleResults: Found navigation property '{$prop->getName()}' with type '{$navPropType}'");
                                         
                                         // Check if this navigation property's entity is JOINed in collection subquery
                                         // Related entity primary key column is aliased as Id{EntityName}0 (e.g., IdDepartment0)
@@ -6447,8 +6502,8 @@ class AdvancedQueryBuilder
                                         $navPropShortName = (new ReflectionClass($navPropType))->getShortName();
                                         $relatedIdKey = $subqueryAlias . '_Id' . ucfirst($navPropShortName) . '0'; // e.g., s0_IdDepartment0
                                         
-                                        log_message('debug', "parseEfCoreStyleResults: Checking navigation property '{$prop->getName()}' (type: {$navPropType}, shortName: {$navPropShortName}, relatedIdKey: {$relatedIdKey})");
-                                        log_message('debug', "parseEfCoreStyleResults: relatedIdKey exists: " . (isset($row[$relatedIdKey]) ? 'yes' : 'no') . ", value: " . ($row[$relatedIdKey] ?? 'null'));
+                                        //log_message('debug', "parseEfCoreStyleResults: Checking navigation property '{$prop->getName()}' (type: {$navPropType}, shortName: {$navPropShortName}, relatedIdKey: {$relatedIdKey})");
+                                        //log_message('debug', "parseEfCoreStyleResults: relatedIdKey exists: " . (isset($row[$relatedIdKey]) ? 'yes' : 'no') . ", value: " . ($row[$relatedIdKey] ?? 'null'));
                                         
                                         if (isset($row[$relatedIdKey]) && $row[$relatedIdKey] !== null) {
                                             // Related entity exists in collection subquery - parse it
@@ -6488,7 +6543,7 @@ class AdvancedQueryBuilder
                                                 }
                                             }
                                             
-                                            log_message('debug', "parseEfCoreStyleResults: Created navPropData for '{$prop->getName()}': " . json_encode(array_keys($navPropData)));
+                                            //log_message('debug', "parseEfCoreStyleResults: Created navPropData for '{$prop->getName()}': " . json_encode(array_keys($navPropData)));
                                             
                                             // Create related entity and set it to collection item's navigation property
                                             $navPropEntity = $this->mapRowToEntity($navPropData, $navPropReflection);
@@ -6777,7 +6832,7 @@ class AdvancedQueryBuilder
                 // If value is null and property is not nullable, skip setting the property
                 // This prevents "must not be accessed before initialization" errors
                 if ($value === null && !$isNullable) {
-                    log_message('debug', "mapRowToEntity: Skipping null value for non-nullable property {$property->getName()} (type: {$typeName})");
+                    //log_message('debug', "mapRowToEntity: Skipping null value for non-nullable property {$property->getName()} (type: {$typeName})");
                     continue; // Skip this property, leave it uninitialized
                 }
                 
@@ -6799,23 +6854,23 @@ class AdvancedQueryBuilder
                             try {
                                 $value = new \DateTime($value);
                             } catch (\Exception $e) {
-                                log_message('warning', "mapRowToEntity: Failed to convert '{$value}' to DateTime for property {$property->getName()}: " . $e->getMessage());
+                                //log_message('warning', "mapRowToEntity: Failed to convert '{$value}' to DateTime for property {$property->getName()}: " . $e->getMessage());
                                 // If property is nullable, set to null, otherwise skip
                                 if ($isNullable) {
                                     $value = null;
                                 } else {
-                                    log_message('debug', "mapRowToEntity: Skipping failed DateTime conversion for non-nullable property {$property->getName()}");
+                                    //log_message('debug', "mapRowToEntity: Skipping failed DateTime conversion for non-nullable property {$property->getName()}");
                                     continue;
                                 }
                             }
                         } elseif ($value instanceof \DateTime) {
                             // Already a DateTime object, keep it
                         } else {
-                            log_message('warning', "mapRowToEntity: Unexpected value type for DateTime property {$property->getName()}: " . gettype($value));
+                            //log_message('warning', "mapRowToEntity: Unexpected value type for DateTime property {$property->getName()}: " . gettype($value));
                             if ($isNullable) {
                                 $value = null;
                             } else {
-                                log_message('debug', "mapRowToEntity: Skipping unexpected DateTime value for non-nullable property {$property->getName()}");
+                                //log_message('debug', "mapRowToEntity: Skipping unexpected DateTime value for non-nullable property {$property->getName()}");
                                 continue;
                             }
                         }
@@ -6869,7 +6924,7 @@ class AdvancedQueryBuilder
                 // Check if this is NOT the main entity
                 $entityShortName = (new ReflectionClass($entityType))->getShortName();
                 if ($entityShortName !== $mainEntityShortName) {
-                    log_message('debug', "findRelatedEntityFromJoinEntity: Found related entity {$entityType} (not main entity {$mainEntityShortName})");
+                    //log_message('debug', "findRelatedEntityFromJoinEntity: Found related entity {$entityType} (not main entity {$mainEntityShortName})");
                     return $entityType;
                 }
             }

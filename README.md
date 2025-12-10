@@ -231,7 +231,7 @@ $hasUsers = $context->Users()->any();
 
 `include()` ve `thenInclude()` metodlarına WHERE clause ve JOIN type desteği eklendi. Bu özellik sayesinde collection navigation'lar için filtreleme yapabilir ve JOIN tipini (LEFT veya INNER) belirleyebilirsiniz.
 
-#### Include with WHERE Clause
+#### Include with WHERE Clause and Custom JOIN Condition
 
 ```php
 use App\EntityFramework\ApplicationDbContext;
@@ -248,9 +248,18 @@ $employees = $context->Employees()
 
 // WHERE clause'da {alias} placeholder'ı otomatik olarak entity alias'ı ile değiştirilir
 // JOIN type: 'LEFT' (varsayılan) veya 'INNER'
+
+// Reference navigation için özel JOIN koşulu (örn: Company için)
+$employees = $context->Employees()
+    ->include('Company',
+        null,  // WHERE clause (opsiyonel)
+        'LEFT',  // JOIN type
+        '{alias}.CompanyCode = {relatedAlias}.Code'  // Özel JOIN koşulu
+    )
+    ->toList();
 ```
 
-#### ThenInclude with WHERE Clause
+#### ThenInclude with WHERE Clause and Custom JOIN Condition
 
 ```php
 use App\EntityFramework\ApplicationDbContext;
@@ -274,14 +283,27 @@ $employees = $context->Employees()
         'INNER'
     )
     ->toList();
+
+// Özel JOIN koşulu ile reference navigation (varsayılan foreign key yerine)
+// Örnek: AccessEvent.DeviceSerial = Terminals.SerialNumber
+$employees = $context->Employees()
+    ->include('AccessEvents',
+        '{alias}.AccessEventID IN (SELECT max(AccessEventID) FROM AccessEvent AS [ac] WHERE [ac].EmployeeID = {alias}.EmployeeID GROUP BY [ac].EmployeeID)',
+        'LEFT')
+    ->thenInclude('Terminal',
+        null,  // WHERE clause (opsiyonel)
+        'INNER',  // JOIN type
+        '{alias}.DeviceSerial = {relatedAlias}.SerialNumber'  // Özel JOIN koşulu
+    )
+    ->toList();
 ```
 
 #### Placeholder Kullanımı
 
-WHERE clause'da aşağıdaki placeholder'ları kullanabilirsiniz:
+WHERE clause ve JOIN condition'da aşağıdaki placeholder'ları kullanabilirsiniz:
 
-- **`{alias}`**: Collection subquery'deki entity alias'ı (örn: `u2`, `u1`)
-- **`{relatedAlias}`**: Nested collection subquery'lerde related entity alias'ı (örn: `o`)
+- **`{alias}`**: Collection subquery'deki entity alias'ı (örn: `u2`, `u1`) veya reference navigation için parent entity alias'ı
+- **`{relatedAlias}`**: Nested collection subquery'lerde related entity alias'ı (örn: `o`) veya reference navigation için related entity alias'ı
 
 **Örnek:**
 
@@ -298,6 +320,16 @@ $employees = $context->Employees()
     ->include('AccessEvents')
     ->thenInclude('Terminal', 
         '{alias}.Status = 1 AND {relatedAlias}.IsActive = 1'
+    )
+    ->toList();
+
+// Özel JOIN koşulu ile (reference navigation)
+$employees = $context->Employees()
+    ->include('AccessEvents')
+    ->thenInclude('Terminal',
+        null,
+        'INNER',
+        '{alias}.DeviceSerial = {relatedAlias}.SerialNumber'  // Özel JOIN koşulu
     )
     ->toList();
 ```
@@ -341,6 +373,32 @@ $users = $context->Users()
     ->toList();
 ```
 
+#### Özel JOIN Koşulu (Custom Join Condition)
+
+Varsayılan foreign key ilişkisi yerine özel bir JOIN koşulu kullanmak istediğinizde `joinCondition` parametresini kullanabilirsiniz. Bu özellik özellikle standart foreign key ilişkisi olmayan durumlarda (örn: `DeviceSerial` ile `SerialNumber` gibi) kullanışlıdır.
+
+**Örnek:**
+
+```php
+// AccessEvent.DeviceSerial = Terminals.SerialNumber ile JOIN
+$employees = $context->Employees()
+    ->include('AccessEvents',
+        '{alias}.AccessEventID IN (SELECT max(AccessEventID) FROM AccessEvent AS [ac] WHERE [ac].EmployeeID = {alias}.EmployeeID GROUP BY [ac].EmployeeID)',
+        'LEFT')
+    ->thenInclude('Terminal',
+        null,  // WHERE clause (opsiyonel)
+        'INNER',  // JOIN type
+        '{alias}.DeviceSerial = {relatedAlias}.SerialNumber'  // Özel JOIN koşulu
+    )
+    ->toList();
+```
+
+**Notlar:**
+- `joinCondition` sağlanmazsa, sistem varsayılan foreign key ilişkisini kullanır
+- `{alias}` parent entity'nin alias'ını (örn: `AccessEvent` için `u2`)
+- `{relatedAlias}` related entity'nin alias'ını (örn: `Terminals` için `t`) temsil eder
+- JOIN condition SQL Server syntax'ına uygun olmalıdır
+
 #### Kullanım Senaryoları
 
 **Senaryo 1: Sadece En Son Kayıtları Getirme**
@@ -380,13 +438,31 @@ $employees = $context->Employees()
     ->toList();
 ```
 
+**Senaryo 4: Özel JOIN Koşulu ile İlişki**
+
+```php
+// DeviceSerial ile SerialNumber arasında JOIN (standart foreign key yok)
+$employees = $context->Employees()
+    ->include('AccessEvents',
+        '{alias}.AccessEventID IN (SELECT max(AccessEventID) FROM AccessEvent AS [ac] WHERE [ac].EmployeeID = {alias}.EmployeeID GROUP BY [ac].EmployeeID)',
+        'LEFT')
+    ->thenInclude('Terminal',
+        null,
+        'INNER',
+        '{alias}.DeviceSerial = {relatedAlias}.SerialNumber'
+    )
+    ->toList();
+```
+
 #### Notlar
 
 1. **WHERE Clause**: WHERE clause SQL Server syntax'ına uygun olmalıdır
 2. **Placeholder**: `{alias}` ve `{relatedAlias}` placeholder'ları otomatik olarak doğru alias'larla değiştirilir
 3. **JOIN Type**: Collection navigation'lar için LEFT veya INNER JOIN seçilebilir
-4. **Performance**: WHERE clause ile filtreleme yaparak gereksiz veri yüklemeyi önleyebilirsiniz
-5. **Güvenlik**: WHERE clause'da SQL injection'dan korunmak için parametreli sorgular kullanın (şu an için raw SQL string kullanılıyor)
+4. **Custom JOIN Condition**: `joinCondition` parametresi ile varsayılan foreign key ilişkisi yerine özel JOIN koşulları kullanabilirsiniz
+5. **Performance**: WHERE clause ile filtreleme yaparak gereksiz veri yüklemeyi önleyebilirsiniz
+6. **Güvenlik**: WHERE clause ve JOIN condition'da SQL injection'dan korunmak için parametreli sorgular kullanın (şu an için raw SQL string kullanılıyor)
+7. **Geriye Dönük Uyumluluk**: `joinCondition` parametresi opsiyoneldir, sağlanmazsa varsayılan foreign key ilişkisi kullanılır
 
 ### Advanced WHERE Clause (Expression Tree Parsing)
 
