@@ -3071,14 +3071,30 @@ class AdvancedQueryBuilder
                     $thenNavInfo = $this->getNavigationInfoForEntity($thenIncludeNav, $navInfo['entityType']);
                     if ($thenNavInfo && $thenNavInfo['isCollection']) {
                         // Collection thenInclude - will create subquery later with correct index
-                        // Store info for later processing
+                        // Also collect its own thenIncludes (deeper levels) that belong to this collection entity
+                        $collectionThenIncludes = [];
+                        $thenIncludeIndex = array_search($thenInclude, $thenIncludes, true);
+                        if ($thenIncludeIndex !== false) {
+                            $remainingThenIncludes = array_slice($thenIncludes, $thenIncludeIndex + 1);
+                            foreach ($remainingThenIncludes as $remainingThenInclude) {
+                                $remainingNav = is_string($remainingThenInclude) ? $remainingThenInclude : ($remainingThenInclude['navigation'] ?? $remainingThenInclude);
+                                $remainingNavInfo = $this->getNavigationInfoForEntity($remainingNav, $thenNavInfo['entityType']);
+                                if ($remainingNavInfo) {
+                                    $collectionThenIncludes[] = $remainingThenInclude;
+                                } else {
+                                    break;
+                                }
+                            }
+                        }
+
                         if (!isset($referenceNavThenIncludeSubqueries[$navPath])) {
                             $referenceNavThenIncludeSubqueries[$navPath] = [];
                         }
                         $referenceNavThenIncludeSubqueries[$navPath][] = [
                             'navigation' => $navPath . '.' . $thenIncludeNav,
                             'navInfo' => $thenNavInfo,
-                            'nestedSubqueryIndex' => $thenIncludeNestedSubqueryIndex
+                            'nestedSubqueryIndex' => $thenIncludeNestedSubqueryIndex,
+                            'thenIncludes' => $collectionThenIncludes,
                         ];
                         $thenIncludeNestedSubqueryIndex++;
                     } elseif ($thenNavInfo && !$thenNavInfo['isCollection']) {
@@ -3235,7 +3251,7 @@ class AdvancedQueryBuilder
                     $joinCondition = str_replace('{relatedAlias}', $refAlias, $joinCondition);
                     //log_message('debug', "buildEfCoreStyleQuery: Using custom join condition for '{$navPath}': original='{$customJoinCondition}', replaced='{$joinCondition}'");
                 } else {
-                    $joinCondition = $this->buildJoinCondition($mainAlias, $refAlias, $navPath, $navInfo);
+                $joinCondition = $this->buildJoinCondition($mainAlias, $refAlias, $navPath, $navInfo);
                 }
                 
                 // Check if this path is used in WHERE clause (should be INNER JOIN) or is a thenInclude
@@ -3578,7 +3594,7 @@ class AdvancedQueryBuilder
                                 $thenIncludeInfo['navigation'],
                                 $thenIncludeInfo['navInfo'],
                                 $collectionIndex,
-                                [],
+                                $thenIncludeInfo['thenIncludes'] ?? [],
                                 $thenIncludeInfo['nestedSubqueryIndex']
                             );
                             if ($thenIncludeSubquery) {
@@ -3647,7 +3663,7 @@ class AdvancedQueryBuilder
                         $joinCondition = str_replace('{relatedAlias}', $refAlias, $joinCondition);
                         //log_message('debug', "buildEfCoreStyleQuery: Using custom join condition for '{$navPath}': original='{$customJoinCondition}', replaced='{$joinCondition}'");
                     } else {
-                        $joinCondition = $this->buildJoinCondition($mainAlias, $refAlias, $navPath, $navInfo);
+                    $joinCondition = $this->buildJoinCondition($mainAlias, $refAlias, $navPath, $navInfo);
                     }
                     
                     // Check if this path is used in WHERE clause (should be INNER JOIN) or is a thenInclude
@@ -4962,8 +4978,26 @@ class AdvancedQueryBuilder
             $thenNavInfo = $this->getNavigationInfoForEntity($thenIncludeNav, $relatedEntityType);
             //log_message('debug', "buildCollectionSubquery: thenNavInfo for '{$thenIncludeNav}': " . ($thenNavInfo ? (($thenNavInfo['isCollection'] ? 'collection' : 'reference') . ', entityType: ' . $thenNavInfo['entityType']) : 'null'));
             if ($thenNavInfo && $thenNavInfo['isCollection']) {
+                // Find nested thenIncludes for this collection
+                $currentIndex = array_search($thenInclude, $thenIncludes, true);
+                $nestedThenIncludes = [];
+                if ($currentIndex !== false) {
+                    $remainingThenIncludes = array_slice($thenIncludes, $currentIndex + 1);
+                    foreach ($remainingThenIncludes as $remainingThenInclude) {
+                        $remainingThenIncludeNav = is_string($remainingThenInclude) ? $remainingThenInclude : ($remainingThenInclude['navigation'] ?? $remainingThenInclude);
+                        $remainingThenNavInfo = $this->getNavigationInfoForEntity($remainingThenIncludeNav, $thenNavInfo['entityType']);
+                        if ($remainingThenNavInfo) {
+                            // This thenInclude belongs to the current collection navigation
+                            $nestedThenIncludes[] = $remainingThenInclude;
+                        } else {
+                            // This thenInclude doesn't belong to current collection, stop processing
+                            break;
+                        }
+                    }
+                }
+                
                 // Build nested subquery for collection navigation
-                $nestedSubquery = $this->buildNestedCollectionSubquery($thenIncludeNav, $thenNavInfo, $currentNestedIndex, $relatedEntityType, $thenIncludeWhereClause);
+                $nestedSubquery = $this->buildNestedCollectionSubquery($thenIncludeNav, $thenNavInfo, $currentNestedIndex, $relatedEntityType, $thenIncludeWhereClause, $nestedThenIncludes);
                 if ($nestedSubquery) {
                     $nestedSubquery['joinType'] = $thenIncludeJoinType; // Store join type for later use
                 }
@@ -5085,15 +5119,15 @@ class AdvancedQueryBuilder
                                 $nestedSelectColumns[] = "({$maskedExpression}) AS {$quotedAliasCol}";
                                 $existingColumnNames[strtolower($aliasCol)] = true;
                             } else {
-                                $nestedSelectColumns[] = "({$maskedExpression}) AS {$quotedThenCol}";
+                            $nestedSelectColumns[] = "({$maskedExpression}) AS {$quotedThenCol}";
                                 $existingColumnNames[$colLower] = true;
                             }
                         } else {
                             if ($needsAlias) {
                                 $nestedSelectColumns[] = "{$quotedThenRelatedAlias}.{$quotedThenCol} AS {$quotedAliasCol}";
                                 $existingColumnNames[strtolower($aliasCol)] = true;
-                            } else {
-                                $nestedSelectColumns[] = "{$quotedThenRelatedAlias}.{$quotedThenCol}";
+                        } else {
+                            $nestedSelectColumns[] = "{$quotedThenRelatedAlias}.{$quotedThenCol}";
                                 $existingColumnNames[$colLower] = true;
                             }
                         }
@@ -5111,23 +5145,374 @@ class AdvancedQueryBuilder
                     //log_message('debug', "buildCollectionSubquery: Using custom join condition for '{$thenIncludeNav}': original='{$thenIncludeJoinCondition}', replaced='{$thenJoinCondition}'");
                 } else {
                     // Use default foreign key relationship
-                    $thenFkColumn = $this->getColumnNameFromProperty($relatedEntityReflection, $thenForeignKey);
-                    $thenRelatedPkColumn = $this->getPrimaryKeyColumnName($thenRelatedEntityReflection);
-                    $quotedThenFkColumn = $provider->escapeIdentifier($thenFkColumn);
-                    $quotedThenRelatedPkColumn = $provider->escapeIdentifier($thenRelatedPkColumn);
+                $thenFkColumn = $this->getColumnNameFromProperty($relatedEntityReflection, $thenForeignKey);
+                $thenRelatedPkColumn = $this->getPrimaryKeyColumnName($thenRelatedEntityReflection);
+                $quotedThenFkColumn = $provider->escapeIdentifier($thenFkColumn);
+                $quotedThenRelatedPkColumn = $provider->escapeIdentifier($thenRelatedPkColumn);
                     $thenJoinCondition = "{$quotedRelatedAlias}.{$quotedThenFkColumn} = {$quotedThenRelatedAlias}.{$quotedThenRelatedPkColumn}";
                     //log_message('debug', "buildCollectionSubquery: Using default foreign key join condition for '{$thenIncludeNav}': {$thenJoinCondition}");
                 }
                 
                 // Add JOIN to SQL (will be added after FROM clause)
                 // Store join info for later
-                if (!isset($nestedSubqueryJoins)) {
-                    $nestedSubqueryJoins = [];
-                }
+                // Note: $nestedSubqueryJoins is already initialized at the start of the method
                 $thenJoinKeyword = $thenIncludeJoinType === 'INNER' ? 'INNER JOIN' : 'LEFT JOIN';
                 $joinSql = "{$thenJoinKeyword} {$quotedThenRelatedTableName} AS {$quotedThenRelatedAlias} ON {$thenJoinCondition}";
                 //log_message('debug', "buildCollectionSubquery: Adding reference navigation JOIN SQL for '{$thenIncludeNav}': {$joinSql}");
                 $nestedSubqueryJoins[] = $joinSql;
+                
+                // Check if this reference navigation has nested thenIncludes (3rd, 4th level, etc.)
+                // Find thenIncludes that come after this one in the array and belong to this reference
+                $currentIndex = array_search($thenInclude, $thenIncludes, true);
+                //log_message('debug', "buildCollectionSubquery: Checking nested thenIncludes for reference navigation '{$thenIncludeNav}' (entityType: {$thenRelatedEntityType}), currentIndex: {$currentIndex}, total thenIncludes: " . count($thenIncludes));
+                if ($currentIndex !== false) {
+                    $remainingThenIncludes = array_slice($thenIncludes, $currentIndex + 1);
+                    //log_message('debug', "buildCollectionSubquery: Remaining thenIncludes count: " . count($remainingThenIncludes));
+                    $nestedThenIncludes = [];
+                    
+                    // Process remaining thenIncludes to find nested ones
+                    // A thenInclude belongs to this reference if:
+                    // 1. It's a collection navigation (will create nested subquery)
+                    // 2. It's a reference navigation (will add JOIN)
+                    // We process them recursively until we hit a thenInclude that doesn't belong
+                    foreach ($remainingThenIncludes as $remainingThenInclude) {
+                        $remainingThenIncludeNav = is_string($remainingThenInclude) ? $remainingThenInclude : ($remainingThenInclude['navigation'] ?? $remainingThenInclude);
+                        $remainingThenNavInfo = $this->getNavigationInfoForEntity($remainingThenIncludeNav, $thenRelatedEntityType);
+                        //log_message('debug', "buildCollectionSubquery: Checking remaining thenInclude '{$remainingThenIncludeNav}' for entity '{$thenRelatedEntityType}', navInfo: " . ($remainingThenNavInfo ? json_encode(['isCollection' => $remainingThenNavInfo['isCollection'], 'entityType' => $remainingThenNavInfo['entityType']]) : 'null'));
+                        
+                        if ($remainingThenNavInfo) {
+                            // This thenInclude belongs to the current reference navigation
+                            $nestedThenIncludes[] = $remainingThenInclude;
+                            //log_message('debug', "buildCollectionSubquery: Added nested thenInclude '{$remainingThenIncludeNav}' to reference '{$thenIncludeNav}'");
+                        } else {
+                            // This thenInclude doesn't belong to current reference, stop processing
+                            //log_message('debug', "buildCollectionSubquery: thenInclude '{$remainingThenIncludeNav}' doesn't belong to reference '{$thenIncludeNav}', stopping");
+                            break;
+                        }
+                    }
+                    
+                    //log_message('debug', "buildCollectionSubquery: Total nested thenIncludes for reference '{$thenIncludeNav}': " . count($nestedThenIncludes));
+                    // Recursively process nested thenIncludes
+                    if (!empty($nestedThenIncludes)) {
+                        // Process nested thenIncludes for this reference navigation
+                        foreach ($nestedThenIncludes as $nestedThenInclude) {
+                            $nestedThenIncludeNav = is_string($nestedThenInclude) ? $nestedThenInclude : ($nestedThenInclude['navigation'] ?? $nestedThenInclude);
+                            $nestedThenIncludeWhereClause = is_string($nestedThenInclude) ? null : ($nestedThenInclude['whereClause'] ?? null);
+                            $nestedThenIncludeJoinType = is_string($nestedThenInclude) ? 'LEFT' : ($nestedThenInclude['joinType'] ?? 'LEFT');
+                            $nestedThenIncludeJoinCondition = is_string($nestedThenInclude) ? null : ($nestedThenInclude['joinCondition'] ?? null);
+                            
+                            $nestedThenNavInfo = $this->getNavigationInfoForEntity($nestedThenIncludeNav, $thenRelatedEntityType);
+                            
+                            if ($nestedThenNavInfo && $nestedThenNavInfo['isCollection']) {
+                                // Find nested thenIncludes for this nested collection
+                                // IMPORTANT: Check remaining thenIncludes from the ORIGINAL $thenIncludes array, not from $nestedThenIncludes
+                                // because $nestedThenIncludes only contains thenIncludes that belong to the reference navigation
+                                // but we need to check if there are thenIncludes that belong to the nested collection's entity type
+                                $nestedCurrentIndex = array_search($nestedThenInclude, $nestedThenIncludes, true);
+                                $nestedNestedThenIncludes = [];
+                                if ($nestedCurrentIndex !== false) {
+                                    // Get the index of the nested collection in the original $thenIncludes array
+                                    $originalNestedIndex = array_search($nestedThenInclude, $thenIncludes, true);
+                                    if ($originalNestedIndex !== false) {
+                                        $nestedRemainingThenIncludes = array_slice($thenIncludes, $originalNestedIndex + 1);
+                                        //log_message('debug', "buildCollectionSubquery: Checking nested thenIncludes for collection '{$nestedThenIncludeNav}' (entityType: {$nestedThenNavInfo['entityType']}), remaining count: " . count($nestedRemainingThenIncludes));
+                                        foreach ($nestedRemainingThenIncludes as $nestedRemainingThenInclude) {
+                                            $nestedRemainingThenIncludeNav = is_string($nestedRemainingThenInclude) ? $nestedRemainingThenInclude : ($nestedRemainingThenInclude['navigation'] ?? $nestedRemainingThenInclude);
+                                            // Check if this thenInclude belongs to the nested collection's entity type (not the reference entity type)
+                                            $nestedRemainingThenNavInfo = $this->getNavigationInfoForEntity($nestedRemainingThenIncludeNav, $nestedThenNavInfo['entityType']);
+                                            //log_message('debug', "buildCollectionSubquery: Checking nested remaining thenInclude '{$nestedRemainingThenIncludeNav}' for nested collection entity '{$nestedThenNavInfo['entityType']}', navInfo: " . ($nestedRemainingThenNavInfo ? json_encode(['isCollection' => $nestedRemainingThenNavInfo['isCollection'], 'entityType' => $nestedRemainingThenNavInfo['entityType']]) : 'null'));
+                                            if ($nestedRemainingThenNavInfo) {
+                                                // This thenInclude belongs to the nested collection's entity type
+                                                $nestedNestedThenIncludes[] = $nestedRemainingThenInclude;
+                                                //log_message('debug', "buildCollectionSubquery: Added nested nested thenInclude '{$nestedRemainingThenIncludeNav}' to nested collection '{$nestedThenIncludeNav}'");
+                                            } else {
+                                                // This thenInclude doesn't belong to nested collection, stop processing
+                                                //log_message('debug', "buildCollectionSubquery: thenInclude '{$nestedRemainingThenIncludeNav}' doesn't belong to nested collection '{$nestedThenIncludeNav}', stopping");
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                                
+                                //log_message('debug', "buildCollectionSubquery: Total nested nested thenIncludes for nested collection '{$nestedThenIncludeNav}': " . count($nestedNestedThenIncludes));
+                                // Nested collection - build nested subquery
+                                //log_message('debug', "buildCollectionSubquery: Building nested subquery for '{$nestedThenIncludeNav}' (entityType: {$nestedThenNavInfo['entityType']}, joinEntityType: " . ($nestedThenNavInfo['joinEntityType'] ?? 'null') . ", parentEntityType: {$thenRelatedEntityType})");
+                                $nestedSubquery = $this->buildNestedCollectionSubquery($nestedThenIncludeNav, $nestedThenNavInfo, $currentNestedIndex, $thenRelatedEntityType, $nestedThenIncludeWhereClause, $nestedNestedThenIncludes);
+                                //log_message('debug', "buildCollectionSubquery: buildNestedCollectionSubquery result for '{$nestedThenIncludeNav}': " . ($nestedSubquery ? 'success' : 'null'));
+                                if ($nestedSubquery) {
+                                    $nestedSubquery['joinType'] = $nestedThenIncludeJoinType;
+                                    $nestedSubqueries[] = $nestedSubquery;
+                                    
+                                    // Add nested subquery columns
+                                    // Use selectColumns from nested subquery if available (includes nested thenInclude columns like Terminal)
+                                    $nestedAlias = 's' . $currentNestedIndex;
+                                    $nestedJoinEntityType = $nestedSubquery['joinEntityType'];
+                                    $nestedRelatedEntityType = $nestedSubquery['entityType'];
+                                    $nestedJoinEntityReflection = new ReflectionClass($nestedJoinEntityType);
+                                    
+                                    // Track existing column names/aliases to avoid duplicates
+                                    // Check existing nestedSelectColumns for aliases
+                                    $existingAliases = [];
+                                    foreach ($nestedSelectColumns as $existingCol) {
+                                        // Extract alias from existing column expression
+                                        if (preg_match('/AS\s+\[([^\]]+)\]/i', $existingCol, $matches)) {
+                                            $existingAliases[strtolower($matches[1])] = true;
+                                        } elseif (preg_match('/\[([^\]]+)\]\.\[([^\]]+)\]/', $existingCol, $matches)) {
+                                            // Also track column names without alias
+                                            $existingAliases[strtolower($matches[2])] = true;
+                                        }
+                                    }
+                                    
+                                    // Also check parent collection subquery's selectColumns for conflicts
+                                    foreach ($selectColumns as $existingCol) {
+                                        // Extract column name or alias from existing column expression
+                                        if (preg_match('/AS\s+\[([^\]]+)\]/i', $existingCol, $matches)) {
+                                            $existingAliases[strtolower($matches[1])] = true;
+                                        } elseif (preg_match('/\[([^\]]+)\]\.\[([^\]]+)\]/', $existingCol, $matches)) {
+                                            // Also track column names without alias
+                                            $existingAliases[strtolower($matches[2])] = true;
+                                        }
+                                    }
+                                    
+                                    // If nested subquery has selectColumns (includes nested thenInclude columns), use them
+                                    if (isset($nestedSubquery['selectColumns']) && !empty($nestedSubquery['selectColumns'])) {
+                                        // Nested subquery SELECT columns are like: [a0].[AccessGroupReaderID], [a0].[ProjectID], [t].[ReaderID] AS [IdTerminal0], [t].[SerialNumber], etc.
+                                        // In parent collection subquery, these become: [s1].[AccessGroupReaderID], [s1].[ProjectID], [s1].[IdTerminal0], [s1].[SerialNumber], etc.
+                                        foreach ($nestedSubquery['selectColumns'] as $nestedColExpr) {
+                                            // Extract alias from nested subquery column expression
+                                            // Pattern: [a0].[ColumnName] or [a0].[ColumnName] AS [Alias] or [t].[ColumnName] AS [Alias]
+                                            if (preg_match('/\[([^\]]+)\]\.\[([^\]]+)\](?:\s+AS\s+\[([^\]]+)\])?/', $nestedColExpr, $matches)) {
+                                                $nestedTableAlias = $matches[1]; // a0, t, etc.
+                                                $nestedColumnName = $matches[2]; // AccessGroupReaderID, SerialNumber, etc.
+                                                $nestedColumnAlias = $matches[3] ?? $nestedColumnName; // IdTerminal0, SerialNumber, etc.
+                                                
+                                                // Check if column name or alias already exists in parent collection subquery
+                                                $checkKey = strtolower($nestedColumnAlias);
+                                                $columnNameKey = strtolower($nestedColumnName);
+                                                
+                                                // Determine the alias to use
+                                                $finalAlias = null;
+                                                
+                                                // If column name conflicts, we need to add an alias
+                                                if (isset($existingAliases[$columnNameKey])) {
+                                                    // Column name conflicts: try to find a unique alias
+                                                    $baseAlias = "{$nestedColumnName}0";
+                                                    $aliasIndex = 0;
+                                                    $finalAlias = $baseAlias;
+                                                    
+                                                    // Find a unique alias
+                                                    while (isset($existingAliases[strtolower($finalAlias)])) {
+                                                        $aliasIndex++;
+                                                        $finalAlias = "{$nestedColumnName}{$aliasIndex}";
+                                                    }
+                                                    
+                                                    $parentColExpr = "[{$nestedAlias}].[{$nestedColumnAlias}] AS [{$finalAlias}]";
+                                                    $nestedSelectColumns[] = $parentColExpr;
+                                                    $existingAliases[strtolower($finalAlias)] = true;
+                                                } elseif (isset($existingAliases[$checkKey])) {
+                                                    // Alias conflicts: try to find a unique alias
+                                                    $baseAlias = "{$nestedColumnName}0";
+                                                    $aliasIndex = 0;
+                                                    $finalAlias = $baseAlias;
+                                                    
+                                                    // Find a unique alias
+                                                    while (isset($existingAliases[strtolower($finalAlias)])) {
+                                                        $aliasIndex++;
+                                                        $finalAlias = "{$nestedColumnName}{$aliasIndex}";
+                                                    }
+                                                    
+                                                    $parentColExpr = "[{$nestedAlias}].[{$nestedColumnAlias}] AS [{$finalAlias}]";
+                                                    $nestedSelectColumns[] = $parentColExpr;
+                                                    $existingAliases[strtolower($finalAlias)] = true;
+                                                } else {
+                                                    // No conflict: use as is
+                                                    if ($nestedColumnAlias !== $nestedColumnName) {
+                                                        // Has alias: use alias
+                                                        $parentColExpr = "[{$nestedAlias}].[{$nestedColumnAlias}]";
+                                                        $finalAlias = $nestedColumnAlias;
+                                                    } else {
+                                                        // No alias: use column name
+                                                        $parentColExpr = "[{$nestedAlias}].[{$nestedColumnName}]";
+                                                        $finalAlias = $nestedColumnName;
+                                                    }
+                                                    $nestedSelectColumns[] = $parentColExpr;
+                                                    $existingAliases[strtolower($finalAlias)] = true;
+                                                    $existingAliases[$columnNameKey] = true;
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        // Fallback: use entity columns (old behavior)
+                                        $nestedJoinEntityType = $nestedSubquery['joinEntityType'];
+                                        $nestedRelatedEntityType = $nestedSubquery['entityType'];
+                                        $nestedJoinEntityReflection = new ReflectionClass($nestedJoinEntityType);
+                                        $nestedJoinColumns = $this->getEntityColumns($nestedJoinEntityReflection);
+                                        $nestedRelatedEntityReflection = new ReflectionClass($nestedRelatedEntityType);
+                                        $nestedRelatedColumns = $this->getEntityColumns($nestedRelatedEntityReflection);
+                                        
+                                        foreach ($nestedJoinColumns as $col) {
+                                            if ($col === 'Id') {
+                                                $alias = "Id{$currentNestedIndex}";
+                                                if (!isset($existingAliases[strtolower($alias)])) {
+                                                    $nestedSelectColumns[] = "[{$nestedAlias}].[{$col}] AS [{$alias}]";
+                                                    $existingAliases[strtolower($alias)] = true;
+                                                }
+                                            } elseif (str_ends_with($col, 'Id') && $col !== 'Id') {
+                                                $parentEntityShortName = (new ReflectionClass($thenRelatedEntityType))->getShortName();
+                                                if ($col === $parentEntityShortName . 'Id') {
+                                                    $alias = "{$col}0";
+                                                    if (!isset($existingAliases[strtolower($alias)])) {
+                                                        $nestedSelectColumns[] = "[{$nestedAlias}].[{$col}] AS [{$alias}]";
+                                                        $existingAliases[strtolower($alias)] = true;
+                                                    }
+                                                } else {
+                                                    $alias = "{$col}0";
+                                                    if (!isset($existingAliases[strtolower($alias)])) {
+                                                        $nestedSelectColumns[] = "[{$nestedAlias}].[{$col}] AS [{$alias}]";
+                                                        $existingAliases[strtolower($alias)] = true;
+                                                    }
+                                                }
+                                            } else {
+                                                $alias = "{$col}0";
+                                                if (!isset($existingAliases[strtolower($alias)])) {
+                                                    $nestedSelectColumns[] = "[{$nestedAlias}].[{$col}] AS [{$alias}]";
+                                                    $existingAliases[strtolower($alias)] = true;
+                                                }
+                                            }
+                                        }
+                                        
+                                        $nestedRelatedIdx = 0;
+                                        $firstCol = true;
+                                        foreach ($nestedRelatedColumns as $col) {
+                                            if ($firstCol && $col === 'Id') {
+                                                $alias = "Id00";
+                                                if (!isset($existingAliases[strtolower($alias)])) {
+                                                    $nestedSelectColumns[] = "[{$nestedAlias}].[Id{$nestedRelatedIdx}] AS [{$alias}]";
+                                                    $existingAliases[strtolower($alias)] = true;
+                                                }
+                                                $firstCol = false;
+                                            } else {
+                                                $alias = "{$col}0";
+                                                if (!isset($existingAliases[strtolower($alias)])) {
+                                                    $nestedSelectColumns[] = "[{$nestedAlias}].[{$col}] AS [{$alias}]";
+                                                    $existingAliases[strtolower($alias)] = true;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    
+                                    $parentEntityReflection = new ReflectionClass($thenRelatedEntityType);
+                                    // Get the actual primary key column name for the parent entity
+                                    $parentIdColumn = $this->getPrimaryKeyColumnName($parentEntityReflection);
+                                    
+                                    // Check if this is a one-to-many relationship (no joinEntityType)
+                                    $isOneToManyNested = ($nestedThenNavInfo['joinEntityType'] ?? null) === null;
+                                    
+                                    if ($isOneToManyNested) {
+                                        // One-to-many: JOIN condition is parent.PK = nested.ParentFK
+                                        $parentEntityShortName = (new ReflectionClass($thenRelatedEntityType))->getShortName();
+                                        $expectedFkName = $parentEntityShortName . 'Id'; // e.g., AccessGroupId
+                                        $nestedJoinFkColumn = $this->getColumnNameFromProperty($nestedJoinEntityReflection, $expectedFkName);
+                                        $quotedNestedJoinFkColumn = $provider->escapeIdentifier($nestedJoinFkColumn);
+                                        $quotedParentIdColumn = $provider->escapeIdentifier($parentIdColumn);
+                                        $nestedJoinCondition = "{$quotedThenRelatedAlias}.{$quotedParentIdColumn} = [{$nestedAlias}].{$quotedNestedJoinFkColumn}";
+                                    } else {
+                                        // Many-to-many: use getForeignKeyForNavigation
+                                        $nestedJoinFkColumn = $this->getForeignKeyForNavigation($nestedJoinEntityReflection, $nestedThenIncludeNav, true, $thenRelatedEntityType);
+                                        $nestedJoinFkColumn = $this->getColumnNameFromProperty($nestedJoinEntityReflection, $nestedJoinFkColumn);
+                                        $quotedNestedJoinFkColumn = $provider->escapeIdentifier($nestedJoinFkColumn);
+                                        $quotedParentIdColumn = $provider->escapeIdentifier($parentIdColumn);
+                                        $nestedJoinCondition = "{$quotedThenRelatedAlias}.{$quotedParentIdColumn} = [{$nestedAlias}].{$quotedNestedJoinFkColumn}";
+                                    }
+                                    
+                                    $nestedJoinType = $nestedSubquery['joinType'] ?? 'LEFT';
+                                    $nestedJoinKeyword = $nestedJoinType === 'INNER' ? 'INNER JOIN' : 'LEFT JOIN';
+                                    $nestedSubqueryJoins[] = "{$nestedJoinKeyword} (\n    " . str_replace("\n", "\n    ", $nestedSubquery['sql']) . "\n) AS [{$nestedAlias}] ON {$nestedJoinCondition}";
+                                    
+                                    $currentNestedIndex++;
+                                }
+                            } elseif ($nestedThenNavInfo && !$nestedThenNavInfo['isCollection']) {
+                                // Nested reference navigation - add JOIN
+                                $nestedThenRelatedEntityType = $nestedThenNavInfo['entityType'];
+                                $nestedThenForeignKey = $nestedThenNavInfo['foreignKey'];
+                                $nestedThenRelatedEntityReflection = new ReflectionClass($nestedThenRelatedEntityType);
+                                $nestedThenRelatedTableName = $this->context->getTableName($nestedThenRelatedEntityType);
+                                $nestedThenRelatedAlias = $this->getTableAlias($nestedThenIncludeNav, 0);
+                                
+                                $nestedThenRelatedColumnsWithProperties = $this->getEntityColumnsWithProperties($nestedThenRelatedEntityReflection);
+                                $nestedThenRelatedPrimaryKeyColumn = $this->getPrimaryKeyColumnName($nestedThenRelatedEntityReflection);
+                                
+                                $quotedNestedThenRelatedAlias = $provider->escapeIdentifier($nestedThenRelatedAlias);
+                                $nestedThenFirstCol = true;
+                                foreach ($nestedThenRelatedColumnsWithProperties as $colInfo) {
+                                    $col = $colInfo['column'];
+                                    $property = $nestedThenRelatedEntityReflection->getProperty($colInfo['property']);
+                                    $sensitiveAttributes = $property->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\SensitiveValue::class);
+                                    
+                                    $quotedNestedThenCol = $provider->escapeIdentifier($col);
+                                    $colLower = strtolower($col);
+                                    
+                                    if ($nestedThenFirstCol && $col === $nestedThenRelatedPrimaryKeyColumn) {
+                                        $nestedThenIdAlias = "Id" . ucfirst($nestedThenIncludeNav) . "0";
+                                        $nestedSelectColumns[] = "{$quotedNestedThenRelatedAlias}.{$quotedNestedThenCol} AS [{$nestedThenIdAlias}]";
+                                        $existingColumnNames[strtolower($nestedThenIdAlias)] = true;
+                                        $nestedThenFirstCol = false;
+                                    } else {
+                                        $needsAlias = isset($existingColumnNames[$colLower]);
+                                        if ($needsAlias) {
+                                            $aliasCol = ucfirst($nestedThenIncludeNav) . ucfirst($col);
+                                            $quotedAliasCol = $provider->escapeIdentifier($aliasCol);
+                                        }
+                                        
+                                        if (!empty($sensitiveAttributes) && !$this->isSensitive) {
+                                            $sensitiveAttr = $sensitiveAttributes[0]->newInstance();
+                                            $columnRef = "{$quotedNestedThenRelatedAlias}.{$quotedNestedThenCol}";
+                                            $maskedExpression = $provider->getMaskingSql(
+                                                $columnRef,
+                                                $sensitiveAttr->maskChar,
+                                                $sensitiveAttr->visibleStart,
+                                                $sensitiveAttr->visibleEnd,
+                                                $sensitiveAttr->customMask
+                                            );
+                                            if ($needsAlias) {
+                                                $nestedSelectColumns[] = "({$maskedExpression}) AS {$quotedAliasCol}";
+                                                $existingColumnNames[strtolower($aliasCol)] = true;
+                                            } else {
+                                                $nestedSelectColumns[] = "({$maskedExpression}) AS {$quotedNestedThenCol}";
+                                                $existingColumnNames[$colLower] = true;
+                                            }
+                                        } else {
+                                            if ($needsAlias) {
+                                                $nestedSelectColumns[] = "{$quotedNestedThenRelatedAlias}.{$quotedNestedThenCol} AS {$quotedAliasCol}";
+                                                $existingColumnNames[strtolower($aliasCol)] = true;
+                                            } else {
+                                                $nestedSelectColumns[] = "{$quotedNestedThenRelatedAlias}.{$quotedNestedThenCol}";
+                                                $existingColumnNames[$colLower] = true;
+                                            }
+                                        }
+                                    }
+                                }
+                                
+                                $quotedNestedThenRelatedTableName = $provider->escapeIdentifier($nestedThenRelatedTableName);
+                                
+                                if ($nestedThenIncludeJoinCondition !== null && trim($nestedThenIncludeJoinCondition) !== '') {
+                                    $nestedThenJoinCondition = str_replace('{alias}', $quotedThenRelatedAlias, $nestedThenIncludeJoinCondition);
+                                    $nestedThenJoinCondition = str_replace('{relatedAlias}', $quotedNestedThenRelatedAlias, $nestedThenJoinCondition);
+                                } else {
+                                    $nestedThenFkColumn = $this->getColumnNameFromProperty($thenRelatedEntityReflection, $nestedThenForeignKey);
+                                    $nestedThenRelatedPkColumn = $this->getPrimaryKeyColumnName($nestedThenRelatedEntityReflection);
+                                    $quotedNestedThenFkColumn = $provider->escapeIdentifier($nestedThenFkColumn);
+                                    $quotedNestedThenRelatedPkColumn = $provider->escapeIdentifier($nestedThenRelatedPkColumn);
+                                    $nestedThenJoinCondition = "{$quotedThenRelatedAlias}.{$quotedNestedThenFkColumn} = {$quotedNestedThenRelatedAlias}.{$quotedNestedThenRelatedPkColumn}";
+                                }
+                                
+                                $nestedThenJoinKeyword = $nestedThenIncludeJoinType === 'INNER' ? 'INNER JOIN' : 'LEFT JOIN';
+                                $nestedThenJoinSql = "{$nestedThenJoinKeyword} {$quotedNestedThenRelatedTableName} AS {$quotedNestedThenRelatedAlias} ON {$nestedThenJoinCondition}";
+                                $nestedSubqueryJoins[] = $nestedThenJoinSql;
+                            }
+                        }
+                    }
+                }
             }
         }
         
@@ -5155,12 +5540,12 @@ class AdvancedQueryBuilder
         
         // Add JOINs for thenInclude reference navigations (if any)
         if (!empty($nestedSubqueryJoins)) {
-            // Filter out nested subquery joins (they start with "LEFT JOIN (")
-            // and keep only direct JOINs (they start with "LEFT JOIN [table]")
+            // Filter out nested subquery joins (they start with "LEFT JOIN (" or "INNER JOIN (")
+            // and keep only direct JOINs (they start with "LEFT JOIN [table]" or "INNER JOIN [table]")
             $directJoins = [];
             $nestedSubqueryLeftJoins = [];
             foreach ($nestedSubqueryJoins as $join) {
-                if (strpos($join, 'LEFT JOIN (') === 0) {
+                if (strpos($join, 'LEFT JOIN (') === 0 || strpos($join, 'INNER JOIN (') === 0) {
                     $nestedSubqueryLeftJoins[] = $join;
                 } else {
                     $directJoins[] = $join;
@@ -5170,7 +5555,7 @@ class AdvancedQueryBuilder
             if (!empty($directJoins)) {
                 $sql .= "\n" . implode("\n", $directJoins);
             }
-            // Add nested subquery LEFT JOINs
+            // Add nested subquery LEFT/INNER JOINs
             if (!empty($nestedSubqueryLeftJoins)) {
                 $sql .= "\n" . implode("\n", $nestedSubqueryLeftJoins);
             }
@@ -5199,24 +5584,58 @@ class AdvancedQueryBuilder
     /**
      * Build nested collection subquery (for thenInclude)
      */
-    private function buildNestedCollectionSubquery(string $navPath, array $navInfo, int $index, string $parentEntityType): ?array
+    private function buildNestedCollectionSubquery(string $navPath, array $navInfo, int $index, string $parentEntityType, ?string $whereClause = null, array $thenIncludes = []): ?array
     {
-        if (!$navInfo['isCollection'] || !$navInfo['joinEntityType']) {
+        //log_message('debug', "buildNestedCollectionSubquery: Starting for '{$navPath}' (index: {$index}, parentEntityType: {$parentEntityType})");
+        //log_message('debug', "buildNestedCollectionSubquery: navInfo: " . json_encode(['isCollection' => $navInfo['isCollection'] ?? false, 'entityType' => $navInfo['entityType'] ?? null, 'joinEntityType' => $navInfo['joinEntityType'] ?? null]));
+        
+        if (!$navInfo['isCollection']) {
+            //log_message('debug', "buildNestedCollectionSubquery: Not a collection, returning null");
             return null;
         }
         
-        $joinEntityType = $navInfo['joinEntityType'];
-        $joinEntityReflection = new ReflectionClass($joinEntityType);
+        // Allow fallback to related entity as join entity if joinEntityType is not defined
+        // For many-to-many relationships, joinEntityType is the join table
+        // For one-to-many relationships, joinEntityType is null and we use entityType directly
+        $joinEntityType = $navInfo['joinEntityType'] ?? null;
+        $relatedEntityType = $navInfo['entityType'] ?? null;
         
+        //log_message('debug', "buildNestedCollectionSubquery: joinEntityType: " . ($joinEntityType ?? 'null') . ", relatedEntityType: " . ($relatedEntityType ?? 'null'));
+        
+        if ($relatedEntityType === null) {
+            //log_message('debug', "buildNestedCollectionSubquery: relatedEntityType is null, returning null");
+            return null;
+        }
+        
+        $joinEntityReflection = null;
+        
+        // If joinEntityType is null, this is a one-to-many relationship (no join table)
+        // In this case, the related entity itself is used as the "join entity"
+        if ($joinEntityType === null) {
+            // One-to-many: related entity is the join entity
+            $joinEntityType = $relatedEntityType;
+            $joinEntityReflection = new ReflectionClass($joinEntityType);
+            //log_message('debug', "buildNestedCollectionSubquery: One-to-many - using relatedEntityType as joinEntityType: {$joinEntityType}");
+            // For one-to-many, relatedEntityType is already set correctly (no need to find it)
+        } else {
+            // Many-to-many: joinEntityType is the join table
+            $joinEntityReflection = new ReflectionClass($joinEntityType);
         // For nested subquery, find related entity excluding parent entity (not main entity)
         $relatedEntityType = $this->findRelatedEntityFromJoinEntityForParent($joinEntityType, $parentEntityType);
         
         if ($relatedEntityType === null) {
+                //log_message('debug', "buildNestedCollectionSubquery: findRelatedEntityFromJoinEntityForParent returned null, returning null");
             return null;
+            }
+            //log_message('debug', "buildNestedCollectionSubquery: Many-to-many - found relatedEntityType: {$relatedEntityType}");
         }
         
         $joinTableName = $this->context->getTableName($joinEntityType);
         $relatedTableName = $this->context->getTableName($relatedEntityType);
+        
+        // Determine if this is a one-to-many relationship (no joinEntityType in navInfo)
+        $isOneToMany = ($navInfo['joinEntityType'] ?? null) === null;
+        //log_message('debug', "buildNestedCollectionSubquery: isOneToMany: " . ($isOneToMany ? 'true' : 'false'));
         
         // EF Core uses a0, a1, etc. for join entity, o, o0, etc. for related entity
         $joinAlias = 'a' . ($index - 1); // e.g., a0 (for index 1), a1 (for index 2)
@@ -5224,21 +5643,56 @@ class AdvancedQueryBuilder
         
         // Get columns
         $joinColumns = $this->getEntityColumns($joinEntityReflection);
-        $relatedEntityReflection = new ReflectionClass($relatedEntityType);
-        $relatedColumnsWithProperties = $this->getEntityColumnsWithProperties($relatedEntityReflection);
-        
         $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
         
         // Build SELECT
         $selectColumns = [];
         $quotedJoinAlias = $provider->escapeIdentifier($joinAlias);
+        $quotedRelatedAlias = $provider->escapeIdentifier($relatedAlias);
+        
+        // Define relatedEntityReflection for both one-to-many and many-to-many cases
+        // For one-to-many, relatedEntityType is the same as joinEntityType
+        // For many-to-many, relatedEntityType is different from joinEntityType
+        $relatedEntityReflection = new ReflectionClass($relatedEntityType);
+        
+        // For one-to-many, only select from join entity (which is the same as related entity)
+        // For many-to-many, select from both join entity and related entity
+        if ($isOneToMany) {
+            // One-to-many: only select from join entity (related entity is the same)
+            $joinEntityReflectionForColumns = new ReflectionClass($joinEntityType);
+            $joinColumnsWithProperties = $this->getEntityColumnsWithProperties($joinEntityReflectionForColumns);
+            foreach ($joinColumnsWithProperties as $colInfo) {
+                $col = $colInfo['column'];
+                $property = $joinEntityReflectionForColumns->getProperty($colInfo['property']);
+                $sensitiveAttributes = $property->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\SensitiveValue::class);
+                
+                $quotedJoinCol = $provider->escapeIdentifier($col);
+                
+                // Apply masking for sensitive columns
+                if (!empty($sensitiveAttributes) && !$this->isSensitive) {
+                    $sensitiveAttr = $sensitiveAttributes[0]->newInstance();
+                    $columnRef = "{$quotedJoinAlias}.{$quotedJoinCol}";
+                    $maskedExpression = $provider->getMaskingSql(
+                        $columnRef,
+                        $sensitiveAttr->maskChar,
+                        $sensitiveAttr->visibleStart,
+                        $sensitiveAttr->visibleEnd,
+                        $sensitiveAttr->customMask
+                    );
+                    $selectColumns[] = "({$maskedExpression}) AS {$quotedJoinCol}";
+                } else {
+                    $selectColumns[] = "{$quotedJoinAlias}.{$quotedJoinCol}";
+                }
+            }
+        } else {
+            // Many-to-many: select from both join entity and related entity
         foreach ($joinColumns as $col) {
             $quotedJoinCol = $provider->escapeIdentifier($col);
             $selectColumns[] = "{$quotedJoinAlias}.{$quotedJoinCol}";
         }
+            $relatedColumnsWithProperties = $this->getEntityColumnsWithProperties($relatedEntityReflection);
         $relatedIdx = 0;
         $firstCol = true;
-        $quotedRelatedAlias = $provider->escapeIdentifier($relatedAlias);
         foreach ($relatedColumnsWithProperties as $colInfo) {
             $col = $colInfo['column'];
             $property = $relatedEntityReflection->getProperty($colInfo['property']);
@@ -5266,30 +5720,305 @@ class AdvancedQueryBuilder
                 } else {
                     // No masking
                     $selectColumns[] = "{$quotedRelatedAlias}.{$quotedRelatedCol}";
+                    }
                 }
             }
         }
         
         // Build JOIN condition
+        // For one-to-many relationships (joinEntityType == relatedEntityType), join on parent entity
+        // For many-to-many relationships (joinEntityType != relatedEntityType), join on related entity
+        $isOneToMany = ($navInfo['joinEntityType'] ?? null) === null;
+        //log_message('debug', "buildNestedCollectionSubquery: Processing '{$navPath}' (isOneToMany: " . ($isOneToMany ? 'true' : 'false') . ", joinEntityType: " . ($navInfo['joinEntityType'] ?? 'null') . ", relatedEntityType: {$relatedEntityType}, parentEntityType: {$parentEntityType})");
+        
+        if ($isOneToMany) {
+            // One-to-many: joinEntityType == relatedEntityType, so we join on parent entity
+            // JOIN condition: AccessGroupReader.AccessGroupId = AccessGroup.Id
+            // Try to find FK by looking for parent entity navigation property in joinEntityType
+            $joinFk = null;
+            
+            // First, try to find parent entity navigation property in joinEntityType
+            // e.g., AccessGroupReader entity might have AccessGroup navigation property
+            $parentEntityShortName = (new ReflectionClass($parentEntityType))->getShortName();
+            $parentNavPropertyName = $parentEntityShortName; // e.g., "AccessGroup"
+            
+            // Check if joinEntityType has a navigation property pointing to parent entity
+            if ($joinEntityReflection->hasProperty($parentNavPropertyName)) {
+                // Get FK from navigation property using getForeignKeyForNavigation
+                $tempNavInfo = $this->getNavigationInfoForEntity($parentNavPropertyName, $joinEntityType);
+                if ($tempNavInfo && !$tempNavInfo['isCollection']) {
+                    // Reference navigation - FK is in joinEntityType
+                    $joinFk = $this->getForeignKeyForNavigation($joinEntityReflection, $parentNavPropertyName, false, $parentEntityType);
+                    //log_message('debug', "buildNestedCollectionSubquery: Found FK '{$joinFk}' from navigation property '{$parentNavPropertyName}' in joinEntityType '{$joinEntityType}'");
+                }
+            }
+            
+            // If not found, try convention: ParentEntityName + "Id"
+            if ($joinFk === null) {
+                $expectedFkName = $parentEntityShortName . 'Id'; // e.g., AccessGroupId
+                // Try different case variations
+                $variations = [
+                    $expectedFkName, // AccessGroupId
+                    ucfirst($expectedFkName), // AccessGroupId (same)
+                    strtolower($expectedFkName), // accessgroupid
+                    $parentEntityShortName . 'ID', // AccessGroupID
+                ];
+                
+                foreach ($variations as $variation) {
+                    if ($joinEntityReflection->hasProperty($variation)) {
+                        $joinFk = $variation;
+                        //log_message('debug', "buildNestedCollectionSubquery: Found FK '{$joinFk}' using convention in joinEntityType '{$joinEntityType}'");
+                        break;
+                    }
+                }
+            }
+            
+            if ($joinFk === null) {
+                //log_message('debug', "buildNestedCollectionSubquery: FK property not found in joinEntityType '{$joinEntityType}' for parent '{$parentEntityType}', trying to list all properties");
+                // Last resort: list all properties to help debug
+                $allProperties = $joinEntityReflection->getProperties();
+                $propertyNames = array_map(fn($p) => $p->getName(), $allProperties);
+                //log_message('debug', "buildNestedCollectionSubquery: Available properties in '{$joinEntityType}': " . implode(', ', $propertyNames));
+                return null;
+            }
+            
+            //log_message('debug', "buildNestedCollectionSubquery: One-to-many - using FK '{$joinFk}' in joinEntityType '{$joinEntityType}'");
+            
+            $joinFkColumn = $this->getColumnNameFromProperty($joinEntityReflection, $joinFk);
+            $quotedJoinFkColumn = $provider->escapeIdentifier($joinFkColumn);
+            //log_message('debug', "buildNestedCollectionSubquery: Found FK column '{$joinFkColumn}' for property '{$joinFk}'");
+            // For one-to-many, we don't have a related entity in the subquery, so we need to use the parent entity
+            // But wait, in nested subquery, we don't have parent entity directly...
+            // Actually, for one-to-many nested subqueries, we should just select from the related entity
+            // and the JOIN condition will be applied when this subquery is joined to the parent collection subquery
+            // So we don't need a JOIN condition here - just return the subquery without JOIN
+            $joinCondition = ""; // Will be set when this subquery is joined to parent
+        } else {
+            // Many-to-many: joinEntityType != relatedEntityType, so we join on related entity
         $relatedEntityShortName = (new ReflectionClass($relatedEntityType))->getShortName();
         $expectedFkName = $relatedEntityShortName . 'Id';
         $joinFk = $expectedFkName;
+            //log_message('debug', "buildNestedCollectionSubquery: Many-to-many - looking for FK '{$joinFk}' in joinEntityType '{$joinEntityType}'");
         
         if ($joinEntityReflection->hasProperty($joinFk)) {
             $joinFkColumn = $this->getColumnNameFromProperty($joinEntityReflection, $joinFk);
             $quotedJoinFkColumn = $provider->escapeIdentifier($joinFkColumn);
             $quotedRelatedId = $provider->escapeIdentifier('Id');
             $joinCondition = "{$quotedJoinAlias}.{$quotedJoinFkColumn} = {$quotedRelatedAlias}.{$quotedRelatedId}";
+                //log_message('debug', "buildNestedCollectionSubquery: Found FK column '{$joinFkColumn}' for property '{$joinFk}', joinCondition: {$joinCondition}");
         } else {
+                //log_message('debug', "buildNestedCollectionSubquery: FK property '{$joinFk}' not found in joinEntityType '{$joinEntityType}', returning null");
             return null;
+            }
         }
+        
+        // Process thenIncludes for nested collection subquery
+        $nestedSubqueryJoins = [];
+        $nestedSelectColumns = [];
+        $existingColumnNames = [];
+        foreach ($selectColumns as $col) {
+            // Extract column name from SELECT expression
+            if (preg_match('/AS\s+\[?([^\]]+)\]?/i', $col, $matches)) {
+                $existingColumnNames[strtolower($matches[1])] = true;
+            } elseif (preg_match('/\.\[?([^\]]+)\]?$/', $col, $matches)) {
+                $existingColumnNames[strtolower($matches[1])] = true;
+            }
+        }
+        
+        $nestedSubqueryIndex = $index + 1; // Start from next index for nested subqueries
+        foreach ($thenIncludes as $nestedThenInclude) {
+            // Handle both string (backward compatibility) and array format
+            if (is_string($nestedThenInclude)) {
+                $nestedThenIncludeNav = $nestedThenInclude;
+                $nestedThenIncludeWhereClause = null;
+                $nestedThenIncludeJoinType = 'LEFT';
+                $nestedThenIncludeJoinCondition = null;
+            } else {
+                $nestedThenIncludeNav = $nestedThenInclude['navigation'] ?? $nestedThenInclude;
+                $nestedThenIncludeWhereClause = $nestedThenInclude['whereClause'] ?? null;
+                $nestedThenIncludeJoinType = $nestedThenInclude['joinType'] ?? 'LEFT';
+                $nestedThenIncludeJoinCondition = $nestedThenInclude['joinCondition'] ?? null;
+            }
+            
+            // Get navigation info for nested thenInclude (from related entity)
+            $nestedThenNavInfo = $this->getNavigationInfoForEntity($nestedThenIncludeNav, $relatedEntityType);
+            
+            if ($nestedThenNavInfo && $nestedThenNavInfo['isCollection']) {
+                // Find nested thenIncludes for this nested collection
+                $nestedCurrentIndex = array_search($nestedThenInclude, $thenIncludes, true);
+                $nestedNestedThenIncludes = [];
+                if ($nestedCurrentIndex !== false) {
+                    $nestedRemainingThenIncludes = array_slice($thenIncludes, $nestedCurrentIndex + 1);
+                    foreach ($nestedRemainingThenIncludes as $nestedRemainingThenInclude) {
+                        $nestedRemainingThenIncludeNav = is_string($nestedRemainingThenInclude) ? $nestedRemainingThenInclude : ($nestedRemainingThenInclude['navigation'] ?? $nestedRemainingThenInclude);
+                        $nestedRemainingThenNavInfo = $this->getNavigationInfoForEntity($nestedRemainingThenIncludeNav, $nestedThenNavInfo['entityType']);
+                        if ($nestedRemainingThenNavInfo) {
+                            // This thenInclude belongs to the current nested collection navigation
+                            $nestedNestedThenIncludes[] = $nestedRemainingThenInclude;
+                        } else {
+                            // This thenInclude doesn't belong to current nested collection, stop processing
+                            break;
+                        }
+                    }
+                }
+                
+                // Nested collection - build nested subquery recursively
+                $nestedSubquery = $this->buildNestedCollectionSubquery($nestedThenIncludeNav, $nestedThenNavInfo, $nestedSubqueryIndex, $relatedEntityType, $nestedThenIncludeWhereClause, $nestedNestedThenIncludes);
+                if ($nestedSubquery) {
+                    $nestedSubquery['joinType'] = $nestedThenIncludeJoinType;
+                    $nestedAlias = 's' . $nestedSubqueryIndex;
+                    $nestedJoinEntityType = $nestedSubquery['joinEntityType'];
+                    $nestedRelatedEntityType = $nestedSubquery['entityType'];
+                    $nestedJoinEntityReflection = new ReflectionClass($nestedJoinEntityType);
+                    $nestedJoinColumns = $this->getEntityColumns($nestedJoinEntityReflection);
+                    $nestedRelatedEntityReflection = new ReflectionClass($nestedRelatedEntityType);
+                    $nestedRelatedColumns = $this->getEntityColumns($nestedRelatedEntityReflection);
+                    
+                    foreach ($nestedJoinColumns as $col) {
+                        if ($col === 'Id') {
+                            $nestedSelectColumns[] = "[{$nestedAlias}].[{$col}] AS [Id{$nestedSubqueryIndex}]";
+                        } elseif (str_ends_with($col, 'Id') && $col !== 'Id') {
+                            $parentEntityShortName = (new ReflectionClass($relatedEntityType))->getShortName();
+                            if ($col === $parentEntityShortName . 'Id') {
+                                $nestedSelectColumns[] = "[{$nestedAlias}].[{$col}] AS [{$col}0]";
+                            } else {
+                                $nestedSelectColumns[] = "[{$nestedAlias}].[{$col}]";
+                            }
+                        } else {
+                            $nestedSelectColumns[] = "[{$nestedAlias}].[{$col}]";
+                        }
+                    }
+                    
+                    $nestedRelatedIdx = 0;
+                    $firstCol = true;
+                    foreach ($nestedRelatedColumns as $col) {
+                        if ($firstCol && $col === 'Id') {
+                            $nestedSelectColumns[] = "[{$nestedAlias}].[Id{$nestedRelatedIdx}] AS [Id00]";
+                            $firstCol = false;
+                        } else {
+                            $nestedSelectColumns[] = "[{$nestedAlias}].[{$col}] AS [{$col}0]";
+                        }
+                    }
+                    
+                    $parentEntityReflection = new ReflectionClass($relatedEntityType);
+                    $parentIdColumn = 'Id';
+                    $nestedJoinFkColumn = $this->getForeignKeyForNavigation($nestedJoinEntityReflection, $nestedThenIncludeNav, true, $relatedEntityType);
+                    $nestedJoinFkColumn = $this->getColumnNameFromProperty($nestedJoinEntityReflection, $nestedJoinFkColumn);
+                    $nestedJoinCondition = "[{$quotedRelatedAlias}].[{$parentIdColumn}] = [{$nestedAlias}].[{$nestedJoinFkColumn}]";
+                    $nestedJoinType = $nestedSubquery['joinType'] ?? 'LEFT';
+                    $nestedJoinKeyword = $nestedJoinType === 'INNER' ? 'INNER JOIN' : 'LEFT JOIN';
+                    $nestedSubqueryJoins[] = "{$nestedJoinKeyword} (\n    " . str_replace("\n", "\n    ", $nestedSubquery['sql']) . "\n) AS [{$nestedAlias}] ON {$nestedJoinCondition}";
+                    
+                    $nestedSubqueryIndex++;
+                }
+            } elseif ($nestedThenNavInfo && !$nestedThenNavInfo['isCollection']) {
+                // Nested reference navigation - add JOIN
+                $nestedThenRelatedEntityType = $nestedThenNavInfo['entityType'];
+                $nestedThenForeignKey = $nestedThenNavInfo['foreignKey'];
+                $nestedThenRelatedEntityReflection = new ReflectionClass($nestedThenRelatedEntityType);
+                $nestedThenRelatedTableName = $this->context->getTableName($nestedThenRelatedEntityType);
+                $nestedThenRelatedAlias = $this->getTableAlias($nestedThenIncludeNav, 0);
+                
+                $nestedThenRelatedColumnsWithProperties = $this->getEntityColumnsWithProperties($nestedThenRelatedEntityReflection);
+                $nestedThenRelatedPrimaryKeyColumn = $this->getPrimaryKeyColumnName($nestedThenRelatedEntityReflection);
+                
+                $quotedNestedThenRelatedAlias = $provider->escapeIdentifier($nestedThenRelatedAlias);
+                $nestedThenFirstCol = true;
+                foreach ($nestedThenRelatedColumnsWithProperties as $colInfo) {
+                    $col = $colInfo['column'];
+                    $property = $nestedThenRelatedEntityReflection->getProperty($colInfo['property']);
+                    $sensitiveAttributes = $property->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\SensitiveValue::class);
+                    
+                    $quotedNestedThenCol = $provider->escapeIdentifier($col);
+                    $colLower = strtolower($col);
+                    
+                    if ($nestedThenFirstCol && $col === $nestedThenRelatedPrimaryKeyColumn) {
+                        $nestedThenIdAlias = "Id" . ucfirst($nestedThenIncludeNav) . "0";
+                        $nestedSelectColumns[] = "{$quotedNestedThenRelatedAlias}.{$quotedNestedThenCol} AS [{$nestedThenIdAlias}]";
+                        $existingColumnNames[strtolower($nestedThenIdAlias)] = true;
+                        $nestedThenFirstCol = false;
+                    } else {
+                        $needsAlias = isset($existingColumnNames[$colLower]);
+                        if ($needsAlias) {
+                            $aliasCol = ucfirst($nestedThenIncludeNav) . ucfirst($col);
+                            $quotedAliasCol = $provider->escapeIdentifier($aliasCol);
+                        }
+                        
+                        if (!empty($sensitiveAttributes) && !$this->isSensitive) {
+                            $sensitiveAttr = $sensitiveAttributes[0]->newInstance();
+                            $columnRef = "{$quotedNestedThenRelatedAlias}.{$quotedNestedThenCol}";
+                            $maskedExpression = $provider->getMaskingSql(
+                                $columnRef,
+                                $sensitiveAttr->maskChar,
+                                $sensitiveAttr->visibleStart,
+                                $sensitiveAttr->visibleEnd,
+                                $sensitiveAttr->customMask
+                            );
+                            if ($needsAlias) {
+                                $nestedSelectColumns[] = "({$maskedExpression}) AS {$quotedAliasCol}";
+                                $existingColumnNames[strtolower($aliasCol)] = true;
+                            } else {
+                                $nestedSelectColumns[] = "({$maskedExpression}) AS {$quotedNestedThenCol}";
+                                $existingColumnNames[$colLower] = true;
+                            }
+                        } else {
+                            if ($needsAlias) {
+                                $nestedSelectColumns[] = "{$quotedNestedThenRelatedAlias}.{$quotedNestedThenCol} AS {$quotedAliasCol}";
+                                $existingColumnNames[strtolower($aliasCol)] = true;
+                            } else {
+                                $nestedSelectColumns[] = "{$quotedNestedThenRelatedAlias}.{$quotedNestedThenCol}";
+                                $existingColumnNames[$colLower] = true;
+                            }
+                        }
+                    }
+                }
+                
+                $quotedNestedThenRelatedTableName = $provider->escapeIdentifier($nestedThenRelatedTableName);
+                
+                if ($nestedThenIncludeJoinCondition !== null && trim($nestedThenIncludeJoinCondition) !== '') {
+                    // For one-to-many, use joinAlias (a0) instead of relatedAlias (o)
+                    $aliasToUse = $isOneToMany ? $quotedJoinAlias : $quotedRelatedAlias;
+                    $nestedThenJoinCondition = str_replace('{alias}', $aliasToUse, $nestedThenIncludeJoinCondition);
+                    $nestedThenJoinCondition = str_replace('{relatedAlias}', $quotedNestedThenRelatedAlias, $nestedThenJoinCondition);
+                } else {
+                    $nestedThenFkColumn = $this->getColumnNameFromProperty($relatedEntityReflection, $nestedThenForeignKey);
+                    $nestedThenRelatedPkColumn = $this->getPrimaryKeyColumnName($nestedThenRelatedEntityReflection);
+                    $quotedNestedThenFkColumn = $provider->escapeIdentifier($nestedThenFkColumn);
+                    $quotedNestedThenRelatedPkColumn = $provider->escapeIdentifier($nestedThenRelatedPkColumn);
+                    // For one-to-many, use joinAlias (a0) instead of relatedAlias (o)
+                    $aliasToUse = $isOneToMany ? $quotedJoinAlias : $quotedRelatedAlias;
+                    $nestedThenJoinCondition = "{$aliasToUse}.{$quotedNestedThenFkColumn} = {$quotedNestedThenRelatedAlias}.{$quotedNestedThenRelatedPkColumn}";
+                }
+                
+                $nestedThenJoinKeyword = $nestedThenIncludeJoinType === 'INNER' ? 'INNER JOIN' : 'LEFT JOIN';
+                $nestedThenJoinSql = "{$nestedThenJoinKeyword} {$quotedNestedThenRelatedTableName} AS {$quotedNestedThenRelatedAlias} ON {$nestedThenJoinCondition}";
+                $nestedSubqueryJoins[] = $nestedThenJoinSql;
+            }
+        }
+        
+        // Combine all SELECT columns
+        $allSelectColumns = array_merge($selectColumns, $nestedSelectColumns);
         
         $quotedJoinTableName = $provider->escapeIdentifier($joinTableName);
         $quotedRelatedTableName = $provider->escapeIdentifier($relatedTableName);
-        // For thenInclude() nested collections, use INNER JOIN
-        $sql = "SELECT " . implode(', ', $selectColumns) . "\n"
+        
+        // For one-to-many relationships, there's no JOIN - just SELECT from the related entity
+        // For many-to-many relationships, JOIN the join entity with the related entity
+        if ($isOneToMany) {
+            // One-to-many: just SELECT from related entity (no JOIN needed)
+            $sql = "SELECT " . implode(', ', $allSelectColumns) . "\n"
+                . "FROM {$quotedJoinTableName} AS {$quotedJoinAlias}";
+        } else {
+            // Many-to-many: JOIN join entity with related entity
+            $sql = "SELECT " . implode(', ', $allSelectColumns) . "\n"
             . "FROM {$quotedJoinTableName} AS {$quotedJoinAlias}\n"
             . "INNER JOIN {$quotedRelatedTableName} AS {$quotedRelatedAlias} ON {$joinCondition}";
+        }
+        
+        // Add JOINs for thenIncludes
+        if (!empty($nestedSubqueryJoins)) {
+            $sql .= "\n" . implode("\n", $nestedSubqueryJoins);
+        }
         
         // Add WHERE clause if provided
         if ($whereClause !== null && trim($whereClause) !== '') {
@@ -5304,7 +6033,8 @@ class AdvancedQueryBuilder
             'navigation' => $navPath,
             'sql' => $sql,
             'joinEntityType' => $joinEntityType,
-            'entityType' => $relatedEntityType
+            'entityType' => $relatedEntityType,
+            'selectColumns' => $allSelectColumns // Include all SELECT columns (including nested thenInclude columns)
         ];
     }
     
@@ -6252,6 +6982,127 @@ class AdvancedQueryBuilder
                     $refEntity = $this->mapRowToEntity($refData, $refEntityReflection);
                     $navProperty->setValue($entity, $refEntity);
                     
+                    // Get thenIncludes for this reference navigation
+                    // Reference navigation can be a thenInclude of a collection navigation
+                    // For example, AccessGroup is a thenInclude of EmployeeAccessGroups
+                    // So we need to check both direct includes and nested thenIncludes
+                    $refThenIncludes = [];
+                    
+                    // First, try to find direct include for this reference navigation
+                    foreach ($this->includes as $include) {
+                        $includeNavPath = $include['path'] ?? $include['navigation'] ?? null;
+                        if ($includeNavPath === $navPath && isset($include['thenIncludes'])) {
+                            $refThenIncludes = $include['thenIncludes'];
+                            break;
+                        }
+                    }
+                    
+                    // If not found, try to find it as a thenInclude of a collection navigation
+                    // For example, AccessGroup is a thenInclude of EmployeeAccessGroups
+                    if (empty($refThenIncludes)) {
+                        //log_message('debug', "parseEfCoreStyleResults: Searching for thenIncludes for reference navigation '{$navPath}' in collection thenIncludes");
+                        foreach ($this->includes as $include) {
+                            $includeNavPath = $include['path'] ?? $include['navigation'] ?? null;
+                            if (isset($include['thenIncludes'])) {
+                                //log_message('debug', "parseEfCoreStyleResults: Checking include '{$includeNavPath}' with " . count($include['thenIncludes']) . " thenIncludes");
+                                foreach ($include['thenIncludes'] as $thenInclude) {
+                                    $thenIncludeNav = is_string($thenInclude) ? $thenInclude : ($thenInclude['navigation'] ?? null);
+                                    //log_message('debug', "parseEfCoreStyleResults: Comparing thenIncludeNav '{$thenIncludeNav}' with navPath '{$navPath}'");
+                                    // Check if this thenInclude matches the reference navigation we're parsing
+                                    // For example, if we're parsing AccessGroup, check if EmployeeAccessGroups has AccessGroup as thenInclude
+                                    if ($thenIncludeNav === $navPath) {
+                                        //log_message('debug', "parseEfCoreStyleResults: Match found! thenInclude is " . (is_array($thenInclude) ? 'array' : 'string') . ", has thenIncludes: " . (is_array($thenInclude) && isset($thenInclude['thenIncludes']) ? 'yes' : 'no'));
+                                        // If thenInclude is an array and has thenIncludes, use them
+                                        if (is_array($thenInclude) && isset($thenInclude['thenIncludes'])) {
+                                            $refThenIncludes = $thenInclude['thenIncludes'];
+                                            //log_message('debug', "parseEfCoreStyleResults: Found thenIncludes for reference navigation '{$navPath}' as nested thenInclude of '{$includeNavPath}': " . json_encode(array_map(function($ti) { return is_string($ti) ? $ti : ($ti['navigation'] ?? ''); }, $refThenIncludes)));
+                                            break 2;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    if (!empty($refThenIncludes)) {
+                        //log_message('debug', "parseEfCoreStyleResults: Found thenIncludes for reference navigation '{$navPath}': " . json_encode(array_map(function($ti) { return is_string($ti) ? $ti : ($ti['navigation'] ?? ''); }, $refThenIncludes)));
+                    }
+                    
+                    // Parse nested collections (thenInclude collections) for reference navigation
+                    // Reference navigation's thenInclude collections are nested within parent collection subqueries
+                    // For example, AccessGroup.AccessGroupReaders is nested within EmployeeAccessGroups (s1) subquery
+                    // So the columns are prefixed with s1_ (from parent collection subquery)
+                    if (!empty($refThenIncludes)) {
+                        // Find which collection subquery contains this reference navigation
+                        // The reference navigation is a thenInclude of a collection navigation
+                        // For example, AccessGroup is a thenInclude of EmployeeAccessGroups collection
+                        // So we need to find which collection subquery has this reference navigation as a thenInclude
+                        $refThenIncludeCollectionIndex = null;
+                        foreach ($collectionNavInfo as $collectionNavPath => $collectionInfo) {
+                            // Check if this collection subquery has the reference navigation as a thenInclude
+                            if (isset($collectionInfo['thenIncludes']) && !empty($collectionInfo['thenIncludes'])) {
+                                foreach ($collectionInfo['thenIncludes'] as $collectionThenInclude) {
+                                    $collectionThenIncludeNav = is_string($collectionThenInclude) ? $collectionThenInclude : ($collectionThenInclude['navigation'] ?? $collectionThenInclude);
+                                    // Check if this thenInclude is the reference navigation we're parsing
+                                    // For example, if we're parsing AccessGroup, check if collection has AccessGroup as thenInclude
+                                    // The collection's entity type is the join entity type (e.g., EmployeeAccessGroup)
+                                    // We need to check if the thenInclude navigation matches the reference navigation
+                                    $collectionEntityType = $collectionInfo['joinEntityType'] ?? $collectionInfo['entityType'];
+                                    $collectionThenNavInfo = $this->getNavigationInfoForEntity($collectionThenIncludeNav, $collectionEntityType);
+                                    if ($collectionThenNavInfo && !$collectionThenNavInfo['isCollection'] && $collectionThenNavInfo['entityType'] === $info['entityType']) {
+                                        // Found the collection subquery that contains this reference navigation
+                                        // This collection subquery's alias is the one we need for parsing nested collections
+                                        $refThenIncludeCollectionIndex = $collectionInfo['index'];
+                                        break 2;
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // If not found in collectionNavInfo, try to find it by checking row columns
+                        // This is a fallback: check if any collection subquery has columns for the reference navigation's thenInclude collections
+                        if ($refThenIncludeCollectionIndex === null) {
+                            //log_message('debug', "parseEfCoreStyleResults: Fallback: Trying to find collection subquery index for reference navigation '{$navPath}' by checking row columns");
+                            foreach ($collectionNavInfo as $collectionNavPath => $collectionInfo) {
+                                $collectionSubqueryAlias = 's' . $collectionInfo['index'];
+                                // Check if this row has columns for the reference navigation's thenInclude collections
+                                foreach ($refThenIncludes as $refThenInclude) {
+                                    $refThenIncludeNav = is_string($refThenInclude) ? $refThenInclude : ($refThenInclude['navigation'] ?? $refThenInclude);
+                                    $refThenNavInfo = $this->getNavigationInfoForEntity($refThenIncludeNav, $info['entityType']);
+                                    if ($refThenNavInfo && $refThenNavInfo['isCollection']) {
+                                        $refThenEntityType = $refThenNavInfo['entityType'];
+                                        $refThenEntityReflection = new ReflectionClass($refThenEntityType);
+                                        $refThenPrimaryKeyColumn = $this->getPrimaryKeyColumnName($refThenEntityReflection);
+                                        
+                                        // Try multiple possible key patterns
+                                        $possibleKeys = [
+                                            $collectionSubqueryAlias . '_' . $refThenPrimaryKeyColumn, // e.g., s1_AccessGroupReaderID
+                                            $collectionSubqueryAlias . '_' . $refThenPrimaryKeyColumn . '0', // e.g., s1_AccessGroupReaderID0
+                                        ];
+                                        
+                                        foreach ($possibleKeys as $refThenIdKey) {
+                                            if (isset($row[$refThenIdKey]) && $row[$refThenIdKey] !== null) {
+                                                //log_message('debug', "parseEfCoreStyleResults: Fallback: Found nested collection '{$refThenIncludeNav}' in collection subquery '{$collectionNavPath}' (index: {$collectionInfo['index']}) using key: {$refThenIdKey}, value: {$row[$refThenIdKey]}");
+                                                $refThenIncludeCollectionIndex = $collectionInfo['index'];
+                                                break 3;
+                                            }
+                                        }
+                                        
+                                        //log_message('debug', "parseEfCoreStyleResults: Fallback: Checked keys for '{$refThenIncludeNav}': " . implode(', ', $possibleKeys) . " in subquery '{$collectionSubqueryAlias}', found: " . (isset($row[$possibleKeys[0]]) ? 'yes (null)' : 'no'));
+                                    }
+                                }
+                            }
+                        }
+                        
+                        if ($refThenIncludeCollectionIndex !== null) {
+                            $refThenIncludeSubqueryAlias = 's' . $refThenIncludeCollectionIndex;
+                            //log_message('debug', "parseEfCoreStyleResults: Parsing nested collections for reference navigation '{$navPath}' (entityType: {$info['entityType']}), using subquery alias: {$refThenIncludeSubqueryAlias}, thenIncludes count: " . count($refThenIncludes));
+                            $this->parseNestedCollections($refEntity, $info['entityType'], $refThenIncludes, $row, $refThenIncludeSubqueryAlias, $refThenIncludeCollectionIndex);
+                        } else {
+                            //log_message('debug', "parseEfCoreStyleResults: Could not find collection subquery index for reference navigation '{$navPath}' (entityType: {$info['entityType']}), thenIncludes count: " . count($refThenIncludes));
+                        }
+                    }
+                    
                     // Parse nested reference navigation properties (thenInclude reference navigations)
                     // Check if this reference navigation has nested reference navigations
                     foreach ($referenceNavInfo as $nestedNavPath => $nestedInfo) {
@@ -6550,6 +7401,70 @@ class AdvancedQueryBuilder
                                             $navPropProperty = $collectionItemReflection->getProperty($prop->getName());
                                             $navPropProperty->setAccessible(true);
                                             $navPropProperty->setValue($collectionItem, $navPropEntity);
+                                            
+                                            // Check for thenIncludes for this reference navigation within collection
+                                            // For example, AccessGroup is a reference navigation within EmployeeAccessGroups collection
+                                            // and AccessGroupReaders is a thenInclude of AccessGroup
+                                            $refNavPath = $prop->getName(); // e.g., "AccessGroup"
+                                            $refThenIncludes = [];
+                                            
+                                            // Find thenIncludes for this reference navigation in $this->includes
+                                            // Collection navigation (e.g., EmployeeAccessGroups) has thenIncludes that include reference navigation (e.g., AccessGroup)
+                                            // and reference navigation has its own thenIncludes (e.g., AccessGroupReaders)
+                                            foreach ($this->includes as $include) {
+                                                $includeNavPath = $include['path'] ?? $include['navigation'] ?? null;
+                                                if ($includeNavPath === $navPath && isset($include['thenIncludes'])) {
+                                                    // Found the collection navigation in includes
+                                                    //log_message('debug', "parseEfCoreStyleResults: Checking collection '{$navPath}' thenIncludes for reference navigation '{$refNavPath}'");
+                                                    $thenIncludeIndex = -1;
+                                                    foreach ($include['thenIncludes'] as $idx => $thenInclude) {
+                                                        $thenIncludeNav = is_string($thenInclude) ? $thenInclude : ($thenInclude['navigation'] ?? null);
+                                                        //log_message('debug', "parseEfCoreStyleResults: Checking thenInclude[{$idx}]: '{$thenIncludeNav}'");
+                                                        if ($thenIncludeNav === $refNavPath) {
+                                                            // Found the reference navigation in thenIncludes
+                                                            $thenIncludeIndex = $idx;
+                                                            if (is_array($thenInclude) && isset($thenInclude['thenIncludes'])) {
+                                                                $refThenIncludes = $thenInclude['thenIncludes'];
+                                                                //log_message('debug', "parseEfCoreStyleResults: Found thenIncludes for reference navigation '{$refNavPath}' within collection '{$navPath}': " . json_encode(array_map(function($ti) { return is_string($ti) ? $ti : ($ti['navigation'] ?? ''); }, $refThenIncludes)));
+                                                                break;
+                                                            }
+                                                        }
+                                                    }
+                                                    
+                                                    // If reference navigation found but no thenIncludes in it, check remaining thenIncludes
+                                                    // For example, AccessGroup is found, and AccessGroupReaders comes after it in the thenIncludes array
+                                                    if ($thenIncludeIndex >= 0 && empty($refThenIncludes)) {
+                                                        //log_message('debug', "parseEfCoreStyleResults: Reference navigation '{$refNavPath}' found at index {$thenIncludeIndex}, checking remaining thenIncludes");
+                                                        $remainingThenIncludes = array_slice($include['thenIncludes'], $thenIncludeIndex + 1);
+                                                        foreach ($remainingThenIncludes as $remainingThenInclude) {
+                                                            $remainingNav = is_string($remainingThenInclude) ? $remainingThenInclude : ($remainingThenInclude['navigation'] ?? null);
+                                                            // Check if this remaining thenInclude belongs to the reference navigation
+                                                            // by checking if it exists as a property in the reference entity type
+                                                            $remainingNavInfo = $this->getNavigationInfoForEntity($remainingNav, $navPropType);
+                                                            if ($remainingNavInfo) {
+                                                                $refThenIncludes[] = $remainingThenInclude;
+                                                                //log_message('debug', "parseEfCoreStyleResults: Added remaining thenInclude '{$remainingNav}' to reference navigation '{$refNavPath}'");
+                                                            } else {
+                                                                // This thenInclude doesn't belong to reference navigation, stop
+                                                                //log_message('debug', "parseEfCoreStyleResults: Remaining thenInclude '{$remainingNav}' doesn't belong to reference navigation '{$refNavPath}', stopping");
+                                                                break;
+                                                            }
+                                                        }
+                                                        if (!empty($refThenIncludes)) {
+                                                            //log_message('debug', "parseEfCoreStyleResults: Found thenIncludes for reference navigation '{$refNavPath}' within collection '{$navPath}': " . json_encode(array_map(function($ti) { return is_string($ti) ? $ti : ($ti['navigation'] ?? ''); }, $refThenIncludes)));
+                                                        }
+                                                    }
+                                                    
+                                                    if (!empty($refThenIncludes)) {
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            
+                                            // Parse nested collections for reference navigation
+                                            if (!empty($refThenIncludes)) {
+                                                $this->parseNestedCollections($navPropEntity, $navPropType, $refThenIncludes, $row, $subqueryAlias, $info['index']);
+                                            }
                                         }
                                     }
                                 }
@@ -6697,104 +7612,315 @@ class AdvancedQueryBuilder
             $navProperty->setAccessible(true);
             $collection = $navProperty->getValue($relatedEntity) ?? [];
             
-            // Nested subquery alias (e.g., s1 for AuthorizationOperationClaims within UserAuthorizations)
-            // The nested subquery columns are prefixed with parent subquery alias + nested index
-            // For example, if parent is s1 (UserAuthorizations), nested is also s1 (AuthorizationOperationClaims)
-            // But the columns are: s1_Id1, s1_AuthorizationId0, s1_OperationClaimId, s1_Id00, s1_Name0, s1_Description0
+            // Nested subquery alias (e.g., s1 for AccessGroupReaders within AccessGroup)
+            // The nested subquery columns are prefixed with parent subquery alias
+            // For one-to-many nested collections (e.g., AccessGroupReaders), columns are:
+            // s1_AccessGroupReaderID (join entity ID), s1_ReaderID (Terminal ID), s1_SerialNumber (Terminal columns), etc.
+            // For many-to-many nested collections, columns might be: s1_Id1, s1_Id00, etc.
             $nestedSubqueryAlias = $parentSubqueryAlias; // Same alias as parent (s1)
             
-            // Check if nested collection item exists
-            // Nested join entity Id: s1_Id1 (from nested subquery)
-            $nestedCollectionIdKey = $nestedSubqueryAlias . '_Id' . $nestedSubqueryIndex; // e.g., s1_Id1
-            $nestedCollectionId = $row[$nestedCollectionIdKey] ?? null;
+            //log_message('debug', "parseNestedCollections: Processing nested collection '{$thenIncludeNav}' for entity '{$relatedEntityType}', using subquery alias: {$nestedSubqueryAlias}, parentIndex: {$parentIndex}");
             
-            if ($nestedCollectionId !== null) {
-                // Check if this item is already in collection
-                $exists = false;
-                foreach ($collection as $item) {
-                    $itemReflection = new ReflectionClass($item);
-                    $idProperty = $itemReflection->getProperty('Id');
-                    $idProperty->setAccessible(true);
-                    if ($idProperty->getValue($item) == $nestedCollectionId) {
-                        $exists = true;
+            // Check if nested collection item exists
+            // For one-to-many: join entity ID is the actual ID column (e.g., AccessGroupReaderID)
+            // For many-to-many: join entity ID is aliased as Id{index} (e.g., Id1)
+            $isOneToManyNested = ($thenNavInfo['joinEntityType'] ?? null) === null || $thenNavInfo['joinEntityType'] === $thenNavInfo['entityType'];
+            
+            $nestedCollectionId = null;
+            if ($isOneToManyNested) {
+                // One-to-many: use actual join entity ID column
+                $nestedJoinEntityReflection = new ReflectionClass($thenNavInfo['entityType']);
+                $nestedJoinEntityPrimaryKeyColumn = $this->getPrimaryKeyColumnName($nestedJoinEntityReflection);
+                
+                // Try multiple possible key patterns because nested subquery columns might be aliased
+                $possibleKeys = [
+                    $nestedSubqueryAlias . '_' . $nestedJoinEntityPrimaryKeyColumn, // e.g., s1_AccessGroupReaderID
+                    $nestedSubqueryAlias . '_' . $nestedJoinEntityPrimaryKeyColumn . '0', // e.g., s1_AccessGroupReaderID0 (if aliased)
+                ];
+                
+                // Also check for Id{index} pattern if the primary key is "Id"
+                if ($nestedJoinEntityPrimaryKeyColumn === 'Id') {
+                    $possibleKeys[] = $nestedSubqueryAlias . '_Id' . $nestedSubqueryIndex; // e.g., s1_Id1
+                }
+                
+                foreach ($possibleKeys as $key) {
+                    if (isset($row[$key]) && $row[$key] !== null) {
+                        $nestedCollectionId = $row[$key];
+                        //log_message('debug', "parseNestedCollections: Found nested collection ID for '{$thenIncludeNav}' using key: {$key}, value: {$nestedCollectionId}");
                         break;
                     }
                 }
                 
-                if (!$exists) {
-                    // Extract nested collection item data
-                    $nestedJoinEntityType = $thenNavInfo['joinEntityType'];
-                    $nestedJoinEntityReflection = new ReflectionClass($nestedJoinEntityType);
-                    $nestedJoinColumns = $this->getEntityColumns($nestedJoinEntityReflection);
-                    $nestedRelatedEntityType = $thenNavInfo['entityType'];
-                    $nestedRelatedEntityReflection = new ReflectionClass($nestedRelatedEntityType);
-                    
-                    // Create nested join entity (e.g., AuthorizationOperationClaim)
-                    $nestedJoinEntityData = [];
-                    // Nested join entity columns: s1_Id1, s1_AuthorizationId0, s1_OperationClaimId
-                    foreach ($nestedJoinColumns as $col) {
-                        if ($col === 'Id') {
-                            $key = $nestedSubqueryAlias . '_Id' . $nestedSubqueryIndex; // e.g., s1_Id1
-                        } elseif (str_ends_with($col, 'Id') && $col !== 'Id') {
-                            // Check if this is the FK to parent entity
-                            $parentEntityShortName = (new ReflectionClass($relatedEntityType))->getShortName();
-                            if ($col === $parentEntityShortName . 'Id') {
-                                $key = $nestedSubqueryAlias . '_' . $col . '0'; // e.g., s1_AuthorizationId0
-                            } else {
-                                $key = $nestedSubqueryAlias . '_' . $col; // e.g., s1_OperationClaimId
-                            }
-                        } else {
-                            $key = $nestedSubqueryAlias . '_' . $col;
-                        }
-                        if (isset($row[$key])) {
-                            $nestedJoinEntityData[$col] = $row[$key];
+                if ($nestedCollectionId === null) {
+                    // Debug: log available keys
+                    $availableKeys = array_filter(array_keys($row), function($k) use ($nestedSubqueryAlias) {
+                        return str_starts_with($k, $nestedSubqueryAlias . '_');
+                    });
+                    //log_message('debug', "parseNestedCollections: Could not find nested collection ID for '{$thenIncludeNav}'. Tried keys: " . implode(', ', $possibleKeys) . ". Available keys with prefix '{$nestedSubqueryAlias}_': " . implode(', ', array_slice($availableKeys, 0, 20)));
+                }
+            } else {
+                // Many-to-many: use aliased ID (backward compatibility)
+                $nestedCollectionIdKey = $nestedSubqueryAlias . '_Id' . $nestedSubqueryIndex; // e.g., s1_Id1
+                $nestedCollectionId = $row[$nestedCollectionIdKey] ?? null;
+            }
+            
+            if ($nestedCollectionId !== null) {
+                // Check if this item is already in collection
+                $exists = false;
+                //log_message('debug', "parseNestedCollections: Checking if nested collection item with ID {$nestedCollectionId} already exists in collection. Collection count: " . count($collection));
+                foreach ($collection as $item) {
+                    $itemReflection = new ReflectionClass($item);
+                    $itemPrimaryKeyColumn = $this->getPrimaryKeyColumnName($itemReflection);
+                    // Try to get property name from column name
+                    $itemProps = $itemReflection->getProperties();
+                    $idPropertyName = 'Id'; // Default
+                    foreach ($itemProps as $prop) {
+                        $propColName = $this->getColumnNameFromProperty($itemReflection, $prop->getName());
+                        if ($propColName === $itemPrimaryKeyColumn) {
+                            $idPropertyName = $prop->getName();
+                            break;
                         }
                     }
-                    
-                    // Create nested related entity (e.g., OperationClaim)
-                    $nestedRelatedEntityData = [];
-                    // Nested related entity Id: s1_Id00
-                    $nestedRelatedIdKey = $nestedSubqueryAlias . '_Id00'; // e.g., s1_Id00
-                    if (isset($row[$nestedRelatedIdKey]) && $row[$nestedRelatedIdKey] !== null) {
-                        $nestedRelatedEntityData['Id'] = $row[$nestedRelatedIdKey];
+                    $idProperty = $itemReflection->getProperty($idPropertyName);
+                    $idProperty->setAccessible(true);
+                    $itemId = $idProperty->getValue($item);
+                    if ($itemId == $nestedCollectionId) {
+                        $exists = true;
+                        //log_message('debug', "parseNestedCollections: Found existing item with ID {$itemId} in collection");
+                        break;
+                    }
+                }
+                
+                //log_message('debug', "parseNestedCollections: Item exists: " . ($exists ? 'true' : 'false'));
+                
+                if (!$exists) {
+                    //log_message('debug', "parseNestedCollections: Creating new nested entity for '{$thenIncludeNav}' with ID {$nestedCollectionId}");
+                    if ($isOneToManyNested) {
+                        // One-to-many: nested entity is the collection item itself (e.g., AccessGroupReader)
+                        $nestedEntityType = $thenNavInfo['entityType'];
+                        $nestedEntityReflection = new ReflectionClass($nestedEntityType);
+                        $nestedEntityColumns = $this->getEntityColumns($nestedEntityReflection);
                         
-                        // Get nested related entity columns
-                        $nestedRelatedEntityProps = $nestedRelatedEntityReflection->getProperties();
-                        foreach ($nestedRelatedEntityProps as $prop) {
-                            $docComment = $prop->getDocComment();
-                            if ($docComment && (preg_match('/@var\s+[A-Za-z_][A-Za-z0-9_\\\\]*(?:\\\\[A-Za-z_][A-Za-z0-9_]*)*(\[\])?/', $docComment) || 
-                                preg_match('/@var\s+array/', $docComment))) {
-                                continue;
+                        // Extract nested entity data
+                        $nestedEntityData = [];
+                        $nestedEntityPrimaryKeyColumn = $this->getPrimaryKeyColumnName($nestedEntityReflection);
+                        $nestedEntityData[$nestedEntityPrimaryKeyColumn] = $nestedCollectionId;
+                        
+                        foreach ($nestedEntityColumns as $col) {
+                            if ($col === $nestedEntityPrimaryKeyColumn) {
+                                continue; // Already set
                             }
+                            // Try multiple possible key patterns because nested subquery columns might be aliased
+                            $possibleKeys = [
+                                $nestedSubqueryAlias . '_' . $col, // e.g., s1_ProjectID, s1_ReaderID
+                                $nestedSubqueryAlias . '_' . $col . '0', // e.g., s1_ProjectID0, s1_ReaderID0 (if aliased)
+                            ];
                             
-                            $colName = $this->getColumnNameFromProperty($nestedRelatedEntityReflection, $prop->getName());
-                            if ($colName && $colName !== 'Id') {
-                                // Nested related entity columns: s1_Name0, s1_Description0
-                                $key = $nestedSubqueryAlias . '_' . $colName . '0'; // e.g., s1_Name0
+                            foreach ($possibleKeys as $key) {
                                 if (isset($row[$key])) {
-                                    $nestedRelatedEntityData[$colName] = $row[$key];
+                                    $nestedEntityData[$col] = $row[$key];
+                                    break;
                                 }
                             }
                         }
                         
-                        // Create nested related entity
-                        $nestedRelatedEntity = $this->mapRowToEntity($nestedRelatedEntityData, $nestedRelatedEntityReflection);
+                        // Create nested entity (e.g., AccessGroupReader)
+                        $nestedEntity = $this->mapRowToEntity($nestedEntityData, $nestedEntityReflection);
                         
-                        // Create nested join entity and set nested related entity
-                        $nestedJoinEntity = $this->mapRowToEntity($nestedJoinEntityData, $nestedJoinEntityReflection);
-                        
-                        // Find nested related entity navigation property name in nested join entity
-                        $nestedRelatedEntityShortName = (new ReflectionClass($nestedRelatedEntityType))->getShortName();
-                        $nestedRelatedNavPropertyName = $nestedRelatedEntityShortName; // e.g., OperationClaim
-                        
-                        if ($nestedJoinEntityReflection->hasProperty($nestedRelatedNavPropertyName)) {
-                            $nestedRelatedNavProperty = $nestedJoinEntityReflection->getProperty($nestedRelatedNavPropertyName);
-                            $nestedRelatedNavProperty->setAccessible(true);
-                            $nestedRelatedNavProperty->setValue($nestedJoinEntity, $nestedRelatedEntity);
+                        // Parse reference navigation properties (e.g., Terminal in AccessGroupReader)
+                        $nestedEntityProps = $nestedEntityReflection->getProperties();
+                        //log_message('debug', "parseNestedCollections: Found " . count($nestedEntityProps) . " properties in nested entity '{$nestedEntityType}'");
+                        foreach ($nestedEntityProps as $prop) {
+                            $propName = $prop->getName();
+                            $docComment = $prop->getDocComment();
+                            //log_message('debug', "parseNestedCollections: Checking property '{$propName}' in nested entity '{$nestedEntityType}', has docComment: " . ($docComment ? 'yes' : 'no'));
+                            
+                            $navPropType = null;
+                            $isCollection = false;
+                            
+                            // Try to get type from @var annotation first
+                            if ($docComment && preg_match('/@var\s+(\\\?[A-Za-z_][A-Za-z0-9_]*(?:\\\\[A-Za-z_][A-Za-z0-9_]*)*)(\[\])?/', $docComment, $matches)) {
+                                $navPropType = $matches[1];
+                                $isCollection = !empty($matches[2]);
+                                
+                                // Resolve namespace if not fully qualified
+                                if ($navPropType && !str_starts_with($navPropType, '\\')) {
+                                    $resolved = $this->resolveEntityType($navPropType, $nestedEntityReflection);
+                                    if ($resolved !== null) {
+                                        $navPropType = $resolved;
+                                    }
+                                }
+                            }
+                            // If no @var annotation, try to get type from type hint
+                            elseif ($prop->hasType()) {
+                                $type = $prop->getType();
+                                if ($type instanceof \ReflectionNamedType && !$type->isBuiltin()) {
+                                    $navPropType = $type->getName();
+                                    $isCollection = ($navPropType === 'array');
+                                    
+                                    // If not fully qualified, resolve namespace
+                                    if ($navPropType && !str_starts_with($navPropType, '\\')) {
+                                        $resolved = $this->resolveEntityType($navPropType, $nestedEntityReflection);
+                                        if ($resolved !== null) {
+                                            $navPropType = $resolved;
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            // Skip if no type found or if it's a collection
+                            if (!$navPropType || $isCollection) {
+                                //log_message('debug', "parseNestedCollections: Skipping property '{$propName}' (no type found or is collection)");
+                                continue;
+                            }
+                            
+                            $navPropName = $prop->getName();
+                            
+                            //log_message('debug', "parseNestedCollections: Checking reference navigation property '{$navPropName}' (type: {$navPropType}) in nested entity '{$nestedEntityType}'");
+                            
+                            // Check if this navigation property's entity is in the row
+                            $navPropReflection = new ReflectionClass($navPropType);
+                            $navPropPrimaryKeyColumn = $this->getPrimaryKeyColumnName($navPropReflection);
+                            
+                            // Try to find the related entity ID in the row
+                            // Pattern: s1_{RelatedEntityPrimaryKeyColumn} (e.g., s1_ReaderID for Terminal)
+                            // But it might be aliased (e.g., s1_IdTerminal0 from the nested subquery)
+                            $relatedIdKey = null;
+                            $possibleIdKeys = [
+                                $nestedSubqueryAlias . '_' . $navPropPrimaryKeyColumn, // e.g., s1_ReaderID
+                                $nestedSubqueryAlias . '_Id' . ucfirst($thenIncludeNav) . '0', // e.g., s1_IdTerminal0 (from nested subquery alias)
+                                $nestedSubqueryAlias . '_' . $navPropPrimaryKeyColumn . '0', // e.g., s1_ReaderID0 (if aliased)
+                            ];
+                            
+                            //log_message('debug', "parseNestedCollections: Trying to find related ID key for '{$navPropName}' (primary key column: {$navPropPrimaryKeyColumn}). Possible keys: " . implode(', ', $possibleIdKeys));
+                            
+                            foreach ($possibleIdKeys as $key) {
+                                if (isset($row[$key]) && $row[$key] !== null) {
+                                    $relatedIdKey = $key;
+                                    //log_message('debug', "parseNestedCollections: Found related ID key for '{$navPropName}': {$key}, value: {$row[$key]}");
+                                    break;
+                                }
+                            }
+                            
+                            if ($relatedIdKey !== null) {
+                                // Related entity exists - parse it
+                                $navPropColumns = $this->getEntityColumns($navPropReflection);
+                                $navPropData = [];
+                                $navPropData[$navPropPrimaryKeyColumn] = $row[$relatedIdKey];
+                                
+                                foreach ($navPropColumns as $navCol) {
+                                    if ($navCol === $navPropPrimaryKeyColumn) {
+                                        continue;
+                                    }
+                                    // Try multiple possible key patterns
+                                    $possibleNavKeys = [
+                                        $nestedSubqueryAlias . '_' . $navCol, // e.g., s1_SerialNumber
+                                        $nestedSubqueryAlias . '_' . $navCol . '0', // e.g., s1_SerialNumber0 (if aliased)
+                                    ];
+                                    
+                                    foreach ($possibleNavKeys as $navKey) {
+                                        if (isset($row[$navKey])) {
+                                            $navPropData[$navCol] = $row[$navKey];
+                                            break;
+                                        }
+                                    }
+                                }
+                                
+                                //log_message('debug', "parseNestedCollections: Created navPropData for '{$navPropName}': " . json_encode(array_keys($navPropData)));
+                                
+                                // Create related entity and set it to nested entity's navigation property
+                                $navPropEntity = $this->mapRowToEntity($navPropData, $navPropReflection);
+                                $navPropProperty = $nestedEntityReflection->getProperty($navPropName);
+                                $navPropProperty->setAccessible(true);
+                                $navPropProperty->setValue($nestedEntity, $navPropEntity);
+                                
+                                //log_message('debug', "parseNestedCollections: Set '{$navPropName}' reference navigation property in nested entity '{$nestedEntityType}'");
+                            } else {
+                                // Debug: log available keys
+                                $availableKeys = array_filter(array_keys($row), function($k) use ($nestedSubqueryAlias) {
+                                    return str_starts_with($k, $nestedSubqueryAlias . '_');
+                                });
+                                //log_message('debug', "parseNestedCollections: Could not find related ID key for '{$navPropName}'. Tried keys: " . implode(', ', $possibleIdKeys) . ". Available keys with prefix '{$nestedSubqueryAlias}_': " . implode(', ', array_slice($availableKeys, 0, 30)));
+                            }
                         }
                         
-                        $collection[] = $nestedJoinEntity;
+                        $collection[] = $nestedEntity;
                         $navProperty->setValue($relatedEntity, $collection);
+                    } else {
+                        // Many-to-many: use old logic (backward compatibility)
+                        $nestedJoinEntityType = $thenNavInfo['joinEntityType'];
+                        $nestedJoinEntityReflection = new ReflectionClass($nestedJoinEntityType);
+                        $nestedJoinColumns = $this->getEntityColumns($nestedJoinEntityReflection);
+                        $nestedRelatedEntityType = $thenNavInfo['entityType'];
+                        $nestedRelatedEntityReflection = new ReflectionClass($nestedRelatedEntityType);
+                        
+                        // Create nested join entity (e.g., AuthorizationOperationClaim)
+                        $nestedJoinEntityData = [];
+                        // Nested join entity columns: s1_Id1, s1_AuthorizationId0, s1_OperationClaimId
+                        foreach ($nestedJoinColumns as $col) {
+                            if ($col === 'Id') {
+                                $key = $nestedSubqueryAlias . '_Id' . $nestedSubqueryIndex; // e.g., s1_Id1
+                            } elseif (str_ends_with($col, 'Id') && $col !== 'Id') {
+                                // Check if this is the FK to parent entity
+                                $parentEntityShortName = (new ReflectionClass($relatedEntityType))->getShortName();
+                                if ($col === $parentEntityShortName . 'Id') {
+                                    $key = $nestedSubqueryAlias . '_' . $col . '0'; // e.g., s1_AuthorizationId0
+                                } else {
+                                    $key = $nestedSubqueryAlias . '_' . $col; // e.g., s1_OperationClaimId
+                                }
+                            } else {
+                                $key = $nestedSubqueryAlias . '_' . $col;
+                            }
+                            if (isset($row[$key])) {
+                                $nestedJoinEntityData[$col] = $row[$key];
+                            }
+                        }
+                        
+                        // Create nested related entity (e.g., OperationClaim)
+                        $nestedRelatedEntityData = [];
+                        // Nested related entity Id: s1_Id00
+                        $nestedRelatedIdKey = $nestedSubqueryAlias . '_Id00'; // e.g., s1_Id00
+                        if (isset($row[$nestedRelatedIdKey]) && $row[$nestedRelatedIdKey] !== null) {
+                            $nestedRelatedEntityData['Id'] = $row[$nestedRelatedIdKey];
+                            
+                            // Get nested related entity columns
+                            $nestedRelatedEntityProps = $nestedRelatedEntityReflection->getProperties();
+                            foreach ($nestedRelatedEntityProps as $prop) {
+                                $docComment = $prop->getDocComment();
+                                if ($docComment && (preg_match('/@var\s+[A-Za-z_][A-Za-z0-9_\\\\]*(?:\\\\[A-Za-z_][A-Za-z0-9_]*)*(\[\])?/', $docComment) || 
+                                    preg_match('/@var\s+array/', $docComment))) {
+                                    continue;
+                                }
+                                
+                                $colName = $this->getColumnNameFromProperty($nestedRelatedEntityReflection, $prop->getName());
+                                if ($colName && $colName !== 'Id') {
+                                    // Nested related entity columns: s1_Name0, s1_Description0
+                                    $key = $nestedSubqueryAlias . '_' . $colName . '0'; // e.g., s1_Name0
+                                    if (isset($row[$key])) {
+                                        $nestedRelatedEntityData[$colName] = $row[$key];
+                                    }
+                                }
+                            }
+                            
+                            // Create nested related entity
+                            $nestedRelatedEntity = $this->mapRowToEntity($nestedRelatedEntityData, $nestedRelatedEntityReflection);
+                            
+                            // Create nested join entity and set nested related entity
+                            $nestedJoinEntity = $this->mapRowToEntity($nestedJoinEntityData, $nestedJoinEntityReflection);
+                            
+                            // Find nested related entity navigation property name in nested join entity
+                            $nestedRelatedEntityShortName = (new ReflectionClass($nestedRelatedEntityType))->getShortName();
+                            $nestedRelatedNavPropertyName = $nestedRelatedEntityShortName; // e.g., OperationClaim
+                            
+                            if ($nestedJoinEntityReflection->hasProperty($nestedRelatedNavPropertyName)) {
+                                $nestedRelatedNavProperty = $nestedJoinEntityReflection->getProperty($nestedRelatedNavPropertyName);
+                                $nestedRelatedNavProperty->setAccessible(true);
+                                $nestedRelatedNavProperty->setValue($nestedJoinEntity, $nestedRelatedEntity);
+                            }
+                            
+                            $collection[] = $nestedJoinEntity;
+                            $navProperty->setValue($relatedEntity, $collection);
+                        }
                     }
                 }
             }
