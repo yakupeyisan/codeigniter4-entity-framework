@@ -3008,15 +3008,24 @@ class AdvancedQueryBuilder
         $referenceNavAliases = [];
         $this->referenceNavIndexes = []; // Store index for each navigation path for ORDER BY and parsing
         $referenceNavIndex = 0;
+        $usedAliases = []; // Track used table aliases to avoid conflicts
+        $usedSelectAliases = []; // Track used SELECT column aliases to avoid conflicts
         // Track thenInclude collection subqueries for reference navigations
         $referenceNavThenIncludeSubqueries = []; // [navPath => [subquery1, subquery2, ...]]
         foreach ($allNavigationPaths as $navPath) {
             $navInfo = $this->getNavigationInfo($navPath);
             //log_message('debug', "buildEfCoreStyleQuery: Navigation path '{$navPath}' - navInfo: " . ($navInfo ? json_encode($navInfo) : 'null'));
             if ($navInfo && !$navInfo['isCollection']) {
+                // Generate unique alias, checking for conflicts
                 $refAlias = $this->getTableAlias($navPath, $referenceNavIndex);
+                $aliasIndex = $referenceNavIndex;
+                while (in_array($refAlias, $usedAliases)) {
+                    $aliasIndex++;
+                    $refAlias = $this->getTableAlias($navPath, $aliasIndex);
+                }
+                $usedAliases[] = $refAlias;
                 $referenceNavAliases[$navPath] = $refAlias;
-                $this->referenceNavIndexes[$navPath] = $referenceNavIndex; // Store index for ORDER BY and parsing
+                $this->referenceNavIndexes[$navPath] = $referenceNavIndex; // Store original index for ORDER BY and parsing
                 //log_message('debug', "buildEfCoreStyleQuery: Added reference navigation alias '{$refAlias}' for '{$navPath}' (index: {$referenceNavIndex})");
                 $refEntityReflection = new ReflectionClass($navInfo['entityType']);
                 $refColumnsWithProperties = $this->getEntityColumnsWithProperties($refEntityReflection);
@@ -3104,6 +3113,13 @@ class AdvancedQueryBuilder
                         $nestedRefIndex = $referenceNavIndex * 100 + $thenIncludeCollectionIndex;
                         // Use thenInclude name (e.g., "CustomField") instead of full path to avoid conflicts
                         $thenRefAlias = $this->getTableAlias($thenIncludeNav, $nestedRefIndex);
+                        // Check for alias conflicts and generate unique alias if needed
+                        $tempAliasIndex = $nestedRefIndex;
+                        while (in_array($thenRefAlias, $usedAliases)) {
+                            $tempAliasIndex++;
+                            $thenRefAlias = $this->getTableAlias($thenIncludeNav, $tempAliasIndex);
+                        }
+                        $usedAliases[] = $thenRefAlias;
                         $thenRefEntityReflection = new ReflectionClass($thenNavInfo['entityType']);
                         $thenRefColumnsWithProperties = $this->getEntityColumnsWithProperties($thenRefEntityReflection);
                         $thenRefPrimaryKeyColumn = $this->getPrimaryKeyColumnName($thenRefEntityReflection);
@@ -3140,7 +3156,15 @@ class AdvancedQueryBuilder
                             if ($thenFirstCol && $col === $thenRefPrimaryKeyColumn) {
                                 // Use a unique index for nested reference navigation
                                 $nestedRefIndex = $referenceNavIndex * 100 + $thenIncludeCollectionIndex; // e.g., 0 -> 0, 1 -> 100, etc.
-                                $quotedIdAlias = $provider->escapeIdentifier("Id{$nestedRefIndex}");
+                                // Check for SELECT alias conflicts
+                                $selectAlias = "Id{$nestedRefIndex}";
+                                $tempNestedIndex = $nestedRefIndex;
+                                while (in_array($selectAlias, $usedSelectAliases)) {
+                                    $tempNestedIndex++;
+                                    $selectAlias = "Id{$tempNestedIndex}";
+                                }
+                                $usedSelectAliases[] = $selectAlias;
+                                $quotedIdAlias = $provider->escapeIdentifier($selectAlias);
                                 $mainSelectColumns[] = "{$quotedThenRefAlias}.{$quotedRefCol} AS {$quotedIdAlias}";
                                 $thenFirstCol = false;
                             } else {
@@ -3156,18 +3180,34 @@ class AdvancedQueryBuilder
                                         $sensitiveAttr->customMask
                                     );
                                     $nestedRefIndex = $referenceNavIndex * 100 + $thenIncludeCollectionIndex;
-                                    $quotedColAlias = $provider->escapeIdentifier("{$col}{$nestedRefIndex}");
+                                    // Check for SELECT alias conflicts
+                                    $selectAlias = "{$col}{$nestedRefIndex}";
+                                    $tempNestedIndex = $nestedRefIndex;
+                                    while (in_array($selectAlias, $usedSelectAliases)) {
+                                        $tempNestedIndex++;
+                                        $selectAlias = "{$col}{$tempNestedIndex}";
+                                    }
+                                    $usedSelectAliases[] = $selectAlias;
+                                    $quotedColAlias = $provider->escapeIdentifier($selectAlias);
                                     $mainSelectColumns[] = "({$maskedExpression}) AS {$quotedColAlias}";
                                 } else {
                                     $nestedRefIndex = $referenceNavIndex * 100 + $thenIncludeCollectionIndex;
-                                    $quotedColAlias = $provider->escapeIdentifier("{$col}{$nestedRefIndex}");
+                                    // Check for SELECT alias conflicts
+                                    $selectAlias = "{$col}{$nestedRefIndex}";
+                                    $tempNestedIndex = $nestedRefIndex;
+                                    while (in_array($selectAlias, $usedSelectAliases)) {
+                                        $tempNestedIndex++;
+                                        $selectAlias = "{$col}{$tempNestedIndex}";
+                                    }
+                                    $usedSelectAliases[] = $selectAlias;
+                                    $quotedColAlias = $provider->escapeIdentifier($selectAlias);
                                     $mainSelectColumns[] = "{$quotedThenRefAlias}.{$quotedRefCol} AS {$quotedColAlias}";
                                 }
                             }
                         }
                         
                         // Store nested reference navigation alias and index for JOIN and final SELECT
-                        $nestedNavPath = $navPath . '.' . $thenInclude;
+                        $nestedNavPath = $navPath . '.' . $thenIncludeNav;
                         $referenceNavAliases[$nestedNavPath] = $thenRefAlias;
                         $nestedRefIndex = $referenceNavIndex * 100 + $thenIncludeCollectionIndex;
                         $this->referenceNavIndexes[$nestedNavPath] = $nestedRefIndex; // Store index for final SELECT and parsing
@@ -3188,7 +3228,19 @@ class AdvancedQueryBuilder
                     $quotedRefCol = $provider->escapeIdentifier($col);
                     
                     if ($firstCol && $col === $refPrimaryKeyColumn) {
-                        $quotedIdAlias = $provider->escapeIdentifier("Id{$referenceNavIndex}");
+                        // Check for SELECT alias conflicts
+                        $selectAlias = "Id{$referenceNavIndex}";
+                        $tempSelectIndex = $referenceNavIndex;
+                        while (in_array($selectAlias, $usedSelectAliases)) {
+                            $tempSelectIndex++;
+                            $selectAlias = "Id{$tempSelectIndex}";
+                        }
+                        $usedSelectAliases[] = $selectAlias;
+                        // Update referenceNavIndex if it was changed to avoid conflicts
+                        if ($tempSelectIndex !== $referenceNavIndex) {
+                            $this->referenceNavIndexes[$navPath] = $tempSelectIndex;
+                        }
+                        $quotedIdAlias = $provider->escapeIdentifier($selectAlias);
                         $mainSelectColumns[] = "{$quotedRefAlias}.{$quotedRefCol} AS {$quotedIdAlias}";
                         $firstCol = false;
                     } else {
@@ -3204,11 +3256,29 @@ class AdvancedQueryBuilder
                                 $sensitiveAttr->customMask
                             );
                             // Alias masked columns to avoid conflicts
-                            $quotedColAlias = $provider->escapeIdentifier("{$col}{$referenceNavIndex}");
+                            // Check for SELECT alias conflicts
+                            $actualIndex = $this->referenceNavIndexes[$navPath] ?? $referenceNavIndex;
+                            $selectAlias = "{$col}{$actualIndex}";
+                            $tempSelectIndex = $actualIndex;
+                            while (in_array($selectAlias, $usedSelectAliases)) {
+                                $tempSelectIndex++;
+                                $selectAlias = "{$col}{$tempSelectIndex}";
+                            }
+                            $usedSelectAliases[] = $selectAlias;
+                            $quotedColAlias = $provider->escapeIdentifier($selectAlias);
                             $mainSelectColumns[] = "({$maskedExpression}) AS {$quotedColAlias}";
                         } else {
                             // Alias all columns to avoid conflicts with same column names from different navigations
-                            $quotedColAlias = $provider->escapeIdentifier("{$col}{$referenceNavIndex}");
+                            // Check for SELECT alias conflicts
+                            $actualIndex = $this->referenceNavIndexes[$navPath] ?? $referenceNavIndex;
+                            $selectAlias = "{$col}{$actualIndex}";
+                            $tempSelectIndex = $actualIndex;
+                            while (in_array($selectAlias, $usedSelectAliases)) {
+                                $tempSelectIndex++;
+                                $selectAlias = "{$col}{$tempSelectIndex}";
+                            }
+                            $usedSelectAliases[] = $selectAlias;
+                            $quotedColAlias = $provider->escapeIdentifier($selectAlias);
                             $mainSelectColumns[] = "{$quotedRefAlias}.{$quotedRefCol} AS {$quotedColAlias}";
                         }
                     }
@@ -3466,12 +3536,93 @@ class AdvancedQueryBuilder
                             if ($navInfo && !$navInfo['isCollection']) {
                                 // Reference navigation property - add to requiredJoins
                                 $refTableName = $this->context->getTableName($navInfo['entityType']);
+                                
+                                // If not already in referenceNavAliases, create alias, index, and add SELECT columns
+                                if (!isset($referenceNavAliases[$navPath])) {
+                                    // Add to allNavigationPaths so JOIN will be added
+                                    if (!in_array($navPath, $allNavigationPaths)) {
+                                        $allNavigationPaths[] = $navPath;
+                                    }
+                                    
+                                    // Generate unique alias, checking for conflicts
+                                    $refAlias = $this->getTableAlias($navPath, $referenceNavIndex);
+                                    $aliasIndex = $referenceNavIndex;
+                                    while (in_array($refAlias, $usedAliases)) {
+                                        $aliasIndex++;
+                                        $refAlias = $this->getTableAlias($navPath, $aliasIndex);
+                                    }
+                                    $usedAliases[] = $refAlias;
+                                    $referenceNavAliases[$navPath] = $refAlias;
+                                    $this->referenceNavIndexes[$navPath] = $referenceNavIndex; // Store index for parsing
+                                    
+                                    // Add SELECT columns for this navigation property
+                                    $refEntityReflection = new ReflectionClass($navInfo['entityType']);
+                                    $refColumnsWithProperties = $this->getEntityColumnsWithProperties($refEntityReflection);
+                                    $refPrimaryKeyColumn = $this->getPrimaryKeyColumnName($refEntityReflection);
+                                    $quotedRefAlias = $provider->escapeIdentifier($refAlias);
+                                    
+                                    $firstCol = true;
+                                    foreach ($refColumnsWithProperties as $colInfo) {
+                                        $col = $colInfo['column'];
+                                        $property = $refEntityReflection->getProperty($colInfo['property']);
+                                        $sensitiveAttributes = $property->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\SensitiveValue::class);
+                                        $quotedRefCol = $provider->escapeIdentifier($col);
+                                        
+                                        if ($firstCol && $col === $refPrimaryKeyColumn) {
+                                            // Check for SELECT alias conflicts
+                                            $selectAlias = "Id{$referenceNavIndex}";
+                                            $tempSelectIndex = $referenceNavIndex;
+                                            while (in_array($selectAlias, $usedSelectAliases)) {
+                                                $tempSelectIndex++;
+                                                $selectAlias = "Id{$tempSelectIndex}";
+                                            }
+                                            $usedSelectAliases[] = $selectAlias;
+                                            // Update referenceNavIndex if it was changed to avoid conflicts
+                                            if ($tempSelectIndex !== $referenceNavIndex) {
+                                                $this->referenceNavIndexes[$navPath] = $tempSelectIndex;
+                                            }
+                                            $quotedIdAlias = $provider->escapeIdentifier($selectAlias);
+                                            $mainSelectColumns[] = "{$quotedRefAlias}.{$quotedRefCol} AS {$quotedIdAlias}";
+                                            $firstCol = false;
+                                        } else {
+                                            // Check for SELECT alias conflicts
+                                            $actualIndex = $this->referenceNavIndexes[$navPath] ?? $referenceNavIndex;
+                                            $selectAlias = "{$col}{$actualIndex}";
+                                            $tempSelectIndex = $actualIndex;
+                                            while (in_array($selectAlias, $usedSelectAliases)) {
+                                                $tempSelectIndex++;
+                                                $selectAlias = "{$col}{$tempSelectIndex}";
+                                            }
+                                            $usedSelectAliases[] = $selectAlias;
+                                            
+                                            if (!empty($sensitiveAttributes) && !$this->isSensitive) {
+                                                $sensitiveAttr = $sensitiveAttributes[0]->newInstance();
+                                                $columnRef = "{$quotedRefAlias}.{$quotedRefCol}";
+                                                $maskedExpression = $provider->getMaskingSql(
+                                                    $columnRef,
+                                                    $sensitiveAttr->maskChar,
+                                                    $sensitiveAttr->visibleStart,
+                                                    $sensitiveAttr->visibleEnd,
+                                                    $sensitiveAttr->customMask
+                                                );
+                                                $quotedColAlias = $provider->escapeIdentifier($selectAlias);
+                                                $mainSelectColumns[] = "({$maskedExpression}) AS {$quotedColAlias}";
+                                            } else {
+                                                $quotedColAlias = $provider->escapeIdentifier($selectAlias);
+                                                $mainSelectColumns[] = "{$quotedRefAlias}.{$quotedRefCol} AS {$quotedColAlias}";
+                                            }
+                                        }
+                                    }
+                                    
+                                    $referenceNavIndex++;
+                                }
+                                
                                 $this->requiredJoins[$navPath] = [
                                     'table' => $refTableName,
-                                    'alias' => $referenceNavAliases[$navPath] ?? $navPath,
+                                    'alias' => $referenceNavAliases[$navPath],
                                     'entityType' => $navInfo['entityType']
                                 ];
-                                //log_message('debug', "buildEfCoreStyleQuery: Added requiredJoins for ORDER BY navigation '{$navPath}': table={$refTableName}, alias={$this->requiredJoins[$navPath]['alias']}");
+                                //log_message('debug', "buildEfCoreStyleQuery: Added requiredJoins for ORDER BY navigation '{$navPath}': table={$refTableName}, alias={$this->requiredJoins[$navPath]['alias']}, index={$this->referenceNavIndexes[$navPath]}");
                             } else if ($navInfo && $navInfo['isCollection']) {
                                 // Collection navigation property - will be handled via collection subquery
                                 // We'll need to find the collection subquery later in convertOrderByToSql
@@ -3489,22 +3640,59 @@ class AdvancedQueryBuilder
                     $staticVariables = $reflection->getStaticVariables();
                     $isCollectionNav = false;
                     
-                    // Check for navigation property path in static variables (e.g., "Department.DepartmentName")
+                    // Detect navigation paths from selector
+                    $navigationPaths = $this->detectNavigationPaths($orderBy['selector']);
+                    foreach ($navigationPaths as $navPath) {
+                        $navInfo = $this->getNavigationInfo($navPath);
+                        if ($navInfo && $navInfo['isCollection']) {
+                            $isCollectionNav = true;
+                            //log_message('debug', "buildEfCoreStyleQuery: Skipping collection navigation ORDER BY '{$navPath}' in main subquery (detected via detectNavigationPaths)");
+                            break;
+                        }
+                    }
+
+                    // Check for navigation property path in static variables (e.g., "EmployeeDepartments.Department.DepartmentName")
                     if (isset($staticVariables['field']) && is_string($staticVariables['field']) && strpos($staticVariables['field'], '.') !== false) {
-                        $parts = explode('.', $staticVariables['field'], 2);
+                        $parts = explode('.', $staticVariables['field']);
                         $firstNavProp = $parts[0];
-                        
-                        // Check if firstNavProp is accessed via a collection navigation property
-                        foreach ($allNavigationPaths as $navPath) {
-                            $navInfo = $this->getNavigationInfo($navPath);
-                            if ($navInfo && $navInfo['isCollection']) {
-                                // Check if firstNavProp is a navigation property in the collection entity
-                                $thenNavInfo = $this->getNavigationInfoForEntity($firstNavProp, $navInfo['entityType']);
-                                if ($thenNavInfo) {
-                                    $isCollectionNav = true;
-                                    //log_message('debug', "buildEfCoreStyleQuery: Skipping collection navigation ORDER BY '{$staticVariables['field']}' in main subquery (will be used in final query)");
+
+                        // If the first part is a collection navigation property of the main entity, skip ORDER BY in main subquery
+                        $firstNavInfo = $this->getNavigationInfo($firstNavProp);
+                        if ($firstNavInfo && $firstNavInfo['isCollection']) {
+                            $isCollectionNav = true;
+                        }
+
+                        // Additionally check if firstNavProp is reached through any collection include/thenInclude
+                        if (!$isCollectionNav) {
+                            foreach ($allNavigationPaths as $navPath) {
+                                $navInfo = $this->getNavigationInfo($navPath);
+                                if ($navInfo && $navInfo['isCollection']) {
+                                    $thenNavInfo = $this->getNavigationInfoForEntity($firstNavProp, $navInfo['entityType']);
+                                    if ($thenNavInfo) {
+                                        $isCollectionNav = true;
+                                        //log_message('debug', "buildEfCoreStyleQuery: Skipping collection navigation ORDER BY '{$staticVariables['field']}' in main subquery (via collection '{$navPath}')");
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Deep check across the navigation path to see if any segment is a collection
+                        if (!$isCollectionNav) {
+                            $currentEntityType = $this->entityType;
+                            foreach ($parts as $segment) {
+                                $navInfo = $this->getNavigationInfoForEntity($segment, $currentEntityType);
+                                if (!$navInfo) {
+                                    // Break out if we cannot resolve further
                                     break;
                                 }
+                                if ($navInfo['isCollection']) {
+                                    $isCollectionNav = true;
+                                    //log_message('debug', "buildEfCoreStyleQuery: Deep path collection detected '{$staticVariables['field']}' (segment '{$segment}') - skipping in main subquery");
+                                    break;
+                                }
+                                // Move deeper along the path
+                                $currentEntityType = $navInfo['entityType'];
                             }
                         }
                     }
@@ -3691,8 +3879,9 @@ class AdvancedQueryBuilder
             
             // For top-level navigations, only include if added to main subquery
             // For nested navigations, they're always in main subquery (added during thenInclude processing)
-            if (!$isNested && !in_array($navPath, $allNavigationPaths)) {
-                continue; // Skip if not in main subquery
+            // Also include navigation properties from requiredJoins (for ORDER BY, etc.)
+            if (!$isNested && !in_array($navPath, $allNavigationPaths) && !isset($this->requiredJoins[$navPath])) {
+                continue; // Skip if not in main subquery and not in requiredJoins
             }
             
             // Get navigation info - for nested navigations, use getNavigationInfoForEntity
@@ -3716,9 +3905,12 @@ class AdvancedQueryBuilder
             $refColumns = $this->getEntityColumns($refEntityReflection);
             $refPrimaryKeyColumn = $this->getPrimaryKeyColumnName($refEntityReflection);
             
-            // For nested navigations, get index from referenceNavIndexes (stored during main subquery building)
-            if ($isNested) {
-                $refIndex = isset($this->referenceNavIndexes[$navPath]) ? $this->referenceNavIndexes[$navPath] : 0;
+            // Get index from referenceNavIndexes if available (for ORDER BY navigation properties, etc.)
+            // Otherwise use the current refIndex for top-level navigations
+            if (isset($this->referenceNavIndexes[$navPath])) {
+                $refIndex = $this->referenceNavIndexes[$navPath];
+            } elseif ($isNested) {
+                $refIndex = 0; // Fallback for nested navigations
             }
             
             $firstCol = true;
@@ -3734,8 +3926,9 @@ class AdvancedQueryBuilder
                 }
             }
             
-            // Only increment refIndex for top-level navigations
-            if (!$isNested) {
+            // Only increment refIndex for top-level navigations that don't have a stored index
+            // (i.e., not from ORDER BY or other special cases)
+            if (!$isNested && !isset($this->referenceNavIndexes[$navPath])) {
                 $refIndex++;
             }
         }
@@ -3975,35 +4168,325 @@ class AdvancedQueryBuilder
                 $collectionSubqueryAlias = null;
                 $collectionColumnName = null;
                 
-                // Check for navigation property path in static variables (e.g., "Department.DepartmentName")
+                // Check for navigation property path in static variables (e.g., "Department.DepartmentName" or "EmployeeDepartments.Department.DepartmentName" or "Employee.EmployeeDepartments.Department.DepartmentName")
                 if (isset($staticVariables['field']) && is_string($staticVariables['field']) && strpos($staticVariables['field'], '.') !== false) {
-                    $parts = explode('.', $staticVariables['field'], 2);
-                    $firstNavProp = $parts[0];
-                    $nestedProp = $parts[1];
+                    $parts = explode('.', $staticVariables['field']);
                     
-                    // Check if firstNavProp is accessed via a collection navigation property
-                    // e.g., "Department.DepartmentName" where "Department" is in "EmployeeDepartments" collection
-                    // We need to find which collection subquery contains this navigation
-                    foreach ($collectionSubqueries as $idx => $subquery) {
-                        $collectionNavPath = $subquery['navigation'];
-                        $collectionNavInfo = $this->getNavigationInfo($collectionNavPath);
-                        
-                        if ($collectionNavInfo && $collectionNavInfo['isCollection']) {
-                            // Check if firstNavProp is a navigation property in the collection entity
-                            $thenNavInfo = $this->getNavigationInfoForEntity($firstNavProp, $collectionNavInfo['entityType']);
-                            if ($thenNavInfo && !$thenNavInfo['isCollection']) {
-                                // Found it! firstNavProp is a reference navigation in the collection entity
-                                // Now get the nested property column name
-                                $thenEntityReflection = new \ReflectionClass($thenNavInfo['entityType']);
-                                $collectionColumnName = $this->getColumnNameFromProperty($thenEntityReflection, $nestedProp);
+                    // Check if first part is the main entity name (e.g., "Employee" in "Employee.EmployeeDepartments...")
+                    // If so, skip it and start from the second part
+                    $startIndex = 0;
+                    $mainEntityReflection = new \ReflectionClass($this->entityType);
+                    $mainEntityName = $mainEntityReflection->getShortName();
+                    if (count($parts) > 1 && $parts[0] === $mainEntityName) {
+                        $startIndex = 1; // Skip entity name
+                    }
+                    
+                    $firstNavProp = $parts[$startIndex] ?? null;
+                    $nestedRest = $firstNavProp !== null ? implode('.', array_slice($parts, $startIndex + 1)) : ''; // remaining path
+
+                    // Case 1: firstNavProp itself is a collection navigation on main entity (e.g., EmployeeDepartments)
+                    $firstNavInfo = $firstNavProp !== null ? $this->getNavigationInfo($firstNavProp) : null;
+                    if ($firstNavInfo && $firstNavInfo['isCollection']) {
+                        foreach ($collectionSubqueries as $idx => $subquery) {
+                            if ($subquery['navigation'] === $firstNavProp) {
                                 $collectionSubqueryAlias = 's' . $idx;
-                                $isCollectionNav = true;
-                                //log_message('debug', "buildEfCoreStyleQuery: Found collection navigation ORDER BY: {$firstNavProp}.{$nestedProp} via collection '{$collectionNavPath}' -> collection subquery alias: {$collectionSubqueryAlias}, column: {$collectionColumnName}");
-                                break;
+                                // If nestedRest still contains a dot, handle reference navigation inside collection entity
+                                $collectionEntityReflection = new \ReflectionClass($firstNavInfo['entityType']);
+                                if (strpos($nestedRest, '.') !== false) {
+                                    $nestedParts = explode('.', $nestedRest);
+                                    $secondNavProp = $nestedParts[0];
+                                    $finalProp = $nestedParts[1] ?? null;
+                                    $secondNavInfo = $this->getNavigationInfoForEntity($secondNavProp, $firstNavInfo['entityType']);
+                                    if ($secondNavInfo && !$secondNavInfo['isCollection'] && $finalProp !== null) {
+                                        $secondEntityReflection = new \ReflectionClass($secondNavInfo['entityType']);
+                                        $collectionColumnName = $this->getColumnNameFromProperty($secondEntityReflection, $finalProp);
+                                    } elseif ($finalProp === null) {
+                                        // Path like EmployeeDepartments.DepartmentName
+                                        $collectionColumnName = $this->getColumnNameFromProperty($collectionEntityReflection, $secondNavProp);
+                                    }
+                                } else {
+                                    // Path like EmployeeDepartments.SomeProperty
+                                    $collectionColumnName = $this->getColumnNameFromProperty($collectionEntityReflection, $nestedRest);
+                                }
+                                if ($collectionColumnName !== null) {
+                                    $isCollectionNav = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    // Case 2a: Entity name was skipped, and firstNavProp is a collection nav on a reference entity (e.g., Employee.EmployeeDepartments.Department.DepartmentName)
+                    // OR: firstNavProp is a reference nav, and nestedRest contains a collection nav
+                    if (!$isCollectionNav && $firstNavProp !== null) {
+                        $entityTypeToCheck = $this->entityType;
+                        $currentPath = $firstNavProp;
+                        $remainingPath = $nestedRest;
+                        
+                        // If entity name was skipped, check if it's a reference navigation
+                        if ($startIndex > 0) {
+                            $skippedEntityName = $parts[0];
+                            $skippedNavInfo = $this->getNavigationInfo($skippedEntityName);
+                            if ($skippedNavInfo && !$skippedNavInfo['isCollection']) {
+                                // Skipped entity name is a reference navigation (e.g., "Employee")
+                                $entityTypeToCheck = $skippedNavInfo['entityType'];
+                            }
+                        } else {
+                            // Entity name was not skipped, but firstNavProp might be a reference navigation on main entity
+                            // Check if firstNavProp is a reference navigation on main entity
+                            $firstNavInfoOnMain = $this->getNavigationInfo($firstNavProp);
+                            if ($firstNavInfoOnMain && !$firstNavInfoOnMain['isCollection']) {
+                                // firstNavProp is a reference navigation on main entity (e.g., "Employee" on "Card")
+                                $entityTypeToCheck = $firstNavInfoOnMain['entityType'];
+                                // Now check if remainingPath starts with a collection navigation on that reference entity
+                                if (!empty($remainingPath)) {
+                                    $remainingParts = explode('.', $remainingPath);
+                                    $secondNavProp = $remainingParts[0] ?? null;
+                                    if ($secondNavProp !== null) {
+                                        $secondNavInfo = $this->getNavigationInfoForEntity($secondNavProp, $entityTypeToCheck);
+                                        if ($secondNavInfo && $secondNavInfo['isCollection']) {
+                                            // Found collection navigation (e.g., "EmployeeDepartments" on "Employee")
+                                            foreach ($collectionSubqueries as $idx => $subquery) {
+                                                // Match subquery navigation - it might be just "EmployeeDepartments" or "Employee.EmployeeDepartments"
+                                                $subqueryNavParts = explode('.', $subquery['navigation']);
+                                                $subqueryNavLastPart = end($subqueryNavParts);
+                                                if ($subqueryNavLastPart === $secondNavProp || $subquery['navigation'] === $secondNavProp || str_ends_with($subquery['navigation'], '.' . $secondNavProp)) {
+                                                    $collectionSubqueryAlias = 's' . $idx;
+                                                    $collectionColumnName = null; // Initialize
+                                                    // Resolve remaining path after secondNavProp (e.g., "DepartmentName" from "Department.DepartmentName")
+                                                    $finalRemainingPath = implode('.', array_slice($remainingParts, 1));
+                                                    if (!empty($finalRemainingPath)) {
+                                                        $collectionEntityReflection = new \ReflectionClass($secondNavInfo['entityType']);
+                                                        if (strpos($finalRemainingPath, '.') !== false) {
+                                                            $finalParts = explode('.', $finalRemainingPath);
+                                                            $thirdNavProp = $finalParts[0];
+                                                            $finalProp = $finalParts[1] ?? null;
+                                                            $thirdNavInfo = $this->getNavigationInfoForEntity($thirdNavProp, $secondNavInfo['entityType']);
+                                                            if ($thirdNavInfo && !$thirdNavInfo['isCollection'] && $finalProp !== null) {
+                                                                $thirdEntityReflection = new \ReflectionClass($thirdNavInfo['entityType']);
+                                                                $collectionColumnName = $this->getColumnNameFromProperty($thirdEntityReflection, $finalProp);
+                                                            } elseif ($finalProp === null) {
+                                                                $collectionColumnName = $this->getColumnNameFromProperty($collectionEntityReflection, $thirdNavProp);
+                                                            }
+                                                        } else {
+                                                            $collectionColumnName = $this->getColumnNameFromProperty($collectionEntityReflection, $finalRemainingPath);
+                                                        }
+                                                    }
+                                                    if ($collectionColumnName !== null) {
+                                                        $isCollectionNav = true;
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // Check if currentPath is a collection navigation in entityTypeToCheck
+                        $currentNavInfo = $this->getNavigationInfoForEntity($currentPath, $entityTypeToCheck);
+                        if ($currentNavInfo && $currentNavInfo['isCollection']) {
+                            // Found collection navigation
+                            foreach ($collectionSubqueries as $idx => $subquery) {
+                                if ($subquery['navigation'] === $currentPath || str_starts_with($subquery['navigation'], $currentPath . '.')) {
+                                    $collectionSubqueryAlias = 's' . $idx;
+                                    $collectionColumnName = null; // Initialize
+                                    // Resolve remainingPath (e.g., "Department.DepartmentName")
+                                    if (!empty($remainingPath)) {
+                                        $collectionEntityReflection = new \ReflectionClass($currentNavInfo['entityType']);
+                                        if (strpos($remainingPath, '.') !== false) {
+                                            $remainingParts = explode('.', $remainingPath);
+                                            $secondNavProp = $remainingParts[0];
+                                            $finalProp = $remainingParts[1] ?? null;
+                                            $secondNavInfo = $this->getNavigationInfoForEntity($secondNavProp, $currentNavInfo['entityType']);
+                                            if ($secondNavInfo && !$secondNavInfo['isCollection'] && $finalProp !== null) {
+                                                $secondEntityReflection = new \ReflectionClass($secondNavInfo['entityType']);
+                                                $collectionColumnName = $this->getColumnNameFromProperty($secondEntityReflection, $finalProp);
+                                            } elseif ($finalProp === null) {
+                                                $collectionColumnName = $this->getColumnNameFromProperty($collectionEntityReflection, $secondNavProp);
+                                            }
+                                        } else {
+                                            $collectionColumnName = $this->getColumnNameFromProperty($collectionEntityReflection, $remainingPath);
+                                        }
+                                    }
+                                    if ($collectionColumnName !== null) {
+                                        $isCollectionNav = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        } elseif ($currentNavInfo && !$currentNavInfo['isCollection'] && !empty($remainingPath) && !$isCollectionNav) {
+                            // currentPath is a reference navigation, check if remainingPath contains a collection nav
+                            $remainingParts = explode('.', $remainingPath);
+                            $secondNavProp = $remainingParts[0] ?? null;
+                            if ($secondNavProp !== null) {
+                                $secondNavInfo = $this->getNavigationInfoForEntity($secondNavProp, $currentNavInfo['entityType']);
+                                if ($secondNavInfo && $secondNavInfo['isCollection']) {
+                                    // Found collection navigation in remainingPath
+                                    foreach ($collectionSubqueries as $idx => $subquery) {
+                                        // Match subquery navigation - it might be just the collection nav name or include parent path
+                                        $subqueryNavParts = explode('.', $subquery['navigation']);
+                                        $subqueryNavLastPart = end($subqueryNavParts);
+                                        if ($subqueryNavLastPart === $secondNavProp || $subquery['navigation'] === $secondNavProp || str_ends_with($subquery['navigation'], '.' . $secondNavProp)) {
+                                            $collectionSubqueryAlias = 's' . $idx;
+                                            $collectionColumnName = null; // Initialize
+                                            // Resolve remaining path after secondNavProp (e.g., "DepartmentName" from "Department.DepartmentName")
+                                            $finalRemainingPath = implode('.', array_slice($remainingParts, 1));
+                                            if (!empty($finalRemainingPath)) {
+                                                $collectionEntityReflection = new \ReflectionClass($secondNavInfo['entityType']);
+                                                if (strpos($finalRemainingPath, '.') !== false) {
+                                                    $finalParts = explode('.', $finalRemainingPath);
+                                                    $thirdNavProp = $finalParts[0];
+                                                    $finalProp = $finalParts[1] ?? null;
+                                                    $thirdNavInfo = $this->getNavigationInfoForEntity($thirdNavProp, $secondNavInfo['entityType']);
+                                                    if ($thirdNavInfo && !$thirdNavInfo['isCollection'] && $finalProp !== null) {
+                                                        $thirdEntityReflection = new \ReflectionClass($thirdNavInfo['entityType']);
+                                                        $collectionColumnName = $this->getColumnNameFromProperty($thirdEntityReflection, $finalProp);
+                                                    } elseif ($finalProp === null) {
+                                                        $collectionColumnName = $this->getColumnNameFromProperty($collectionEntityReflection, $thirdNavProp);
+                                                    }
+                                                } else {
+                                                    $collectionColumnName = $this->getColumnNameFromProperty($collectionEntityReflection, $finalRemainingPath);
+                                                }
+                                            }
+                                            if ($collectionColumnName !== null) {
+                                                $isCollectionNav = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Case 2c: firstNavProp is a reference nav on main entity, and nestedRest contains a collection nav
+                    if (!$isCollectionNav && $firstNavProp !== null && !empty($nestedRest)) {
+                        $firstNavInfo = $this->getNavigationInfo($firstNavProp);
+                        if ($firstNavInfo && !$firstNavInfo['isCollection']) {
+                            // firstNavProp is a reference navigation on main entity
+                            // Check if nestedRest starts with a collection navigation property
+                            $nestedParts = explode('.', $nestedRest);
+                            $secondNavProp = $nestedParts[0] ?? null;
+                            if ($secondNavProp !== null) {
+                                $secondNavInfo = $this->getNavigationInfoForEntity($secondNavProp, $firstNavInfo['entityType']);
+                                if ($secondNavInfo && $secondNavInfo['isCollection']) {
+                                    // Found collection navigation in nestedRest
+                                    foreach ($collectionSubqueries as $idx => $subquery) {
+                                        if ($subquery['navigation'] === $secondNavProp || str_starts_with($subquery['navigation'], $secondNavProp . '.')) {
+                                            $collectionSubqueryAlias = 's' . $idx;
+                                            $collectionColumnName = null; // Initialize
+                                            // Resolve remaining path (e.g., "Department.DepartmentName")
+                                            $remainingPath = implode('.', array_slice($nestedParts, 1));
+                                            if (!empty($remainingPath)) {
+                                                $collectionEntityReflection = new \ReflectionClass($secondNavInfo['entityType']);
+                                                if (strpos($remainingPath, '.') !== false) {
+                                                    $remainingParts = explode('.', $remainingPath);
+                                                    $thirdNavProp = $remainingParts[0];
+                                                    $finalProp = $remainingParts[1] ?? null;
+                                                    $thirdNavInfo = $this->getNavigationInfoForEntity($thirdNavProp, $secondNavInfo['entityType']);
+                                                    if ($thirdNavInfo && !$thirdNavInfo['isCollection'] && $finalProp !== null) {
+                                                        $thirdEntityReflection = new \ReflectionClass($thirdNavInfo['entityType']);
+                                                        $collectionColumnName = $this->getColumnNameFromProperty($thirdEntityReflection, $finalProp);
+                                                    } elseif ($finalProp === null) {
+                                                        $collectionColumnName = $this->getColumnNameFromProperty($collectionEntityReflection, $thirdNavProp);
+                                                    }
+                                                } else {
+                                                    $collectionColumnName = $this->getColumnNameFromProperty($collectionEntityReflection, $remainingPath);
+                                                }
+                                            }
+                                            if ($collectionColumnName !== null) {
+                                                $isCollectionNav = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Case 2d: firstNavProp is a reference nav inside a collection include (e.g., Department in EmployeeDepartments)
+                    if (!$isCollectionNav && $firstNavProp !== null) {
+                        foreach ($collectionSubqueries as $idx => $subquery) {
+                            $collectionNavPath = $subquery['navigation'];
+                            $collectionNavInfo = $this->getNavigationInfo($collectionNavPath);
+                            
+                            if ($collectionNavInfo && $collectionNavInfo['isCollection']) {
+                                $thenNavInfo = $this->getNavigationInfoForEntity($firstNavProp, $collectionNavInfo['entityType']);
+                                if ($thenNavInfo && !$thenNavInfo['isCollection']) {
+                                    // Resolve nestedRest columns
+                                    $thenEntityReflection = new \ReflectionClass($thenNavInfo['entityType']);
+                                    if (strpos($nestedRest, '.') !== false) {
+                                        $nestedParts = explode('.', $nestedRest);
+                                        $secondNavProp = $nestedParts[0];
+                                        $finalProp = $nestedParts[1] ?? null;
+                                        $nestedThenNavInfo = $this->getNavigationInfoForEntity($secondNavProp, $thenNavInfo['entityType']);
+                                        if ($nestedThenNavInfo && !$nestedThenNavInfo['isCollection'] && $finalProp !== null) {
+                                            $nestedThenEntityReflection = new \ReflectionClass($nestedThenNavInfo['entityType']);
+                                            $collectionColumnName = $this->getColumnNameFromProperty($nestedThenEntityReflection, $finalProp);
+                                        } elseif ($finalProp === null) {
+                                            $collectionColumnName = $this->getColumnNameFromProperty($thenEntityReflection, $secondNavProp);
+                                        }
+                                    } else {
+                                        $collectionColumnName = $this->getColumnNameFromProperty($thenEntityReflection, $nestedRest);
+                                    }
+                                    $collectionSubqueryAlias = 's' . $idx;
+                                    if ($collectionColumnName !== null) {
+                                        $isCollectionNav = true;
+                                        break;
+                                    }
+                                }
                             }
                         }
                     }
                 }
+                    
+                    // Case 2e: Fallback - scan the full path for any collection subquery navigation name and resolve using subquery metadata
+                    if (!$isCollectionNav && isset($staticVariables['field']) && is_string($staticVariables['field']) && strpos($staticVariables['field'], '.') !== false) {
+                        $fieldPathParts = explode('.', $staticVariables['field']);
+                        foreach ($collectionSubqueries as $idx => $subquery) {
+                            $navName = explode('.', $subquery['navigation'])[0];
+                            $pos = array_search($navName, $fieldPathParts, true);
+                            if ($pos !== false) {
+                                // Found collection navigation name in path
+                                $collectionSubqueryAlias = 's' . $idx;
+                                $collectionColumnName = null;
+                                $collectionEntityType = $subquery['entityType'] ?? null;
+                                
+                                $remainingParts = array_slice($fieldPathParts, $pos + 1); // parts after the collection nav
+                                if ($collectionEntityType !== null) {
+                                    $collectionEntityReflection = new \ReflectionClass($collectionEntityType);
+                                    if (!empty($remainingParts)) {
+                                        // If next part is a reference navigation, resolve further
+                                        $nextProp = $remainingParts[0];
+                                        $nextNavInfo = $this->getNavigationInfoForEntity($nextProp, $collectionEntityType);
+                                        if ($nextNavInfo && !$nextNavInfo['isCollection']) {
+                                            $nextEntityReflection = new \ReflectionClass($nextNavInfo['entityType']);
+                                            $finalProp = $remainingParts[1] ?? null;
+                                            if ($finalProp !== null) {
+                                                $collectionColumnName = $this->getColumnNameFromProperty($nextEntityReflection, $finalProp);
+                                            } else {
+                                                $collectionColumnName = $this->getColumnNameFromProperty($collectionEntityReflection, $nextProp);
+                                            }
+                                        } else {
+                                            // Direct property on collection entity
+                                            $collectionColumnName = $this->getColumnNameFromProperty($collectionEntityReflection, $nextProp);
+                                        }
+                                    } else {
+                                        // No remaining parts: fallback to primary key or Id0 alias if present
+                                        $collectionColumnName = 'Id0';
+                                    }
+                                }
+                                
+                                if ($collectionColumnName !== null) {
+                                    $isCollectionNav = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
                 
                 if ($isCollectionNav && $collectionSubqueryAlias && $collectionColumnName) {
                     // Use collection subquery alias and column
@@ -4019,8 +4502,72 @@ class AdvancedQueryBuilder
                     $orderByColumns[] = $orderBySql;
                 } else {
                     // Regular ORDER BY - use convertOrderByToSql
+                    // But first check if it's actually a collection navigation that we missed
+                    if (isset($staticVariables['field']) && is_string($staticVariables['field']) && strpos($staticVariables['field'], '.') !== false) {
+                        $parts = explode('.', $staticVariables['field']);
+                        $firstNavProp = $parts[0];
+                        $firstNavInfo = $this->getNavigationInfo($firstNavProp);
+                        if ($firstNavInfo && $firstNavInfo['isCollection']) {
+                            // This is a collection navigation - we should have caught it above, but try again
+                            $resolvedCollectionOrderBy = false;
+                            foreach ($collectionSubqueries as $idx => $subquery) {
+                                if ($subquery['navigation'] === $firstNavProp || str_starts_with($subquery['navigation'], $firstNavProp . '.')) {
+                                    $collectionSubqueryAlias = 's' . $idx;
+                                    // Try to find the column in the collection subquery
+                                    $nestedRest = implode('.', array_slice($parts, 1));
+                                    $collectionEntityReflection = new \ReflectionClass($firstNavInfo['entityType']);
+                                    if (strpos($nestedRest, '.') !== false) {
+                                        $nestedParts = explode('.', $nestedRest);
+                                        $secondNavProp = $nestedParts[0];
+                                        $finalProp = $nestedParts[1] ?? null;
+                                        $secondNavInfo = $this->getNavigationInfoForEntity($secondNavProp, $firstNavInfo['entityType']);
+                                        if ($secondNavInfo && !$secondNavInfo['isCollection'] && $finalProp !== null) {
+                                            $secondEntityReflection = new \ReflectionClass($secondNavInfo['entityType']);
+                                            $collectionColumnName = $this->getColumnNameFromProperty($secondEntityReflection, $finalProp);
+                                            if ($collectionColumnName !== null) {
+                                                $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
+                                                $quotedAlias = $provider->escapeIdentifier($collectionSubqueryAlias);
+                                                $quotedColumn = $provider->escapeIdentifier($collectionColumnName);
+                                                $direction = strtoupper($orderBy['direction']);
+                                                if ($direction !== 'ASC' && $direction !== 'DESC') {
+                                                    $direction = 'ASC';
+                                                }
+                                                $orderBySql = "{$quotedAlias}.{$quotedColumn} {$direction}";
+                                                $orderByColumns[] = $orderBySql;
+                                                $resolvedCollectionOrderBy = true;
+                                                break; // resolved
+                                            }
+                                        }
+                                    }
+                                    // If collection navigation but we cannot resolve column, skip to avoid invalid main alias
+                                    $resolvedCollectionOrderBy = true;
+                                    break;
+                                }
+                            }
+                            if ($resolvedCollectionOrderBy) {
+                                continue; // Skip convertOrderByToSql
+                            }
+                            // Could not resolve a collection navigation path to a collection subquery column - skip to avoid invalid [s]. path
+                            continue;
+                        }
+                    }
+                    
                     $orderBySql = $this->convertOrderByToSql($orderBy['selector'], $orderBy['direction'], $subqueryAlias);
                     if ($orderBySql) {
+                        
+                        // Also check with regex pattern for any collection navigation property
+                        // Pattern: [alias].[CollectionNavProp.Property] or [alias].[CollectionNavProp.Property.Property]
+                        if (preg_match('/\[[^\]]+\]\.\[([A-Z][a-zA-Z0-9_]+(?:\.[A-Z][a-zA-Z0-9_]+)+)\]/', $orderBySql, $matches)) {
+                            $pathInSql = $matches[1];
+                            $pathParts = explode('.', $pathInSql);
+                            $firstPart = $pathParts[0];
+                            $navInfo = $this->getNavigationInfo($firstPart);
+                            if ($navInfo && $navInfo['isCollection']) {
+                                // This is a collection navigation property path - skip it
+                                //log_message('debug', "buildEfCoreStyleQuery: Skipping ORDER BY SQL with collection navigation property path: {$orderBySql}");
+                                continue;
+                            }
+                        }
                         $orderByColumns[] = $orderBySql;
                     }
                 }
@@ -6489,6 +7036,29 @@ class AdvancedQueryBuilder
                 }
             }
             
+            // Early check: If fieldName contains a collection navigation property path, return null
+            if ($fieldName !== null && strpos($fieldName, '.') !== false) {
+                $pathParts = explode('.', $fieldName);
+                
+                // Check each part of the path to see if any is a collection navigation property
+                $currentEntityType = $this->entityType;
+                foreach ($pathParts as $part) {
+                    $navInfo = $this->getNavigationInfoForEntity($part, $currentEntityType);
+                    if ($navInfo) {
+                        if ($navInfo['isCollection']) {
+                            // This path contains a collection navigation property - cannot use in ORDER BY
+                            //log_message('debug', "convertOrderByToSql: Early check - Path '{$fieldName}' contains collection navigation property '{$part}', skipping");
+                            return null;
+                        }
+                        // Move to next entity type for nested navigation
+                        $currentEntityType = $navInfo['entityType'];
+                    } else {
+                        // Not a navigation property, stop checking
+                        break;
+                    }
+                }
+            }
+            
             if ($navigationProperty === null || $nestedProperty === null) {
                 // Try to parse closure code to extract property name
                 $closureFile = $reflection->getFileName();
@@ -6529,6 +7099,36 @@ class AdvancedQueryBuilder
                 //log_message('debug', "convertOrderByToSql: Navigation property detected: {$navigationProperty}.{$nestedProperty}");
                 //log_message('debug', "convertOrderByToSql: requiredJoins keys: " . implode(', ', array_keys($this->requiredJoins)));
                 //log_message('debug', "convertOrderByToSql: alias parameter: {$alias}");
+                
+                // Check if nestedProperty contains a collection navigation property path
+                // e.g., "EmployeeDepartments.Department.DepartmentName" where "EmployeeDepartments" is a collection
+                if (strpos($nestedProperty, '.') !== false) {
+                    $nestedParts = explode('.', $nestedProperty);
+                    $firstNestedPart = $nestedParts[0];
+                    
+                    // Check if first part of nestedProperty is a collection navigation property
+                    // We need to check it in the context of the navigationProperty's entity type
+                    $navInfo = $this->getNavigationInfo($navigationProperty);
+                    if ($navInfo && !$navInfo['isCollection']) {
+                        // navigationProperty is a reference navigation, check if firstNestedPart is a collection in that entity
+                        $nestedNavInfo = $this->getNavigationInfoForEntity($firstNestedPart, $navInfo['entityType']);
+                        if ($nestedNavInfo && $nestedNavInfo['isCollection']) {
+                            // nestedProperty contains a collection navigation property - cannot use in ORDER BY
+                            //log_message('debug', "convertOrderByToSql: nestedProperty '{$nestedProperty}' contains collection navigation property '{$firstNestedPart}', skipping");
+                            return null;
+                        }
+                    }
+                }
+                
+                // Early check: If navigation property is a collection and this is for main subquery, return null
+                if ($alias !== 's' && $alias !== $this->context->getTableName($this->entityType)) {
+                    $navInfo = $this->getNavigationInfo($navigationProperty);
+                    if ($navInfo && $navInfo['isCollection']) {
+                        // This is a collection navigation property - cannot use in main subquery ORDER BY
+                        //log_message('debug', "convertOrderByToSql: Collection navigation property '{$navigationProperty}' cannot be used in main subquery ORDER BY, skipping");
+                        return null;
+                    }
+                }
                 
                 // Get join info for navigation property
                 $joinInfo = $this->requiredJoins[$navigationProperty] ?? null;
@@ -6619,12 +7219,13 @@ class AdvancedQueryBuilder
                     // In this case, we need to find the collection subquery that contains this navigation
                     //log_message('debug', "convertOrderByToSql: No join info found for {$navigationProperty}, checking if it's a collection navigation property");
                     
-                    // For final query, check if this navigation property is in a collection subquery
-                    if ($alias === 's' || $alias === $this->context->getTableName($this->entityType)) {
-                        // Try to find collection subquery that contains this navigation property
-                        // Collection subqueries are built in buildEfCoreStyleQuery, but we don't have access here
-                        // Instead, we'll use ExpressionParser fallback which should handle this case
-                        //log_message('debug', "convertOrderByToSql: Final query ORDER BY for collection navigation property, will use ExpressionParser fallback");
+                    // Check if navigation property is a collection
+                    $navInfo = $this->getNavigationInfo($navigationProperty);
+                    if ($navInfo && $navInfo['isCollection']) {
+                        // This is a collection navigation property
+                        // For both main and final query, skip here; final query will use collection subquery logic elsewhere
+                        //log_message('debug', "convertOrderByToSql: Collection navigation property '{$navigationProperty}' cannot be resolved here, skipping");
+                        return null;
                     }
                 }
             }
@@ -6648,6 +7249,23 @@ class AdvancedQueryBuilder
                 return "{$quotedAlias}.{$quotedColumn} {$direction}";
             }
             
+            // Before using ExpressionParser fallback, check if the path contains a collection navigation property
+            // Collection navigation properties cannot be used in main subquery ORDER BY
+            if ($fieldName !== null && strpos($fieldName, '.') !== false) {
+                $pathParts = explode('.', $fieldName);
+                $firstNavProp = $pathParts[0];
+                $navInfo = $this->getNavigationInfo($firstNavProp);
+                if ($navInfo && $navInfo['isCollection']) {
+                    // This is a collection navigation property path
+                    // For main subquery, we cannot order by collection navigation properties
+                    if ($alias !== 's' && $alias !== $this->context->getTableName($this->entityType)) {
+                        // This is for main subquery - return null to skip this ORDER BY
+                        //log_message('debug', "convertOrderByToSql: Collection navigation property path '{$fieldName}' cannot be used in main subquery ORDER BY, skipping");
+                        return null;
+                    }
+                }
+            }
+            
             // Fallback: Try ExpressionParser (for complex expressions)
             $parser = new ExpressionParser($this->entityType, $alias, $this->context);
             
@@ -6663,6 +7281,34 @@ class AdvancedQueryBuilder
             // Parse the key selector to get the column name
             $sqlExpression = $parser->parse($keySelector);
             
+            // Before processing, check if ExpressionParser produced SQL with collection navigation property paths
+            // Collection navigation properties cannot be used in main subquery ORDER BY, and if unresolved for final query, skip
+            if (!empty($sqlExpression)) {
+                $rawExpression = $sqlExpression;
+                // Remove brackets and quotes for easier matching
+                $cleanExpression = preg_replace('/[\[\]"]/', '', $rawExpression);
+                // Split by dots to get path parts
+                $pathParts = preg_split('/\./', $cleanExpression);
+                $entityName = (new \ReflectionClass($this->entityType))->getShortName();
+                foreach ($pathParts as $part) {
+                    $part = trim($part);
+                    if (empty($part)) {
+                        continue;
+                    }
+                    // Skip entity name and common aliases
+                    if ($part === $entityName || $part === 'e' || $part === 'u' || strlen($part) <= 2) {
+                        continue;
+                    }
+                    // Check if this part is a collection navigation property
+                    $navInfo = $this->getNavigationInfo($part);
+                    if ($navInfo && $navInfo['isCollection']) {
+                        // This is a collection navigation property - skip
+                        //log_message('debug', "convertOrderByToSql: ExpressionParser produced SQL with collection navigation property '{$part}', skipping");
+                        return null;
+                    }
+                }
+            }
+            
             if (!empty($sqlExpression)) {
                 // Clean up the expression - remove comparison operators if present
                 $sqlExpression = preg_replace('/\s*(>|<|>=|<=|==|!=|===|!==)\s*.*$/', '', $sqlExpression);
@@ -6671,6 +7317,39 @@ class AdvancedQueryBuilder
                 $sqlExpression = preg_replace('/^->+|->+$/', '', $sqlExpression);
                 $sqlExpression = preg_replace('/\s+/', ' ', $sqlExpression);
                 $sqlExpression = trim($sqlExpression);
+                
+                // Check if the expression contains a collection navigation property path
+                // Collection navigation properties cannot be used in main subquery ORDER BY
+                // Pattern: EntityName.CollectionNavProp or CollectionNavProp.Property or EntityName.CollectionNavProp.Property
+                // Also check for SQL patterns like [alias].[CollectionNavProp.Property] or [alias].[CollectionNavProp.Property.Property]
+                if ($alias !== 's' && $alias !== $this->context->getTableName($this->entityType)) {
+                    // This is for main subquery - check if expression contains collection navigation property
+                    $entityName = (new \ReflectionClass($this->entityType))->getShortName();
+                    
+                    // First, check if expression contains dots (indicating navigation property path)
+                    if (strpos($sqlExpression, '.') !== false) {
+                        // Extract all potential navigation property names from the expression
+                        // Handle both [alias].[NavProp.Property] and NavProp.Property patterns
+                        $navPropPattern = '/(?:\[[^\]]+\]\.)?\[?([A-Z][a-zA-Z0-9_]+)\]?(?:\.\[?([A-Z][a-zA-Z0-9_]+)\]?)?/';
+                        if (preg_match_all($navPropPattern, $sqlExpression, $matches)) {
+                            // Check all matched navigation property names
+                            $allMatches = array_merge($matches[1], array_filter($matches[2]));
+                            foreach ($allMatches as $potentialNavProp) {
+                                // Skip entity name itself and common SQL keywords
+                                if ($potentialNavProp === $entityName || 
+                                    in_array(strtolower($potentialNavProp), ['asc', 'desc', 'order', 'by', 'select', 'from', 'where'])) {
+                                    continue;
+                                }
+                                $navInfo = $this->getNavigationInfo($potentialNavProp);
+                                if ($navInfo && $navInfo['isCollection']) {
+                                    // This is a collection navigation property - cannot use in main subquery ORDER BY
+                                    //log_message('debug', "convertOrderByToSql: Expression contains collection navigation property '{$potentialNavProp}', skipping for main subquery");
+                                    return null;
+                                }
+                            }
+                        }
+                    }
+                }
                 
                 // Replace entity name with alias
                 $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
@@ -6745,12 +7424,38 @@ class AdvancedQueryBuilder
         foreach ($allNavigationPaths as $navPath) {
             $navInfo = $this->getNavigationInfo($navPath);
             if ($navInfo && !$navInfo['isCollection']) {
+                // Use stored index from SQL building if available, otherwise use current index
+                $storedIndex = $this->referenceNavIndexes[$navPath] ?? null;
+                $indexToUse = $storedIndex !== null ? $storedIndex : $referenceNavIndex;
                 $referenceNavInfo[$navPath] = [
-                    'index' => $referenceNavIndex,
+                    'index' => $indexToUse,
                     'entityType' => $navInfo['entityType'],
                     'columns' => $this->getEntityColumns(new ReflectionClass($navInfo['entityType']))
                 ];
-                $referenceNavIndex++;
+                if ($storedIndex === null) {
+                    $referenceNavIndex++;
+                }
+            }
+        }
+        
+        // Add reference navigation info from requiredJoins (for ORDER BY, etc.)
+        // These navigation properties might not be in includes but are needed for parsing
+        foreach ($this->requiredJoins as $navPath => $joinInfo) {
+            if (!isset($referenceNavInfo[$navPath])) {
+                $navInfo = $this->getNavigationInfo($navPath);
+                if ($navInfo && !$navInfo['isCollection']) {
+                    // Use stored index from SQL building if available
+                    $storedIndex = $this->referenceNavIndexes[$navPath] ?? null;
+                    $indexToUse = $storedIndex !== null ? $storedIndex : $referenceNavIndex;
+                    $referenceNavInfo[$navPath] = [
+                        'index' => $indexToUse,
+                        'entityType' => $navInfo['entityType'],
+                        'columns' => $this->getEntityColumns(new ReflectionClass($navInfo['entityType']))
+                    ];
+                    if ($storedIndex === null) {
+                        $referenceNavIndex++;
+                    }
+                }
             }
         }
         
@@ -6954,6 +7659,7 @@ class AdvancedQueryBuilder
                 // Reference navigation columns come from main subquery [s] with prefix s_
                 $refIdKey = 's_Id' . $info['index']; // e.g., s_Id0 for Company
                 $refId = $row[$refIdKey] ?? null;
+                //log_message('debug', "parseEfCoreStyleResults: Checking reference navigation '{$navPath}' with index {$info['index']}, refIdKey: {$refIdKey}, refId: " . ($refId ?? 'null'));
                 if ($refId !== null) {
                     $refData = [];
                     
