@@ -70,7 +70,7 @@ class QueryPlanAnalyzer
             $query = $this->connection->query($explainSql);
             return $query->getResultArray();
         } catch (\Exception $e) {
-            //log_message('error', 'EXPLAIN query failed: ' . $e->getMessage());
+            log_message('error', 'EXPLAIN query failed: ' . $e->getMessage());
             return [];
         }
     }
@@ -339,7 +339,7 @@ class QueryPlanAnalyzer
                 $stats['rows_affected'] = $this->connection->affectedRows();
             }
         } catch (\Exception $e) {
-            //log_message('error', 'Query stats failed: ' . $e->getMessage());
+            log_message('error', 'Query stats failed: ' . $e->getMessage());
         }
 
         return $stats;
