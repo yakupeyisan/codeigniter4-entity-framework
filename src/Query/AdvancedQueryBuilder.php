@@ -161,6 +161,7 @@ class AdvancedQueryBuilder
 
     /**
      * Add THEN INCLUDE for nested navigation properties
+     * Supports deep nesting: include()->thenInclude()->thenInclude()->thenInclude()
      * @param string $navigationProperty Navigation property name
      * @param string|null $whereClause Optional WHERE clause for collection subquery (e.g., "{alias}.AccessEventID IN (SELECT max(AccessEventID) FROM AccessEvent AS [ac] GROUP BY [ac].EmployeeID)"). Use {alias} placeholder for the entity alias.
      * @param string $joinType Join type: 'LEFT' (default) or 'INNER'
@@ -182,7 +183,27 @@ class AdvancedQueryBuilder
         if ($joinCondition !== null) {
             $thenIncludeData['joinCondition'] = $joinCondition;
         }
-        $lastInclude['thenIncludes'][] = $thenIncludeData;
+        
+        // Support deep nesting: if there are existing thenIncludes, add to the last one's nested thenIncludes
+        if (!empty($lastInclude['thenIncludes'])) {
+            // Find the deepest thenInclude to nest into
+            $current = &$lastInclude['thenIncludes'][count($lastInclude['thenIncludes']) - 1];
+            
+            // Navigate to the deepest level
+            while (isset($current['thenIncludes']) && !empty($current['thenIncludes'])) {
+                $current = &$current['thenIncludes'][count($current['thenIncludes']) - 1];
+            }
+            
+            // Add to the deepest thenInclude's nested thenIncludes
+            if (!isset($current['thenIncludes'])) {
+                $current['thenIncludes'] = [];
+            }
+            $current['thenIncludes'][] = $thenIncludeData;
+        } else {
+            // No existing thenInclude, add directly to include
+            $lastInclude['thenIncludes'][] = $thenIncludeData;
+        }
+        
         return $this;
     }
 
@@ -2956,10 +2977,17 @@ class AdvancedQueryBuilder
         }
         
         // Also add navigation paths from includes to allNavigationPaths
+        // IMPORTANT: We need to recursively add all nested thenInclude paths to allNavigationPaths
+        // For example: Card -> Card.Employee -> Card.Employee.Company (all 3 levels)
         foreach ($this->includes as $include) {
             $navPath = $include['path'] ?? $include['navigation'] ?? null;
             if ($navPath !== null && !in_array($navPath, $allNavigationPaths)) {
                 $allNavigationPaths[] = $navPath;
+            }
+            
+            // Recursively add nested thenInclude paths
+            if ($navPath !== null && isset($include['thenIncludes'])) {
+                $this->addNestedNavigationPaths($navPath, $include['thenIncludes'], $allNavigationPaths);
             }
         }
         
@@ -3012,21 +3040,34 @@ class AdvancedQueryBuilder
         $usedSelectAliases = []; // Track used SELECT column aliases to avoid conflicts
         // Track thenInclude collection subqueries for reference navigations
         $referenceNavThenIncludeSubqueries = []; // [navPath => [subquery1, subquery2, ...]]
+        // Track processed nested navigation paths to avoid adding duplicate columns
+        $processedNestedNavigationPaths = [];
+        
+        // Calculate depth for each navigation path to assign correct indexes
         foreach ($allNavigationPaths as $navPath) {
             $navInfo = $this->getNavigationInfo($navPath);
             log_message('debug', "buildEfCoreStyleQuery: Navigation path '{$navPath}' - navInfo: " . ($navInfo ? json_encode($navInfo) : 'null'));
             if ($navInfo && !$navInfo['isCollection']) {
-                // Generate unique alias, checking for conflicts
-                $refAlias = $this->getTableAlias($navPath, $referenceNavIndex);
-                $aliasIndex = $referenceNavIndex;
+                // Calculate navigation depth (number of dots in path)
+                $depth = substr_count($navPath, '.');
+                
+                // Generate table alias based on path
+                $pathParts = explode('.', $navPath);
+                $lastPart = end($pathParts);
+                $aliasBase = strtolower(substr($lastPart, 0, 1));
+                
+                // Simple index-based alias (e.g., c, c1, e1, c2, k3)
+                $refAlias = $aliasBase . ($referenceNavIndex > 0 ? $referenceNavIndex : '');
+                
+                // Check for alias conflicts and increment
                 while (in_array($refAlias, $usedAliases)) {
-                    $aliasIndex++;
-                    $refAlias = $this->getTableAlias($navPath, $aliasIndex);
+                    $referenceNavIndex++;
+                    $refAlias = $aliasBase . $referenceNavIndex;
                 }
                 $usedAliases[] = $refAlias;
                 $referenceNavAliases[$navPath] = $refAlias;
                 $this->referenceNavIndexes[$navPath] = $referenceNavIndex; // Store original index for ORDER BY and parsing
-                log_message('debug', "buildEfCoreStyleQuery: Added reference navigation alias '{$refAlias}' for '{$navPath}' (index: {$referenceNavIndex})");
+                log_message('debug', "buildEfCoreStyleQuery: Added reference navigation alias '{$refAlias}' for '{$navPath}' (index: {$referenceNavIndex}, depth: {$depth})");
                 $refEntityReflection = new ReflectionClass($navInfo['entityType']);
                 $refColumnsWithProperties = $this->getEntityColumnsWithProperties($refEntityReflection);
                 
@@ -3053,6 +3094,17 @@ class AdvancedQueryBuilder
                     }
                 }
                 
+                // SKIP old thenInclude processing - now handled via recursive allNavigationPaths
+                // Nested navigations are already in allNavigationPaths with full paths (e.g., Card.Employee, Card.Employee.Company)
+                // So we don't need to process thenIncludes here anymore
+                
+                // OLD CODE - Now handled via addNestedNavigationPaths() which recursively processes thenIncludes
+                // All nested paths are already in allNavigationPaths, so no need for this complex processing
+                
+                // Disable old thenInclude processing by wrapping in if (false)
+                if (false) { 
+                /*
+                // OLD CODE - DISABLED
                 // Check for thenIncludes for this reference navigation
                 // Multiple includes can have the same navigation path with different thenIncludes
                 // Merge all thenIncludes for this navigation path
@@ -3062,7 +3114,17 @@ class AdvancedQueryBuilder
                     if ($includeNavPath === $navPath && isset($include['thenIncludes'])) {
                         // Merge thenIncludes (avoid duplicates)
                         foreach ($include['thenIncludes'] as $thenInclude) {
-                            if (!in_array($thenInclude, $thenIncludes)) {
+                            // Handle both string and array format for comparison
+                            $thenIncludeNav = is_string($thenInclude) ? $thenInclude : ($thenInclude['navigation'] ?? $thenInclude);
+                            $alreadyExists = false;
+                            foreach ($thenIncludes as $existingThenInclude) {
+                                $existingNav = is_string($existingThenInclude) ? $existingThenInclude : ($existingThenInclude['navigation'] ?? $existingThenInclude);
+                                if ($existingNav === $thenIncludeNav) {
+                                    $alreadyExists = true;
+                                    break;
+                                }
+                            }
+                            if (!$alreadyExists) {
                                 $thenIncludes[] = $thenInclude;
                             }
                         }
@@ -3076,6 +3138,15 @@ class AdvancedQueryBuilder
                 foreach ($thenIncludes as $thenInclude) {
                     // Handle both string (backward compatibility) and array format
                     $thenIncludeNav = is_string($thenInclude) ? $thenInclude : ($thenInclude['navigation'] ?? $thenInclude);
+                    
+                    // Build full nested path
+                    $thenIncludePath = $navPath . '.' . $thenIncludeNav;
+                    
+                    // Skip if already processed (prevents duplicate columns)
+                    if (in_array($thenIncludePath, $processedNestedNavigationPaths)) {
+                        log_message('debug', "buildEfCoreStyleQuery: Skipping duplicate columns for nested navigation '{$thenIncludePath}'");
+                        continue;
+                    }
                     
                     $thenNavInfo = $this->getNavigationInfoForEntity($thenIncludeNav, $navInfo['entityType']);
                     if ($thenNavInfo && $thenNavInfo['isCollection']) {
@@ -3107,6 +3178,9 @@ class AdvancedQueryBuilder
                         ];
                         $thenIncludeNestedSubqueryIndex++;
                     } elseif ($thenNavInfo && !$thenNavInfo['isCollection']) {
+                        // Mark as processed to prevent duplicate columns
+                        $processedNestedNavigationPaths[] = $thenIncludePath;
+                        
                         // Reference navigation thenInclude - add nested JOIN and columns
                         // Use unique index for nested reference navigation to avoid alias conflicts
                         // For nested navigations, use the thenInclude name itself to generate unique alias
@@ -3214,6 +3288,29 @@ class AdvancedQueryBuilder
                         $thenIncludeCollectionIndex++; // Increment for next reference thenInclude
                     }
                 }
+                */
+                } // End if (false) - old code disabled
+                
+                // Skip adding columns for navigations under collections (same as JOIN and final SELECT skipping)
+                $pathParts = explode('.', $navPath);
+                $shouldSkipMainSelect = false;
+                $currentPath = '';
+                foreach ($pathParts as $i => $part) {
+                    $currentPath = $i === 0 ? $part : $currentPath . '.' . $part;
+                    if ($i < count($pathParts) - 1) { // Don't check the last part
+                        $partNavInfo = $this->getNavigationInfo($currentPath);
+                        if ($partNavInfo && $partNavInfo['isCollection']) {
+                            // This path is under a collection navigation - skip from main subquery SELECT
+                            $shouldSkipMainSelect = true;
+                            log_message('debug', "buildEfCoreStyleQuery: Skipping '{$navPath}' columns from main subquery SELECT (under collection '{$currentPath}')");
+                            break;
+                        }
+                    }
+                }
+                
+                if ($shouldSkipMainSelect) {
+                    continue; // Skip to next navigation in referenceNavAliases
+                }
                 
                 // First column gets alias Id0, Id1, etc. (use primary key column, not hardcoded 'Id')
                 // Other columns need to be aliased to avoid conflicts (e.g., ProjectID, ReferanceID, Name from multiple navigations)
@@ -3293,8 +3390,39 @@ class AdvancedQueryBuilder
         $mainFrom = "FROM {$quotedTableName} AS {$quotedMainAlias}";
         $mainJoins = [];
         
+        // Track processed nested navigation paths to avoid duplicate JOINs
+        $processedNestedPaths = [];
+        
         // Add JOINs for reference navigations (many-to-one, one-to-one)
         foreach ($allNavigationPaths as $navPath) {
+            // Skip navigation paths that are under collection navigations
+            // These will be handled in collection subqueries
+            $pathParts = explode('.', $navPath);
+            $shouldSkip = false;
+            $currentPath = '';
+            foreach ($pathParts as $i => $part) {
+                $currentPath = $i === 0 ? $part : $currentPath . '.' . $part;
+                if ($i < count($pathParts) - 1) { // Don't check the last part
+                    $partNavInfo = $this->getNavigationInfo($currentPath);
+                    if ($partNavInfo && $partNavInfo['isCollection']) {
+                        // This path is under a collection navigation - skip from main subquery
+                        $shouldSkip = true;
+                        log_message('debug', "buildEfCoreStyleQuery: Skipping '{$navPath}' from main subquery (under collection '{$currentPath}')");
+                        break;
+                    }
+                }
+            }
+            
+            if ($shouldSkip) {
+                continue;
+            }
+            
+            // Skip if this navigation was already processed as a nested JOIN
+            if (in_array($navPath, $processedNestedPaths)) {
+                log_message('debug', "buildEfCoreStyleQuery: Skipping '{$navPath}' (already processed as nested JOIN)");
+                continue;
+            }
+            
             $navInfo = $this->getNavigationInfo($navPath);
             if ($navInfo && !$navInfo['isCollection']) {
                 if (!isset($referenceNavAliases[$navPath])) {
@@ -3314,14 +3442,37 @@ class AdvancedQueryBuilder
                     }
                 }
                 
+                // Determine parent alias for JOIN condition
+                // For nested navigations (e.g., Card.Employee), use parent navigation's alias
+                // For top-level navigations (e.g., Card), use main entity alias
+                $parentAlias = $mainAlias;
+                $parentEntityType = null;
+                if (strpos($navPath, '.') !== false) {
+                    // Nested navigation - find parent
+                    $parts = explode('.', $navPath);
+                    array_pop($parts); // Remove last part to get parent path
+                    $parentPath = implode('.', $parts);
+                    
+                    // Get parent alias
+                    if (isset($referenceNavAliases[$parentPath])) {
+                        $parentAlias = $referenceNavAliases[$parentPath];
+                        // Get parent entity type
+                        $parentNavInfo = $this->getNavigationInfo($parentPath);
+                        if ($parentNavInfo) {
+                            $parentEntityType = $parentNavInfo['entityType'];
+                        }
+                        log_message('debug', "buildEfCoreStyleQuery: Using parent alias '{$parentAlias}' for nested navigation '{$navPath}' (parent path: '{$parentPath}')");
+                    }
+                }
+                
                 // Use custom join condition if provided, otherwise use default foreign key relationship
                 if ($customJoinCondition !== null && trim($customJoinCondition) !== '') {
                     // Replace placeholders with actual aliases
-                    $joinCondition = str_replace('{alias}', $mainAlias, $customJoinCondition);
+                    $joinCondition = str_replace('{alias}', $parentAlias, $customJoinCondition);
                     $joinCondition = str_replace('{relatedAlias}', $refAlias, $joinCondition);
                     log_message('debug', "buildEfCoreStyleQuery: Using custom join condition for '{$navPath}': original='{$customJoinCondition}', replaced='{$joinCondition}'");
                 } else {
-                $joinCondition = $this->buildJoinCondition($mainAlias, $refAlias, $navPath, $navInfo);
+                    $joinCondition = $this->buildJoinCondition($parentAlias, $refAlias, $navPath, $navInfo, $parentEntityType);
                 }
                 
                 // Check if this path is used in WHERE clause (should be INNER JOIN) or is a thenInclude
@@ -3342,18 +3493,22 @@ class AdvancedQueryBuilder
                     $includeNavPath = $include['path'] ?? $include['navigation'] ?? null;
                     if ($includeNavPath === $navPath && isset($include['thenIncludes'])) {
                         foreach ($include['thenIncludes'] as $thenInclude) {
-                            // Skip if already processed
-                            if (in_array($thenInclude, $processedThenIncludes)) {
-                                continue;
-                            }
                             // Handle both string (backward compatibility) and array format
                             $thenIncludeNav = is_string($thenInclude) ? $thenInclude : ($thenInclude['navigation'] ?? $thenInclude);
+                            
+                            // Build full nested path
+                            $thenIncludePath = $navPath . '.' . $thenIncludeNav;
+                            
+                            // Skip if already processed (prevents duplicate JOINs)
+                            if (in_array($thenIncludePath, $processedNestedPaths)) {
+                                log_message('debug', "buildEfCoreStyleQuery: Skipping duplicate nested JOIN for '{$thenIncludePath}'");
+                                continue;
+                            }
                             
                             $processedThenIncludes[] = $thenIncludeNav;
                             $thenNavInfo = $this->getNavigationInfoForEntity($thenIncludeNav, $navInfo['entityType']);
                             if ($thenNavInfo && !$thenNavInfo['isCollection']) {
                                 // Reference navigation thenInclude - add nested JOIN
-                                $thenIncludePath = $navPath . '.' . $thenIncludeNav;
                                 if (isset($referenceNavAliases[$thenIncludePath])) {
                                     $thenRefAlias = $referenceNavAliases[$thenIncludePath];
                                     log_message('debug', "buildEfCoreStyleQuery: For nested JOIN '{$thenIncludePath}', using alias '{$thenRefAlias}' from referenceNavAliases");
@@ -3369,6 +3524,7 @@ class AdvancedQueryBuilder
                                     $quotedThenRefAlias = $provider->escapeIdentifier($thenRefAlias);
                                     $thenJoinSql = "LEFT JOIN {$quotedThenRefTableName} AS {$quotedThenRefAlias} ON {$thenJoinCondition}";
                                     $mainJoins[] = $thenJoinSql;
+                                    $processedNestedPaths[] = $thenIncludePath; // Mark as processed
                                     log_message('debug', "buildEfCoreStyleQuery: Added nested JOIN for '{$thenIncludePath}': {$thenJoinSql}");
                                 }
                             }
@@ -3735,31 +3891,39 @@ class AdvancedQueryBuilder
         log_message('debug', 'buildEfCoreStyleQuery: Main subquery built, length: ' . strlen($mainSubquery) . ' characters');
         
         // Build collection navigation subqueries
-        // IMPORTANT: Collection index must match EF Core's indexing (s0, s2, s3, etc.)
-        // Nested subqueries (s1) are inside collection subqueries (s2)
+        // IMPORTANT: Each include creates a separate collection subquery, even if they have the same navigation path
+        // For example, 3 includes with EmployeeDepartments create s0, s1, s2
         $collectionSubqueries = [];
         $collectionIndex = 0;
         $nestedSubqueryIndex = 1; // Start at 1 for nested subqueries (s1)
-        foreach ($this->includes as $include) {
-            $navPath = $include['path'] ?? $include['navigation'] ?? null;
-            if ($navPath === null) {
-                continue;
-            }
+        
+        // First, collect all collection navigation paths from all includes (including nested ones)
+        $collectionIncludes = [];
+        foreach ($this->includes as $includeIdx => $include) {
+            $this->collectCollectionIncludes($include, $includeIdx, $collectionIncludes);
+        }
+        
+        log_message('debug', "buildEfCoreStyleQuery: Found " . count($collectionIncludes) . " collection includes");
+        
+        // Build a subquery for each collection include
+        foreach ($collectionIncludes as $collectionInclude) {
+            $navPath = $collectionInclude['fullPath'];
+            $thenIncludes = $collectionInclude['thenIncludes'] ?? [];
+            $whereClause = $collectionInclude['whereClause'] ?? null;
+            $joinType = $collectionInclude['joinType'] ?? 'LEFT';
+            
+            // Get navigation info
             $navInfo = $this->getNavigationInfo($navPath);
-            log_message('debug', "buildEfCoreStyleQuery: Processing include '{$navPath}' - navInfo: " . ($navInfo ? json_encode($navInfo) : 'null'));
+            log_message('debug', "buildEfCoreStyleQuery: Processing collection include '{$navPath}' (index: {$collectionIndex}) - navInfo: " . ($navInfo ? json_encode($navInfo) : 'null'));
+            
             if ($navInfo && $navInfo['isCollection']) {
-                // Check for thenIncludes
-                $thenIncludes = $include['thenIncludes'] ?? [];
-                $whereClause = $include['whereClause'] ?? null;
-                $joinType = $include['joinType'] ?? 'LEFT';
-                log_message('debug', "buildEfCoreStyleQuery: Building collection subquery for '{$navPath}' (index: {$collectionIndex}), thenIncludes count: " . count($thenIncludes) . ", thenIncludes: " . json_encode($thenIncludes));
+                log_message('debug', "buildEfCoreStyleQuery: Building collection subquery for '{$navPath}' (index: {$collectionIndex}), thenIncludes count: " . count($thenIncludes));
                 $subquery = $this->buildCollectionSubquery($navPath, $navInfo, $collectionIndex, $thenIncludes, $nestedSubqueryIndex, $whereClause);
                 if ($subquery) {
                     $subquery['joinType'] = $joinType; // Store join type for later use
-                }
-                if ($subquery) {
+                    $subquery['parentPath'] = $collectionInclude['parentPath']; // Store parent path for JOIN condition
                     $collectionSubqueries[] = $subquery;
-                    log_message('debug', "buildEfCoreStyleQuery: Added collection subquery for '{$navPath}'");
+                    log_message('debug', "buildEfCoreStyleQuery: Added collection subquery for '{$navPath}' with parent '{$collectionInclude['parentPath']}'");
                     // Update nested subquery index if nested subqueries were added
                     if (isset($subquery['nestedSubqueryIndex'])) {
                         $nestedSubqueryIndex = $subquery['nestedSubqueryIndex'];
@@ -3767,31 +3931,6 @@ class AdvancedQueryBuilder
                     $collectionIndex++;
                 } else {
                     log_message('warning', "buildEfCoreStyleQuery: buildCollectionSubquery returned null for '{$navPath}'");
-                }
-            } else {
-                if (!$navInfo) {
-                    log_message('warning', "buildEfCoreStyleQuery: getNavigationInfo returned null for include '{$navPath}'");
-                } elseif (!$navInfo['isCollection']) {
-                    log_message('debug', "buildEfCoreStyleQuery: Skipping collection subquery for reference navigation '{$navPath}' (will be loaded via JOIN)");
-                    
-                    // Add thenInclude collection subqueries for this reference navigation
-                    if (isset($referenceNavThenIncludeSubqueries[$navPath])) {
-                        foreach ($referenceNavThenIncludeSubqueries[$navPath] as $thenIncludeInfo) {
-                            // Build subquery with correct collection index
-                            $thenIncludeSubquery = $this->buildCollectionSubquery(
-                                $thenIncludeInfo['navigation'],
-                                $thenIncludeInfo['navInfo'],
-                                $collectionIndex,
-                                $thenIncludeInfo['thenIncludes'] ?? [],
-                                $thenIncludeInfo['nestedSubqueryIndex']
-                            );
-                            if ($thenIncludeSubquery) {
-                                $collectionSubqueries[] = $thenIncludeSubquery;
-                                log_message('debug', "buildEfCoreStyleQuery: Added thenInclude collection subquery for '{$navPath}': {$thenIncludeInfo['navigation']} (index: {$collectionIndex})");
-                                $collectionIndex++;
-                            }
-                        }
-                    }
                 }
             }
         }
@@ -3876,6 +4015,27 @@ class AdvancedQueryBuilder
         foreach ($referenceNavAliases as $navPath => $refAlias) {
             // Check if this is a nested navigation (contains '.')
             $isNested = strpos($navPath, '.') !== false;
+            
+            // Skip navigation paths that are under collection navigations (same logic as JOIN skipping)
+            $pathParts = explode('.', $navPath);
+            $shouldSkipFinalSelect = false;
+            $currentPath = '';
+            foreach ($pathParts as $i => $part) {
+                $currentPath = $i === 0 ? $part : $currentPath . '.' . $part;
+                if ($i < count($pathParts) - 1) { // Don't check the last part
+                    $partNavInfo = $this->getNavigationInfo($currentPath);
+                    if ($partNavInfo && $partNavInfo['isCollection']) {
+                        // This path is under a collection navigation - skip from final SELECT
+                        $shouldSkipFinalSelect = true;
+                        break;
+                    }
+                }
+            }
+            
+            if ($shouldSkipFinalSelect) {
+                log_message('debug', "buildEfCoreStyleQuery: Skipping '{$navPath}' from final SELECT (under collection)");
+                continue;
+            }
             
             // For top-level navigations, only include if added to main subquery
             // For nested navigations, they're always in main subquery (added during thenInclude processing)
@@ -4121,21 +4281,34 @@ class AdvancedQueryBuilder
                 // Use alias if available, otherwise use column name
                 $fkColumnForJoin = $fkColumnAlias !== null ? $fkColumnAlias : $fkColumn;
                 
-                // Join condition: depends on whether this is a thenInclude for a reference navigation
-                if ($isReferenceNavThenInclude && $parentNavPath !== null) {
-                    // This is a thenInclude collection subquery for a reference navigation
-                    // Join on reference navigation's primary key (e.g., Employee.EmployeeID)
-                    $parentNavInfo = $this->getNavigationInfo($parentNavPath);
-                    if ($parentNavInfo) {
+                // Join condition: check if this collection has a parent navigation path
+                // If parentPath exists (e.g., "Card.Employee" for "Card.Employee.EmployeeDepartments"),
+                // join on parent navigation's primary key instead of main entity
+                $parentPath = $subquery['parentPath'] ?? '';
+                if (!empty($parentPath) && $parentPath !== $navPath) {
+                    // This collection is nested under a reference navigation
+                    // Join on parent reference navigation's primary key
+                    $parentNavInfo = $this->getNavigationInfo($parentPath);
+                    if ($parentNavInfo && !$parentNavInfo['isCollection']) {
                         $parentEntityReflection = new ReflectionClass($parentNavInfo['entityType']);
                         $parentPrimaryKeyColumn = $this->getPrimaryKeyColumnName($parentEntityReflection);
-                        $parentRefIndex = $this->referenceNavIndexes[$parentNavPath] ?? 0;
-                        // Reference navigation primary key is aliased as Id0, Id1, etc. in main subquery
-                        log_message('debug', "buildEfCoreStyleQuery: Using reference navigation primary key 'Id{$parentRefIndex}' for join condition with thenInclude collection subquery (FK property: '{$fkPropertyName}', column: '{$fkColumn}', alias: " . ($fkColumnAlias !== null ? "'{$fkColumnAlias}'" : "none") . ")");
-                        $joinCondition = "[{$subqueryAlias}].[Id{$parentRefIndex}] = [{$collectionSubqueryAlias}].[{$fkColumnForJoin}]";
+                        $parentRefIndex = $this->referenceNavIndexes[$parentPath] ?? null;
+                        
+                        if ($parentRefIndex !== null) {
+                            // Parent navigation's primary key is aliased in main subquery as Id{index}
+                            // NOT as {ColumnName}{index}
+                            $parentPrimaryKeyAlias = "Id{$parentRefIndex}";
+                            
+                            log_message('debug', "buildEfCoreStyleQuery: Collection '{$navPath}' nested under '{$parentPath}', using parent primary key alias '{$parentPrimaryKeyAlias}' (parent index: {$parentRefIndex}, FK: '{$fkColumn}')");
+                            $joinCondition = "[{$subqueryAlias}].[{$parentPrimaryKeyAlias}] = [{$collectionSubqueryAlias}].[{$fkColumnForJoin}]";
+                        } else {
+                            // Fallback to main entity primary key
+                            log_message('warning', "buildEfCoreStyleQuery: Parent index not found for '{$parentPath}', falling back to main entity primary key");
+                            $joinCondition = "[{$subqueryAlias}].[{$mainPrimaryKeyColumn}] = [{$collectionSubqueryAlias}].[{$fkColumnForJoin}]";
+                        }
                     } else {
-                        // Fallback to main entity primary key
-                        log_message('debug', "buildEfCoreStyleQuery: Using primary key column '{$mainPrimaryKeyColumn}' for join condition with collection subquery (related entity FK property: '{$fkPropertyName}', column: '{$fkColumn}', alias: " . ($fkColumnAlias !== null ? "'{$fkColumnAlias}'" : "none") . ")");
+                        // Parent is not a valid reference navigation, use main entity primary key
+                        log_message('warning', "buildEfCoreStyleQuery: Parent '{$parentPath}' is not a reference navigation, using main entity primary key");
                         $joinCondition = "[{$subqueryAlias}].[{$mainPrimaryKeyColumn}] = [{$collectionSubqueryAlias}].[{$fkColumnForJoin}]";
                     }
                 } else {
@@ -4987,10 +5160,104 @@ class AdvancedQueryBuilder
     }
 
     /**
+     * Recursively collect all collection navigation includes from include tree
+     */
+    private function collectCollectionIncludes(array $include, int $includeIdx, array &$collectionIncludes, string $parentPath = '', int $depth = 0): void
+    {
+        $navPath = $include['path'] ?? $include['navigation'] ?? null;
+        if ($navPath === null) {
+            return;
+        }
+        
+        // Build full path
+        $fullPath = !empty($parentPath) ? $parentPath . '.' . $navPath : $navPath;
+        
+        // Check if this is a collection navigation
+        $navInfo = $this->getNavigationInfo($fullPath);
+        
+        if ($navInfo && $navInfo['isCollection']) {
+            // This is a collection navigation - add to list
+            $collectionIncludes[] = [
+                'fullPath' => $fullPath,
+                'parentPath' => $parentPath,
+                'thenIncludes' => $include['thenIncludes'] ?? [],
+                'whereClause' => $include['whereClause'] ?? null,
+                'joinType' => $include['joinType'] ?? 'LEFT',
+                'includeIdx' => $includeIdx,
+                'depth' => $depth
+            ];
+            log_message('debug', "collectCollectionIncludes: Found collection navigation '{$fullPath}' at depth {$depth}");
+        }
+        
+        // Process thenIncludes recursively
+        if (isset($include['thenIncludes']) && !empty($include['thenIncludes'])) {
+            foreach ($include['thenIncludes'] as $thenInclude) {
+                // Treat thenInclude as a nested include
+                $this->collectCollectionIncludes($thenInclude, $includeIdx, $collectionIncludes, $fullPath, $depth + 1);
+            }
+        }
+    }
+    
+    /**
+     * Recursively add nested navigation paths from thenIncludes to allNavigationPaths
+     */
+    private function addNestedNavigationPaths(string $parentPath, array $thenIncludes, array &$allNavigationPaths): void
+    {
+        foreach ($thenIncludes as $thenInclude) {
+            // Handle both string and array format
+            $thenIncludeNav = is_string($thenInclude) ? $thenInclude : ($thenInclude['navigation'] ?? $thenInclude);
+            
+            // Build full path
+            $fullPath = $parentPath . '.' . $thenIncludeNav;
+            
+            // Add to allNavigationPaths if not already there
+            if (!in_array($fullPath, $allNavigationPaths)) {
+                $allNavigationPaths[] = $fullPath;
+                log_message('debug', "addNestedNavigationPaths: Added nested path '{$fullPath}' to allNavigationPaths");
+            }
+            
+            // If this thenInclude has its own thenIncludes (deeper nesting), recurse
+            if (is_array($thenInclude) && isset($thenInclude['thenIncludes']) && !empty($thenInclude['thenIncludes'])) {
+                $this->addNestedNavigationPaths($fullPath, $thenInclude['thenIncludes'], $allNavigationPaths);
+            }
+        }
+    }
+    
+    /**
      * Get navigation property info
+     * Supports nested paths like "Card.Employee" or "Card.Employee.Company"
      */
     private function getNavigationInfo(string $navigationProperty): ?array
     {
+        // Check if this is a nested path (contains '.')
+        if (strpos($navigationProperty, '.') !== false) {
+            // Split path and resolve step by step
+            $parts = explode('.', $navigationProperty);
+            $currentEntityType = $this->entityType;
+            
+            // Navigate through the path
+            for ($i = 0; $i < count($parts); $i++) {
+                $part = $parts[$i];
+                $navInfo = $this->getNavigationInfoForEntity($part, $currentEntityType);
+                
+                if (!$navInfo) {
+                    log_message('debug', "getNavigationInfo: Failed to resolve part '{$part}' in path '{$navigationProperty}' for entity {$currentEntityType}");
+                    return null;
+                }
+                
+                // If this is the last part, return its info
+                if ($i === count($parts) - 1) {
+                    return $navInfo;
+                }
+                
+                // Move to next entity type
+                $currentEntityType = $navInfo['entityType'];
+            }
+            
+            return null; // Should not reach here
+        }
+        
+        // Simple navigation property (no nesting)
         $entityReflection = new ReflectionClass($this->entityType);
         if (!$entityReflection->hasProperty($navigationProperty)) {
             log_message('debug', "getNavigationInfo: Property '{$navigationProperty}' not found in entity {$this->entityType}");
@@ -5207,18 +5474,8 @@ class AdvancedQueryBuilder
      */
     private function getJoinType(string $navPath, array $navInfo, bool $isInWhere = false, bool $isThenInclude = false): string
     {
-        // thenInclude uses INNER JOIN for main-level includes (when used in WHERE)
-        // But nested reference navigation thenIncludes use LEFT JOIN (handled manually)
-        if ($isThenInclude) {
-            return 'INNER JOIN';
-        }
-        
-        // If used in WHERE clause, use INNER JOIN
-        if ($isInWhere) {
-            return 'INNER JOIN';
-        }
-        
-        // For include() without WHERE clause, use LEFT JOIN
+        // Always use LEFT JOIN to match EF Core's behavior for nullable navigations
+        // INNER JOIN should only be used when explicitly specified or when used in WHERE with non-nullable condition
         return 'LEFT JOIN';
     }
 
@@ -7417,6 +7674,11 @@ class AdvancedQueryBuilder
             if ($navPath !== null && !in_array($navPath, $allNavigationPaths)) {
                 $allNavigationPaths[] = $navPath;
             }
+            
+            // Also add nested navigation paths recursively (same as in SQL building)
+            if ($navPath !== null && isset($include['thenIncludes'])) {
+                $this->addNestedNavigationPaths($navPath, $include['thenIncludes'], $allNavigationPaths);
+            }
         }
         
         // Build reference navigation info map
@@ -7640,10 +7902,16 @@ class AdvancedQueryBuilder
                 $entity = $entitiesMap[$entityId];
             }
             
-            // Parse reference navigation properties
+            // Parse reference navigation properties (top-level only, nested will be handled separately)
             foreach ($referenceNavInfo as $navPath => $info) {
-                // Skip nested navigations (e.g., Employee.CustomField) - they'll be parsed after parent navigation
+                // Skip nested navigations (e.g., Card.Employee) - they'll be parsed separately
                 if (str_contains($navPath, '.')) {
+                    continue;
+                }
+                
+                // Check if this property exists in main entity
+                if (!$entityReflection->hasProperty($navPath)) {
+                    log_message('debug', "parseEfCoreStyleResults: Property '{$navPath}' not found in main entity");
                     continue;
                 }
                 
@@ -7853,6 +8121,117 @@ class AdvancedQueryBuilder
                             }
                         }
                     }
+                }
+            }
+            
+            // Parse nested reference navigation properties (e.g., Card.Employee, Card.Employee.Company)
+            foreach ($referenceNavInfo as $navPath => $info) {
+                // Only process nested navigations (contain '.')
+                if (!str_contains($navPath, '.')) {
+                    continue;
+                }
+                
+                // Skip navigations under collections (they're handled in collection parsing)
+                $pathParts = explode('.', $navPath);
+                $isUnderCollection = false;
+                $currentPath = '';
+                foreach ($pathParts as $i => $part) {
+                    $currentPath = $i === 0 ? $part : $currentPath . '.' . $part;
+                    if ($i < count($pathParts) - 1) {
+                        $partNavInfo = $this->getNavigationInfo($currentPath);
+                        if ($partNavInfo && $partNavInfo['isCollection']) {
+                            $isUnderCollection = true;
+                            break;
+                        }
+                    }
+                }
+                
+                if ($isUnderCollection) {
+                    continue;
+                }
+                
+                // Parse path to get parent and property
+                // For "Card.Employee", parent is Card, property is Employee
+                // For "Card.Employee.Company", parent is Card.Employee, property is Company
+                $parts = explode('.', $navPath);
+                $property = array_pop($parts);
+                $parentPath = implode('.', $parts);
+                
+                // Get parent entity by traversing the path
+                $parentEntity = $entity; // Start from main entity
+                $currentEntityType = $this->entityType;
+                
+                if (!empty($parentPath)) {
+                    // Navigate through the path to find parent entity
+                    $parentPathParts = explode('.', $parentPath);
+                    foreach ($parentPathParts as $parentPart) {
+                        $currentEntityReflection = new ReflectionClass($currentEntityType);
+                        if (!$currentEntityReflection->hasProperty($parentPart)) {
+                            log_message('debug', "parseEfCoreStyleResults: Parent property '{$parentPart}' not found in entity '{$currentEntityType}' for path '{$parentPath}'");
+                            $parentEntity = null;
+                            break;
+                        }
+                        
+                        $parentNavProperty = $currentEntityReflection->getProperty($parentPart);
+                        $parentNavProperty->setAccessible(true);
+                        $parentEntity = $parentNavProperty->getValue($parentEntity);
+                        
+                        if ($parentEntity === null) {
+                            log_message('debug', "parseEfCoreStyleResults: Parent entity is null at '{$parentPart}' in path '{$parentPath}'");
+                            break;
+                        }
+                        
+                        // Update current entity type for next iteration
+                        $currentEntityType = get_class($parentEntity);
+                    }
+                }
+                
+                if ($parentEntity === null) {
+                    continue;
+                }
+                
+                // Parse nested navigation data
+                $parentEntityReflection = new ReflectionClass($parentEntity);
+                if (!$parentEntityReflection->hasProperty($property)) {
+                    log_message('debug', "parseEfCoreStyleResults: Property '{$property}' not found in parent entity '{$parentPath}'");
+                    continue;
+                }
+                
+                $nestedNavProperty = $parentEntityReflection->getProperty($property);
+                $nestedNavProperty->setAccessible(true);
+                
+                // Check if already set
+                if ($nestedNavProperty->getValue($parentEntity) !== null) {
+                    continue;
+                }
+                
+                // Extract nested navigation data
+                $refIdKey = 's_Id' . $info['index'];
+                $refId = $row[$refIdKey] ?? null;
+                log_message('debug', "parseEfCoreStyleResults: Parsing nested navigation '{$navPath}', refIdKey: {$refIdKey}, refId: " . ($refId ?? 'null'));
+                
+                if ($refId !== null) {
+                    $refEntityReflection = new ReflectionClass($info['entityType']);
+                    $refPrimaryKeyColumn = $this->getPrimaryKeyColumnName($refEntityReflection);
+                    $refEntityColumns = $this->getEntityColumns($refEntityReflection);
+                    $refIndex = $info['index'];
+                    
+                    $refData = [$refPrimaryKeyColumn => $refId];
+                    
+                    foreach ($refEntityColumns as $col) {
+                        if ($col !== $refPrimaryKeyColumn) {
+                            $key = 's_' . $col . $refIndex;
+                            if (isset($row[$key])) {
+                                $refData[$col] = $row[$key];
+                            }
+                        }
+                    }
+                    
+                    // Create nested entity
+                    $refEntity = $this->mapRowToEntity($refData, $refEntityReflection);
+                    $nestedNavProperty->setValue($parentEntity, $refEntity);
+                    
+                    log_message('debug', "parseEfCoreStyleResults: Set nested navigation '{$navPath}' on parent '{$parentPath}'");
                 }
             }
             
