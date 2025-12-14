@@ -190,10 +190,10 @@ abstract class DbContext
         
         foreach ($this->changeTracker as $entity) {
             $state = $entity->getEntityState();
-            log_message('debug', "Change Tracker: " . json_encode($this->changeTracker, JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE));
-            log_message('debug', "Entity: " . json_encode($entity, JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE));
-            log_message('debug', "State: " . $state);
-            log_message('debug', "Changes Count: " . $changesCount);
+            //log_message('debug', "Change Tracker: " . json_encode($this->changeTracker, JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE));
+            //log_message('debug', "Entity: " . json_encode($entity, JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE));
+            //log_message('debug', "State: " . $state);
+            //log_message('debug', "Changes Count: " . $changesCount);
             switch ($state) {
                 case Entity::STATE_ADDED:
                     $changesCount += $this->insertEntity($entity);
@@ -227,16 +227,16 @@ abstract class DbContext
      */
     public function update(object &$entity): void
     {
-        log_message('debug', "Update Entity: " . json_encode($entity, JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE));
+        //log_message('debug', "Update Entity: " . json_encode($entity, JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE));
         if ($entity instanceof Entity) {
-            log_message('debug', "Marking as modified");
+            //log_message('debug', "Marking as modified");
             $entity->markAsModified();
-            log_message('debug', "Marked as modified");
+            //log_message('debug', "Marked as modified");
             $entity->enableTracking();
             if (!in_array($entity, $this->changeTracker, true)) {
-                log_message('debug', "Adding to change tracker");
+                //log_message('debug', "Adding to change tracker");
                 $this->changeTracker[] = $entity;
-                log_message('debug', "Added to change tracker");
+                //log_message('debug', "Added to change tracker");
             }
         }
     }

@@ -171,7 +171,7 @@ class TransactionScope
                 $this->context->rollback();
             } catch (\Exception $e) {
                 // Ignore rollback errors in destructor
-                log_message('error', 'Transaction rollback failed in destructor: ' . $e->getMessage());
+                //log_message('error', 'Transaction rollback failed in destructor: ' . $e->getMessage());
             }
         }
     }
