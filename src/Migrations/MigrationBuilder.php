@@ -139,8 +139,8 @@ class MigrationBuilder
                 $this->executeOperation($operation);
             } catch (\Exception $e) {
                 // Log error but continue with other operations
-                log_message('error', "Migration operation failed: " . $e->getMessage());
-                log_message('error', "Operation: " . json_encode($operation));
+                //log_message('error', "Migration operation failed: " . $e->getMessage());
+                //log_message('error', "Operation: " . json_encode($operation));
                 throw $e; // Re-throw to stop migration
             }
         }
@@ -367,7 +367,7 @@ class MigrationBuilder
                      WHERE fk.name = N'{$name}' AND t.name = N'{$table}'";
         $result = $this->connection->query($checkSql)->getRow();
         if ($result && $result->cnt > 0) {
-            log_message('debug', "Foreign key [{$name}] already exists on table [{$table}], skipping...");
+            //log_message('debug', "Foreign key [{$name}] already exists on table [{$table}], skipping...");
             return;
         }
         
@@ -390,7 +390,7 @@ class MigrationBuilder
                "REFERENCES [{$referencedTable}] ({$referencedColumnList}) " .
                "ON DELETE {$onDeleteSql}";
         
-        log_message('debug', "Creating foreign key: {$sql}");
+        //log_message('debug', "Creating foreign key: {$sql}");
         
         try {
             // Execute the query and check result
@@ -399,11 +399,11 @@ class MigrationBuilder
             // Check if query was successful
             if ($result === false) {
                 $error = $this->connection->error();
-                log_message('error', "Query returned false for foreign key [{$name}]: " . json_encode($error));
+                //log_message('error', "Query returned false for foreign key [{$name}]: " . json_encode($error));
                 throw new \RuntimeException("Failed to execute foreign key creation query");
             }
             
-            log_message('debug', "Foreign key [{$name}] query executed successfully");
+            //log_message('debug', "Foreign key [{$name}] query executed successfully");
             
             // Force commit for SQL Server (DDL statements auto-commit, but let's be sure)
             $this->connection->transCommit();
@@ -419,20 +419,20 @@ class MigrationBuilder
                           WHERE fk.name = N'{$name}' AND t.name = N'{$table}'";
             $verifyResult = $this->connection->query($verifySql)->getRow();
             
-            log_message('debug', "Verification query for [{$name}]: {$verifySql}");
-            log_message('debug', "Verification result: " . json_encode($verifyResult));
-            log_message('debug', "Current database: {$dbName}");
+            //log_message('debug', "Verification query for [{$name}]: {$verifySql}");
+            //log_message('debug', "Verification result: " . json_encode($verifyResult));
+            //log_message('debug', "Current database: {$dbName}");
             
             if ($verifyResult && $verifyResult->cnt > 0) {
-                log_message('debug', "Foreign key [{$name}] verified in database [{$dbName}]");
+                //log_message('debug', "Foreign key [{$name}] verified in database [{$dbName}]");
             } else {
-                log_message('error', "Foreign key [{$name}] was not found in database [{$dbName}] after creation!");
+                //log_message('error', "Foreign key [{$name}] was not found in database [{$dbName}] after creation!");
                 
                 // Try to get more info about the table
                 $tableCheckSql = "SELECT OBJECT_ID(N'{$table}') as table_id, SCHEMA_NAME(schema_id) as schema_name, name 
                                   FROM sys.tables WHERE name = N'{$table}'";
                 $tableResult = $this->connection->query($tableCheckSql)->getRow();
-                log_message('error', "Table [{$table}] info: " . json_encode($tableResult));
+                //log_message('error', "Table [{$table}] info: " . json_encode($tableResult));
                 
                 // List all foreign keys on this table
                 $allFkSql = "SELECT fk.name, t.name as table_name, SCHEMA_NAME(t.schema_id) as schema_name 
@@ -440,17 +440,17 @@ class MigrationBuilder
                              INNER JOIN sys.tables t ON fk.parent_object_id = t.object_id 
                              WHERE t.name = N'{$table}'";
                 $allFkResult = $this->connection->query($allFkSql)->getResultArray();
-                log_message('error', "All foreign keys on table [{$table}]: " . json_encode($allFkResult));
+                //log_message('error', "All foreign keys on table [{$table}]: " . json_encode($allFkResult));
                 
                 // Also check if the constraint exists with a different name
                 $constraintSql = "SELECT name, type_desc FROM sys.objects WHERE parent_object_id = OBJECT_ID(N'{$table}') AND type = 'F'";
                 $constraintResult = $this->connection->query($constraintSql)->getResultArray();
-                log_message('error', "All constraints (type F) on table [{$table}]: " . json_encode($constraintResult));
+                //log_message('error', "All constraints (type F) on table [{$table}]: " . json_encode($constraintResult));
             }
         } catch (\Exception $e) {
-            log_message('error', "Failed to create foreign key [{$name}]: " . $e->getMessage());
-            log_message('error', "SQL: {$sql}");
-            log_message('error', "Stack trace: " . $e->getTraceAsString());
+            //log_message('error', "Failed to create foreign key [{$name}]: " . $e->getMessage());
+            //log_message('error', "SQL: {$sql}");
+            //log_message('error', "Stack trace: " . $e->getTraceAsString());
             throw $e;
         }
     }
