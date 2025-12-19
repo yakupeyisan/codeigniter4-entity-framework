@@ -1089,8 +1089,8 @@ class AdvancedQueryBuilder
                     $whereParams = array_merge($whereParams, $paramValues);
                 }
             } catch (\Exception $e) {
-                log_message('debug', 'Error parsing WHERE clause: ' . $e->getMessage());
-                log_message('debug', 'Exception trace: ' . $e->getTraceAsString());
+                log_message('error', 'Error parsing WHERE clause: ' . $e->getMessage());
+                log_message('error', 'Exception trace: ' . $e->getTraceAsString());
             }
         }
         
@@ -1206,7 +1206,7 @@ class AdvancedQueryBuilder
                     $whereConditions[] = $sqlCondition;
                 }
             } catch (\Exception $e) {
-                log_message('debug', 'Error parsing WHERE clause: ' . $e->getMessage());
+                log_message('error', 'Error parsing WHERE clause: ' . $e->getMessage());
             }
         }
         
@@ -1307,6 +1307,12 @@ class AdvancedQueryBuilder
         
         // Execute raw SQL
         try {
+            // Log SQL query before execution for debugging
+            log_message('debug', 'Executing SQL Query: ' . substr($sql, 0, 1000));
+            if (strlen($sql) > 1000) {
+                log_message('debug', 'SQL Query (continued): ' . substr($sql, 1000, 1000));
+            }
+            
             $query = $this->connection->query($sql);
             $results = $query->getResultArray();
         } catch (\Exception $e) {
@@ -1910,8 +1916,15 @@ class AdvancedQueryBuilder
                 //log_message('debug', 'Variable values: ' . json_encode($variableValues));
                 
                 // Only apply if we have a valid condition (not empty after cleanup)
-                // Check if condition is not just whitespace or -> operators
-                $isValid = !empty($sqlCondition) && trim($sqlCondition) !== '' && strpos($sqlCondition, '->') === false;
+                // Check if condition is not just whitespace, -> operators, or just parentheses
+                $trimmedCondition = trim($sqlCondition);
+                $isValid = !empty($trimmedCondition) && 
+                          $trimmedCondition !== '' && 
+                          $trimmedCondition !== '()' &&
+                          $trimmedCondition !== '(' &&
+                          $trimmedCondition !== ')' &&
+                          strpos($trimmedCondition, '->') === false &&
+                          preg_match('/[a-zA-Z0-9_\[\]\.=<>!]+/', $trimmedCondition); // Must contain at least one valid SQL character
                 if ($isValid) {
                     // Get parameter values for binding
                     $paramValues = $parser->getParameterValues();
@@ -1967,7 +1980,8 @@ class AdvancedQueryBuilder
                         //log_message('debug', 'WHERE clause applied: ' . $sqlCondition);
                     }
                 } else {
-                    //log_message('debug', 'SQL condition empty or invalid after cleanup, using fallback');
+                    log_message('error', 'SQL condition empty or invalid after cleanup, using fallback');
+                    log_message('error', 'SQL condition: ' . $sqlCondition);
                     // Fallback if cleanup resulted in empty condition
                     $this->applySimpleWhereFallback($builder, $predicate);
                 }
@@ -1978,8 +1992,8 @@ class AdvancedQueryBuilder
             }
         } catch (\Exception $e) {
             // If parsing fails, fall back to old method
-            log_message('debug', 'ExpressionParser failed: ' . $e->getMessage());
-            log_message('debug', 'Exception trace: ' . $e->getTraceAsString());
+            log_message('error', 'ExpressionParser failed: ' . $e->getMessage());
+            log_message('error', 'Exception trace: ' . $e->getTraceAsString());
             $this->applySimpleWhereFallback($builder, $predicate);
         }
     }
@@ -2071,18 +2085,19 @@ class AdvancedQueryBuilder
             $lines = file($file);
             $code = implode('', array_slice($lines, $start - 1, $end - $start + 1));
             
-            //log_message('debug', "Parsing predicate code: " . substr($code, 0, 200));
+            //log_message('debug', "detectNavigationPaths - parsing predicate code: " . substr($code, 0, 300));
             
             // Extract patterns like $u->Company->Name or $u->CustomField->CustomField01
             // Pattern: $var->NavProp->Property (NavProp is the navigation property)
             // We want to match: $u->Company->Name (Company is nav prop) or $u->CustomField->CustomField01 (CustomField is nav prop)
-            if (preg_match_all('/\$[a-zA-Z_][a-zA-Z0-9_]*->([A-Z][a-zA-Z0-9_]*)->[A-Z][a-zA-Z0-9_]*/', $code, $matches)) {
+            // Updated pattern to also match lowercase first letter navigation properties
+            if (preg_match_all('/\$[a-zA-Z_][a-zA-Z0-9_]*->([A-Za-z][a-zA-Z0-9_]*)->[A-Za-z][a-zA-Z0-9_]*/', $code, $matches)) {
                 foreach ($matches[1] as $navProp) {
                     if (!in_array($navProp, $paths)) {
                         $paths[] = $navProp;
                     }
                 }
-                //log_message('debug', "Detected navigation paths: " . implode(', ', $paths));
+                //log_message('debug', "detectNavigationPaths - detected navigation paths: " . implode(', ', $paths));
             } else {
                 //log_message('debug', "No navigation paths detected in predicate");
             }
@@ -2181,75 +2196,87 @@ class AdvancedQueryBuilder
      */
     private function applyNavigationWhereToSql($builder, callable $predicate, array $navigationPaths): void
     {
-        // Get closure source code to parse
-        $reflection = new \ReflectionFunction($predicate);
-        $file = $reflection->getFileName();
-        $start = $reflection->getStartLine();
-        $end = $reflection->getEndLine();
-        
-        if (!$file || !$start || !$end) {
-            return;
-        }
-        
-        $lines = file($file);
-        $code = implode('', array_slice($lines, $start - 1, $end - $start + 1));
-        
-        // Extract conditions like $u->Company->Name == "Firma 1"
-        // Pattern: $var->NavProp->Property == "value" or $var->NavProp->Property === "value"
-        $mainTableName = $this->context->getTableName($this->entityType);
-        
-        foreach ($navigationPaths as $navProp) {
-            // Find conditions involving this navigation property
-            $pattern = '/\$[a-zA-Z_][a-zA-Z0-9_]*->' . preg_quote($navProp, '/') . '->([A-Za-z0-9_]+)\s*(===|==|!=|<>)\s*["\']([^"\']+)["\']/';
+        // Use ExpressionParser to parse navigation property where conditions
+        // This handles variables, null, and other complex expressions
+        try {
+            $parser = new ExpressionParser($this->entityType, $this->getTableAliasForParser(), $this->context);
             
-            //log_message('debug', "Looking for pattern in code for navProp: {$navProp}, pattern: {$pattern}");
-            //log_message('debug', "Code snippet: " . substr($code, 0, 200));
+            // Try to extract variable values from closure
+            $reflection = new \ReflectionFunction($predicate);
+            $staticVariables = $reflection->getStaticVariables();
             
-            if (preg_match_all($pattern, $code, $matches, PREG_SET_ORDER)) {
-                //log_message('debug', "Found " . count($matches) . " matches for navProp: {$navProp}");
-                foreach ($matches as $match) {
-                    $property = $match[1];
-                    $operator = $match[2] === '===' || $match[2] === '==' ? '=' : ($match[2] === '!=' || $match[2] === '<>' ? '!=' : $match[2]);
-                    $value = $match[3];
-                    
-                    //log_message('debug', "Match found: property={$property}, operator={$operator}, value={$value}");
-                    
-                    // Get related table name
-                    $joinInfo = $this->requiredJoins[$navProp] ?? null;
-                    //log_message('debug', "joinInfo for {$navProp}: " . ($joinInfo ? json_encode($joinInfo) : 'NULL'));
-                    
-                    if ($joinInfo) {
-                        $relatedTableName = $joinInfo['table'];
-                        $propertyColumn = $this->getColumnNameFromProperty(
-                            new ReflectionClass($joinInfo['entityType']),
-                            $property
-                        );
-                        
-                        // Escape identifiers for SQL Server
-                        $quotedTableName = $this->connection->escapeIdentifiers($relatedTableName);
-                        $quotedColumnName = $this->connection->escapeIdentifiers($propertyColumn);
-                        
-                        // Apply WHERE condition on joined table
-                        // CodeIgniter's where() method automatically adds '=' when second parameter is provided
-                        // So we only include the column name, not the operator
-                        $whereCondition = "{$quotedTableName}.{$quotedColumnName}";
-                        
-                        if ($operator === '=') {
-                            //log_message('debug', "Applying WHERE condition: {$whereCondition} = {$value}");
-                            $builder->where($whereCondition, $value);
-                        } else {
-                            // For non-equality operators, we need to use where() with the operator in the condition
-                            $whereConditionWithOp = "{$whereCondition} {$operator}";
-                            //log_message('debug', "Applying WHERE condition: {$whereConditionWithOp} {$value}");
-                            $builder->where($whereConditionWithOp, $value, false);
+            // Parse closure code to extract use() clause variables
+            $closureFile = $reflection->getFileName();
+            $closureStartLine = $reflection->getStartLine();
+            $closureEndLine = $reflection->getEndLine();
+            
+            $variableValues = [];
+            
+            // Try to get variables from static variables first
+            foreach ($staticVariables as $varName => $varValue) {
+                // Skip entity objects (they're the lambda parameter)
+                if (!is_object($varValue) || !($varValue instanceof \Yakupeyisan\CodeIgniter4\EntityFramework\Core\Entity)) {
+                    $variableValues[$varName] = $varValue;
+                }
+            }
+            
+            // Try to parse use() clause from closure code and extract variable names
+            $useVarNames = [];
+            if ($closureFile && file_exists($closureFile) && $closureStartLine && $closureEndLine) {
+                $lines = file($closureFile);
+                // Get a few lines before the closure to catch use() clause
+                $startLine = max(1, $closureStartLine - 5);
+                $endLine = min(count($lines), $closureEndLine);
+                $closureCode = implode('', array_slice($lines, $startLine - 1, $endLine - $startLine + 1));
+                
+                // Extract use() clause: pattern: use ($var1, $var2, ...) or fn($e) => $e->Id === $id (no use clause)
+                if (preg_match('/use\s*\(\s*([^)]+)\s*\)/', $closureCode, $useMatches)) {
+                    $useVars = preg_split('/\s*,\s*/', trim($useMatches[1]));
+                    foreach ($useVars as $useVar) {
+                        $useVar = trim($useVar);
+                        $varName = ltrim($useVar, '$');
+                        $useVarNames[] = $varName;
+                    }
+                } else {
+                    // No use() clause found - try to extract variable names from the expression itself
+                    // Pattern: fn($e) => $e->Id === $id (where $id is a variable in parent scope)
+                    if (preg_match_all('/=>\s*.+?\$([a-zA-Z_][a-zA-Z0-9_]*)/', $closureCode, $varMatches)) {
+                        foreach ($varMatches[1] as $possibleVarName) {
+                            // Check if it's not the lambda parameter ($e, $u, etc.)
+                            // Lambda parameters are usually single letters like $e, $u, $x, $p
+                            if (strlen($possibleVarName) > 1 || !in_array($possibleVarName, ['e', 'u', 'x', 'a', 'i', 'o', 'p'])) {
+                                if (!in_array($possibleVarName, $useVarNames)) {
+                                    $useVarNames[] = $possibleVarName;
+                                }
+                            }
                         }
-                    } else {
-                        //log_message('debug', "WARNING: No join info found for navigation property: {$navProp}");
                     }
                 }
-            } else {
-                //log_message('debug', "No matches found for navProp: {$navProp}");
             }
+            
+            $parser->setVariableValues($variableValues);
+            
+            // Get the lambda expression code
+            $code = $this->getFunctionCode($reflection);
+            $lambdaCode = $parser->extractExpression($code);
+            
+            //log_message('debug', "applyNavigationWhereToSql - lambda code: {$lambdaCode}");
+            
+            // Parse the expression directly (parseExpression expects string, not callable)
+            $sqlCondition = $parser->parseExpression($lambdaCode);
+            
+            if ($sqlCondition) {
+                //log_message('debug', "applyNavigationWhereToSql - parsed SQL condition: {$sqlCondition}");
+                
+                // Apply the WHERE condition
+                // The SQL condition should be in format like "c.CafeteriaAccountId = 123" or "c.DeletedAt IS NULL"
+                // We need to apply it directly to the builder
+                $builder->where($sqlCondition, null, false);
+            } else {
+                //log_message('debug', "applyNavigationWhereToSql - failed to parse SQL condition");
+            }
+        } catch (\Exception $e) {
+            log_message('error', "applyNavigationWhereToSql - error: " . $e->getMessage());
         }
     }
 
@@ -3046,13 +3073,36 @@ class AdvancedQueryBuilder
         
         //log_message('debug', 'buildEfCoreStyleQuery: Found ' . count($entityColumns) . ' entity columns: ' . implode(', ', $entityColumns));
         
+        // Detect ORDER BY columns that need to be added to SELECT
+        $orderByColumns = [];
+        foreach ($this->orderBys as $orderBy) {
+            $orderBySql = $this->convertOrderByToSql($orderBy['selector'], $orderBy['direction'], $mainAlias);
+            if ($orderBySql) {
+                // Extract column name from ORDER BY SQL (e.g., "[u].[CreatedAt] DESC" -> "CreatedAt")
+                // Remove direction (ASC/DESC) first
+                $orderBySqlWithoutDirection = preg_replace('/\s+(ASC|DESC)$/i', '', trim($orderBySql));
+                if (preg_match('/\[?([^\]]+)\]?\.\[?([^\]]+)\]?/i', $orderBySqlWithoutDirection, $matches)) {
+                    $tableAlias = $matches[1];
+                    $columnName = $matches[2];
+                    // Only add if it's from main entity (u) and not already in columns
+                    if ($tableAlias === $mainAlias) {
+                        $orderByColumns[$columnName] = true;
+                    }
+                }
+            }
+        }
+        
         // Build main subquery SELECT columns with masking support
         $mainSelectColumns = [];
         $columnIndex = 0;
         $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
         
+        // Track which columns are already in SELECT
+        $selectedColumns = [];
+        
         foreach ($columnsWithProperties as $colInfo) {
             $col = $colInfo['column'];
+            $selectedColumns[$col] = true;
             $property = $entityReflection->getProperty($colInfo['property']);
             $sensitiveAttributes = $property->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\SensitiveValue::class);
             
@@ -3075,6 +3125,17 @@ class AdvancedQueryBuilder
             } else {
                 // No masking
                 $mainSelectColumns[] = "{$quotedAlias}.{$quotedCol}";
+            }
+        }
+        
+        // Add ORDER BY columns that are not already in SELECT
+        foreach ($orderByColumns as $orderByCol => $_) {
+            if (!isset($selectedColumns[$orderByCol])) {
+                // Find column name from entity properties
+                $quotedOrderByCol = $provider->escapeIdentifier($orderByCol);
+                $quotedAlias = $provider->escapeIdentifier($mainAlias);
+                $mainSelectColumns[] = "{$quotedAlias}.{$quotedOrderByCol}";
+                //log_message('debug', "buildEfCoreStyleQuery: Added ORDER BY column '{$orderByCol}' to SELECT");
             }
         }
         
@@ -3632,14 +3693,21 @@ class AdvancedQueryBuilder
                 $paths = $this->detectNavigationPaths($where);
                 // Pass referenceNavAliases to use correct aliases in WHERE clause
                 $sqlWhere = $this->convertNavigationWhereToSql($where, $paths, $referenceNavAliases);
+                log_message('debug', "buildEfCoreStyleQuery - navigation filter #{$index}, sqlWhere: " . ($sqlWhere ?? 'NULL'));
             } else {
                 $sqlWhere = $this->convertSimpleWhereToSql($where, $mainAlias, $referenceNavAliases);
+                log_message('debug', "buildEfCoreStyleQuery - simple filter #{$index}, sqlWhere: " . ($sqlWhere ?? 'NULL'));
             }
             
-            if ($sqlWhere) {
+            if ($sqlWhere && trim($sqlWhere) !== '') {
                 // Skip WHERE clauses that contain {alias} placeholder - these are for collection subqueries
                 // and should not be added to main subquery
                 if (strpos($sqlWhere, '{alias}') !== false) {
+                    continue;
+                }
+                
+                // Skip empty or invalid WHERE conditions
+                if (trim($sqlWhere) === '' || $sqlWhere === null) {
                     continue;
                 }
                 
@@ -3659,10 +3727,26 @@ class AdvancedQueryBuilder
         
         // Handle any remaining group
         if ($inGroup && !empty($currentGroup)) {
-            $whereConditions[] = '(' . implode(' AND ', $currentGroup) . ')';
+            // Filter out empty conditions from group
+            $currentGroup = array_filter($currentGroup, function($condition) {
+                return !empty($condition) && trim($condition) !== '';
+            });
+            if (!empty($currentGroup)) {
+                $whereConditions[] = '(' . implode(' AND ', $currentGroup) . ')';
+            }
         }
         
+        // Filter out empty conditions before building WHERE clause
+        $whereConditions = array_filter($whereConditions, function($condition) {
+            return !empty($condition) && trim($condition) !== '';
+        });
+        
         $whereClause = !empty($whereConditions) ? 'WHERE ' . implode(' AND ', $whereConditions) : '';
+        
+        // Debug: Log WHERE clause to help diagnose syntax errors
+        if (!empty($whereClause)) {
+            log_message('debug', "buildEfCoreStyleQuery - WHERE clause: {$whereClause}");
+        }
         
         // Check if any collection subquery has WHERE clause
         // If so, we need to disable OFFSET/FETCH in main subquery to avoid incorrect results
@@ -4950,7 +5034,7 @@ class AdvancedQueryBuilder
         }
         
         // Log the generated SQL for debugging
-        log_message('debug', 'Generated EF Core Style SQL: ' . $finalQuery);
+        log_message('info', 'Generated EF Core Style SQL: ' . $finalQuery);
         //log_message('debug', 'buildEfCoreStyleQuery: ORDER BY columns: ' . implode(', ', $orderByColumns));
         
         return $finalQuery;
@@ -7156,43 +7240,120 @@ class AdvancedQueryBuilder
      */
     private function convertNavigationWhereToSql(callable $predicate, array $navigationPaths, array $referenceNavAliases = []): ?string
     {
-        // Use existing applyNavigationWhereToSql logic but return SQL string
-        $reflection = new \ReflectionFunction($predicate);
-        $file = $reflection->getFileName();
-        $start = $reflection->getStartLine();
-        $end = $reflection->getEndLine();
-        
-        if (!$file || !$start || !$end) {
-            return null;
-        }
-        
-        $lines = file($file);
-        $code = implode('', array_slice($lines, $start - 1, $end - $start + 1));
-        
-        $conditions = [];
-        foreach ($navigationPaths as $navProp) {
-            $navInfo = $this->getNavigationInfo($navProp);
-            if (!$navInfo) {
-                continue;
-            }
+        // Use ExpressionParser to parse navigation property where conditions
+        // This handles variables, null, and other complex expressions
+        try {
+            $parser = new ExpressionParser($this->entityType, $this->getTableAliasForParser(), $this->context);
             
-            // Get alias from referenceNavAliases map, or generate one
-            $alias = $referenceNavAliases[$navProp] ?? $this->getTableAlias($navProp, 0);
+            // Note: ExpressionParser will parse navigation properties and return "NAVIGATION:..." format
+            // We'll handle the alias mapping when converting to SQL
             
-            // Extract property comparisons from code
-            $pattern = '/\$[a-zA-Z_][a-zA-Z0-9_]*->' . preg_quote($navProp, '/') . '->([A-Za-z0-9_]+)\s*(===|==|!=|<>)\s*["\']([^"\']+)["\']/';
-            if (preg_match_all($pattern, $code, $matches)) {
-                foreach ($matches[1] as $idx => $property) {
-                    $operator = $matches[2][$idx] === '==' || $matches[2][$idx] === '===' ? '=' : $matches[2][$idx];
-                    $value = $matches[3][$idx];
-                    $columnName = $this->getColumnNameFromProperty(new ReflectionClass($navInfo['entityType']), $property);
-                    // Use alias instead of table name
-                    $conditions[] = "[{$alias}].[{$columnName}] = N'{$value}'";
+            // Try to extract variable values from closure
+            $reflection = new \ReflectionFunction($predicate);
+            $staticVariables = $reflection->getStaticVariables();
+            
+            // Parse closure code to extract use() clause variables
+            $closureFile = $reflection->getFileName();
+            $closureStartLine = $reflection->getStartLine();
+            $closureEndLine = $reflection->getEndLine();
+            
+            $variableValues = [];
+            
+            // Try to get variables from static variables first
+            foreach ($staticVariables as $varName => $varValue) {
+                // Skip entity objects (they're the lambda parameter)
+                if (!is_object($varValue) || !($varValue instanceof \Yakupeyisan\CodeIgniter4\EntityFramework\Core\Entity)) {
+                    $variableValues[$varName] = $varValue;
                 }
             }
+            
+            // Try to parse use() clause from closure code and extract variable names
+            $useVarNames = [];
+            if ($closureFile && file_exists($closureFile) && $closureStartLine && $closureEndLine) {
+                $lines = file($closureFile);
+                // Get a few lines before the closure to catch use() clause
+                $startLine = max(1, $closureStartLine - 5);
+                $endLine = min(count($lines), $closureEndLine);
+                $closureCode = implode('', array_slice($lines, $startLine - 1, $endLine - $startLine + 1));
+                
+                // Extract use() clause: pattern: use ($var1, $var2, ...) or fn($e) => $e->Id === $id (no use clause)
+                if (preg_match('/use\s*\(\s*([^)]+)\s*\)/', $closureCode, $useMatches)) {
+                    $useVars = preg_split('/\s*,\s*/', trim($useMatches[1]));
+                    foreach ($useVars as $useVar) {
+                        $useVar = trim($useVar);
+                        $varName = ltrim($useVar, '$');
+                        $useVarNames[] = $varName;
+                    }
+                } else {
+                    // No use() clause found - try to extract variable names from the expression itself
+                    // Pattern: fn($e) => $e->Id === $id (where $id is a variable in parent scope)
+                    if (preg_match_all('/=>\s*.+?\$([a-zA-Z_][a-zA-Z0-9_]*)/', $closureCode, $varMatches)) {
+                        foreach ($varMatches[1] as $possibleVarName) {
+                            // Check if it's not the lambda parameter ($e, $u, etc.)
+                            // Lambda parameters are usually single letters like $e, $u, $x, $p
+                            if (strlen($possibleVarName) > 1 || !in_array($possibleVarName, ['e', 'u', 'x', 'a', 'i', 'o', 'p'])) {
+                                if (!in_array($possibleVarName, $useVarNames)) {
+                                    $useVarNames[] = $possibleVarName;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            $parser->setVariableValues($variableValues);
+            
+            // Get the lambda expression code
+            $code = $this->getFunctionCode($reflection);
+            $lambdaCode = $parser->extractExpression($code);
+            
+            //log_message('debug', "convertNavigationWhereToSql - lambda code: {$lambdaCode}");
+            
+            // Parse the expression directly (parseExpression expects string, not callable)
+            $sqlCondition = $parser->parseExpression($lambdaCode);
+            
+            if ($sqlCondition) {
+                //log_message('debug', "convertNavigationWhereToSql - parsed SQL condition (before alias replacement): {$sqlCondition}");
+                
+                // Replace NAVIGATION:... format with actual SQL aliases
+                // Pattern: NAVIGATION:CafeteriaEvent.CafeteriaAccountId -> c.CafeteriaAccountId
+                // Also handle: NAVIGATION:CafeteriaEvent.DeletedAt IS NULL -> [c].[DeletedAt] IS NULL
+                foreach ($navigationPaths as $navProp) {
+                    $alias = $referenceNavAliases[$navProp] ?? $this->getTableAlias($navProp, 0);
+                    $navInfo = $this->getNavigationInfo($navProp);
+                    if ($navInfo) {
+                        // Replace NAVIGATION:NavProp.Property with alias.Property
+                        // Handle both: NAVIGATION:NavProp.Property and NAVIGATION:NavProp.Property IS NULL
+                        // First, check if there's "IS NULL" or "IS NOT NULL" after the navigation property
+                        if (preg_match('/NAVIGATION:' . preg_quote($navProp, '/') . '\.([A-Za-z_][A-Za-z0-9_]*)\s+(IS\s+NULL|IS\s+NOT\s+NULL)/i', $sqlCondition, $nullMatches)) {
+                            $property = $nullMatches[1];
+                            $nullOperator = $nullMatches[2]; // "IS NULL" or "IS NOT NULL"
+                            $columnName = $this->getColumnNameFromProperty(new ReflectionClass($navInfo['entityType']), $property);
+                            $replacement = "[{$alias}].[{$columnName}] {$nullOperator}";
+                            $sqlCondition = preg_replace('/NAVIGATION:' . preg_quote($navProp, '/') . '\.' . preg_quote($property, '/') . '\s+' . preg_quote($nullOperator, '/') . '/i', $replacement, $sqlCondition);
+                        }
+                        // Also handle cases without "IS NULL" - just replace the navigation property
+                        $pattern = '/NAVIGATION:' . preg_quote($navProp, '/') . '\.([A-Za-z_][A-Za-z0-9_]*)(?!\s+IS\s+(?:NULL|NOT\s+NULL))/i';
+                        if (preg_match_all($pattern, $sqlCondition, $navMatches)) {
+                            foreach ($navMatches[1] as $property) {
+                                $columnName = $this->getColumnNameFromProperty(new ReflectionClass($navInfo['entityType']), $property);
+                                $replacement = "[{$alias}].[{$columnName}]";
+                                $sqlCondition = preg_replace('/NAVIGATION:' . preg_quote($navProp, '/') . '\.' . preg_quote($property, '/') . '(?!\s+IS\s+(?:NULL|NOT\s+NULL))/i', $replacement, $sqlCondition);
+                            }
+                        }
+                    }
+                }
+                
+                //log_message('debug', "convertNavigationWhereToSql - parsed SQL condition (after alias replacement): {$sqlCondition}");
+                return $sqlCondition;
+            } else {
+                //log_message('debug', "convertNavigationWhereToSql - failed to parse SQL condition");
+                return null;
+            }
+        } catch (\Exception $e) {
+            log_message('error', "convertNavigationWhereToSql - error: " . $e->getMessage());
+            return null;
         }
-        
-        return !empty($conditions) ? implode(' AND ', $conditions) : null;
     }
 
     /**
@@ -7470,8 +7631,15 @@ class AdvancedQueryBuilder
                 $sqlCondition = trim($sqlCondition);
                 
                 // Only return if we have a valid condition (not empty after cleanup)
-                // Check if condition is not just whitespace or -> operators
-                $isValid = !empty($sqlCondition) && trim($sqlCondition) !== '' && strpos($sqlCondition, '->') === false;
+                // Check if condition is not just whitespace, -> operators, or just parentheses
+                $trimmedCondition = trim($sqlCondition);
+                $isValid = !empty($trimmedCondition) && 
+                          $trimmedCondition !== '' && 
+                          $trimmedCondition !== '()' &&
+                          $trimmedCondition !== '(' &&
+                          $trimmedCondition !== ')' &&
+                          strpos($trimmedCondition, '->') === false &&
+                          preg_match('/[a-zA-Z0-9_\[\]\.=<>!]+/', $trimmedCondition); // Must contain at least one valid SQL character
                 if ($isValid) {
                     // Get parameter values for binding
                     $paramValues = $parser->getParameterValues();
@@ -7530,8 +7698,8 @@ class AdvancedQueryBuilder
                 }
             }
         } catch (\Exception $e) {
-            log_message('debug', 'convertSimpleWhereToSql failed: ' . $e->getMessage());
-            log_message('debug', 'Exception trace: ' . $e->getTraceAsString());
+            log_message('error', 'convertSimpleWhereToSql failed: ' . $e->getMessage());
+            log_message('error', 'Exception trace: ' . $e->getTraceAsString());
         }
         
         return null;
@@ -7931,8 +8099,8 @@ class AdvancedQueryBuilder
                 return "{$sqlExpression} {$direction}";
             }
         } catch (\Exception $e) {
-            log_message('debug', 'convertOrderByToSql failed: ' . $e->getMessage());
-            log_message('debug', 'Exception trace: ' . $e->getTraceAsString());
+            log_message('error', 'convertOrderByToSql failed: ' . $e->getMessage());
+            log_message('error', 'Exception trace: ' . $e->getTraceAsString());
         }
         
         return null;
@@ -9525,7 +9693,7 @@ class AdvancedQueryBuilder
                                 if ($isNullable) {
                                     $value = null;
                                 } else {
-                                    log_message('debug', "mapRowToEntity: Skipping failed DateTime conversion for non-nullable property {$property->getName()}");
+                                    //log_message('debug', "mapRowToEntity: Skipping failed DateTime conversion for non-nullable property {$property->getName()}");
                                     continue;
                                 }
                             }

@@ -44,20 +44,20 @@ class ExpressionParser
         $reflection = new ReflectionFunction($predicate);
         $code = $this->getFunctionCode($reflection);
         
-        log_message('debug', 'ExpressionParser - Raw code: ' . substr($code, 0, 200));
+        //log_message('debug', 'ExpressionParser - Raw code: ' . substr($code, 0, 200));
         
         if (empty($code)) {
-            log_message('debug', 'ExpressionParser - Code is empty');
+            //log_message('debug', 'ExpressionParser - Code is empty');
             return '';
         }
 
         // Extract the expression part (between => and ; or end)
         $expression = $this->extractExpression($code);
-        log_message('debug', 'ExpressionParser - Extracted expression: ' . $expression);
+        //log_message('debug', 'ExpressionParser - Extracted expression: ' . $expression);
         
         // Parse the expression
         $sql = $this->parseExpression($expression);
-        log_message('debug', 'ExpressionParser - Parsed SQL: ' . $sql);
+        //log_message('debug', 'ExpressionParser - Parsed SQL: ' . $sql);
         
         return $sql;
     }
@@ -89,6 +89,9 @@ class ExpressionParser
         if (preg_match('/->(where|and|or|not|orderBy|orderByDescending)\s*\(\s*(?:fn|function)\s*\([^)]+\)\s*=>\s*(.+)/s', $code, $matches)) {
             // Return just the lambda expression part, wrapped in fn() => format
             $lambdaBody = trim($matches[2]);
+            
+            // Debug: Log the raw lambda body before processing
+            //log_message('debug', "getFunctionCode - raw lambda body before processing: {$lambdaBody}");
             
             // Find the correct closing parenthesis by counting parentheses
             // We need to find the closing parenthesis that matches the opening parenthesis of ->where(...)
@@ -206,7 +209,33 @@ class ExpressionParser
             $lambdaBody = preg_replace('/\s+/', ' ', $lambdaBody);
             $lambdaBody = trim($lambdaBody);
             
-            log_message('debug', "getFunctionCode - extracted lambda body: {$lambdaBody}");
+            // Extract lambda parameter name from the original code
+            $lambdaParam = '$x'; // default
+            if (preg_match('/(?:fn|function)\s*\((\$[a-zA-Z_][a-zA-Z0-9_]*)\)\s*=>/', $code, $paramMatches)) {
+                $lambdaParam = $paramMatches[1];
+            }
+            
+            // Replace the lambda parameter in the body with $x for consistency
+            // This ensures ExpressionParser can recognize the parameter
+            // Use word boundary to avoid replacing parts of other variable names
+            if ($lambdaParam !== '$x') {
+                // First replace $param-> with $x-> (property access)
+                $lambdaBody = preg_replace('/' . preg_quote($lambdaParam, '/') . '\s*->/', '$x->', $lambdaBody);
+                // Then replace standalone $param (for comparisons like $param === null)
+                // Use word boundary to avoid replacing parts of other variable names
+                $lambdaBody = preg_replace('/\b' . preg_quote($lambdaParam, '/') . '\b/', '$x', $lambdaBody);
+                
+                //log_message('debug', "getFunctionCode - replaced {$lambdaParam} with \$x in body: {$lambdaBody}");
+            }
+            
+            //log_message('debug', "getFunctionCode - extracted lambda body: {$lambdaBody}, parameter: {$lambdaParam}");
+            
+            // Debug: Check if navigation property is in the lambda body
+            // Pattern: $x->NavProp->Property or $p->NavProp->Property
+            if (preg_match('/\$[a-zA-Z_][a-zA-Z0-9_]*->[A-Za-z_][A-Za-z0-9_]*->[A-Za-z_][A-Za-z0-9_]*/', $lambdaBody)) {
+                //log_message('debug', "getFunctionCode - navigation property detected in lambda body: {$lambdaBody}");
+            }
+            
             return 'fn($x) => ' . $lambdaBody;
         }
         
@@ -216,7 +245,7 @@ class ExpressionParser
     /**
      * Extract expression from function code
      */
-    private function extractExpression(string $code): string
+    public function extractExpression(string $code): string
     {
         // Remove function declaration and get expression
         // Pattern: fn($x) => $x->Property === value
@@ -290,6 +319,11 @@ class ExpressionParser
                 $expression = substr($expression, 0, $expressionEndPos);
             }
             
+            // Remove trailing ); characters that might be from method chaining
+            // Pattern: expression); -> expression
+            $expression = preg_replace('/\s*\)\s*;\s*$/', '', $expression);
+            $expression = trim($expression);
+            
             // If expression ends with incomplete type cast, try to complete it
             if (preg_match('/\(int\s*$|\(string\s*$|\(float\s*$|\(bool\s*$/', $expression)) {
                 // Look for the rest in the code
@@ -330,11 +364,11 @@ class ExpressionParser
     /**
      * Parse expression to SQL
      */
-    private function parseExpression(string $expression): string
+    public function parseExpression(string $expression): string
     {
         $expression = trim($expression);
         
-        log_message('debug', "parseExpression - input: {$expression}");
+        //log_message('debug', "parseExpression - input: {$expression}");
         
         // Handle parentheses FIRST
         if (preg_match('/^\((.*)\)$/', $expression, $matches)) {
@@ -346,14 +380,14 @@ class ExpressionParser
         if (preg_match('/^\((\w+)\)\s*\$?([a-zA-Z_][a-zA-Z0-9_]*)/', $expression, $castMatches)) {
             $type = $castMatches[1];
             $value = '$' . $castMatches[2];
-            log_message('debug', "parseExpression - type casting detected: ({$type}){$value}");
+            //log_message('debug', "parseExpression - type casting detected: ({$type}){$value}");
             // Parse the value (ignore the cast, SQL will handle it)
             return $this->parseExpression($value);
         }
         
         // Handle incomplete type casting: (int (without closing parenthesis)
         if (preg_match('/^\((\w+)\s*$/', $expression, $castMatches)) {
-            log_message('debug', "parseExpression - incomplete type casting detected: ({$castMatches[1]}");
+            //log_message('debug', "parseExpression - incomplete type casting detected: ({$castMatches[1]}");
             // This is an incomplete expression, return as is and let comparison handle it
         }
         
@@ -365,7 +399,7 @@ class ExpressionParser
             $innerSql = $this->parseIn($innerExpression);
             if ($innerSql !== null) {
                 $result = "NOT ({$innerSql})";
-                log_message('debug', "parseExpression - not in_array result: {$result}");
+                //log_message('debug', "parseExpression - not in_array result: {$result}");
                 return $result;
             }
         }
@@ -373,7 +407,7 @@ class ExpressionParser
         // Handle IN operator BEFORE comparison (in_array is a function call, not a comparison)
         $sql = $this->parseIn($expression);
         if ($sql !== null) {
-            log_message('debug', "parseExpression - in result: {$sql}");
+            //log_message('debug', "parseExpression - in result: {$sql}");
             return $sql;
         }
         
@@ -381,14 +415,43 @@ class ExpressionParser
         // Method calls like ->startsWith() should be parsed before comparison operators
         $sql = $this->parseMethodCall($expression);
         if ($sql !== null) {
-            log_message('debug', "parseExpression - method call result: {$sql}");
+            //log_message('debug', "parseExpression - method call result: {$sql}");
             return $sql;
+        }
+        
+        // Handle null comparisons BEFORE other comparisons (for navigation properties)
+        // Pattern: $x->NavProp->Property == null or $x->NavProp->Property === null
+        if (preg_match('/^(.+?)\s*===\s*null$/i', $expression, $matches)) {
+            $property = trim($matches[1]);
+            $propertySql = $this->parsePropertyAccess($property);
+            if (!empty($propertySql)) {
+                // Check if it's a valid SQL column reference or navigation property format
+                if (preg_match('/^[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*$|^\[[^\]]+\]\.\[[^\]]+\]$/', $propertySql)) {
+                    return "{$propertySql} IS NULL";
+                }
+                if (preg_match('/^NAVIGATION:/', $propertySql)) {
+                    return "{$propertySql} IS NULL";
+                }
+            }
+        }
+        if (preg_match('/^(.+?)\s*==\s*null$/i', $expression, $matches)) {
+            $property = trim($matches[1]);
+            $propertySql = $this->parsePropertyAccess($property);
+            if (!empty($propertySql)) {
+                // Check if it's a valid SQL column reference or navigation property format
+                if (preg_match('/^[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*$|^\[[^\]]+\]\.\[[^\]]+\]$/', $propertySql)) {
+                    return "{$propertySql} IS NULL";
+                }
+                if (preg_match('/^NAVIGATION:/', $propertySql)) {
+                    return "{$propertySql} IS NULL";
+                }
+            }
         }
         
         // Handle comparison operators (before arithmetic, because === has higher precedence than -)
         $sql = $this->parseComparison($expression);
         if ($sql !== null) {
-            log_message('debug', "parseExpression - comparison result: {$sql}");
+            //log_message('debug', "parseExpression - comparison result: {$sql}");
             return $sql;
         }
         
@@ -396,34 +459,34 @@ class ExpressionParser
         // Pattern: $x->Property (but NOT $x->Property === value)
         if (preg_match('/^\$[a-zA-Z_][a-zA-Z0-9_]*->[A-Za-z_][A-Za-z0-9_]*$/', $expression)) {
             $result = $this->parsePropertyAccess($expression);
-            log_message('debug', "parseExpression - property access result: {$result}");
+            //log_message('debug', "parseExpression - property access result: {$result}");
             return $result;
         }
         
         // Handle logical operators (AND, OR)
         $sql = $this->parseLogicalOperators($expression);
         if ($sql !== null) {
-            log_message('debug', "parseExpression - logical result: {$sql}");
+            //log_message('debug', "parseExpression - logical result: {$sql}");
             return $sql;
         }
         
         // Handle arithmetic operations (+, -, *, /, %) - but only if not part of comparison
         $sql = $this->parseArithmetic($expression);
         if ($sql !== null) {
-            log_message('debug', "parseExpression - arithmetic result: {$sql}");
+            //log_message('debug', "parseExpression - arithmetic result: {$sql}");
             return $sql;
         }
         
         // Handle NOT operator
         $sql = $this->parseNot($expression);
         if ($sql !== null) {
-            log_message('debug', "parseExpression - not result: {$sql}");
+            //log_message('debug', "parseExpression - not result: {$sql}");
             return $sql;
         }
         
         // Handle property access (fallback)
         $result = $this->parsePropertyAccess($expression);
-        log_message('debug', "parseExpression - property access fallback result: {$result}");
+        //log_message('debug', "parseExpression - property access fallback result: {$result}");
         return $result;
     }
 
@@ -487,25 +550,54 @@ class ExpressionParser
         if (preg_match('/^(.+?)\s*==\s*null$/i', $expression, $matches)) {
             $property = trim($matches[1]);
             $propertySql = $this->parsePropertyAccess($property);
-            // Check if propertySql is valid SQL column reference
-            if (!empty($propertySql) && 
-                preg_match('/^[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*$|^\[[^\]]+\]\.\[[^\]]+\]$/', $propertySql)) {
-                return "{$propertySql} IS NULL";
+            // Check if propertySql is valid SQL column reference or navigation property format
+            if (!empty($propertySql)) {
+                // Check if it's a valid SQL column reference (format: alias.ColumnName or [alias].[ColumnName])
+                if (preg_match('/^[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*$|^\[[^\]]+\]\.\[[^\]]+\]$/', $propertySql)) {
+                    return "{$propertySql} IS NULL";
+                }
+                // Check if it's a navigation property format (NAVIGATION:NavProp.Property)
+                // This will be handled by AdvancedQueryBuilder
+                if (preg_match('/^NAVIGATION:/', $propertySql)) {
+                    return "{$propertySql} IS NULL";
+                }
             }
             return null;
         }
         if (preg_match('/^(.+?)\s*!=\s*null$/i', $expression, $matches)) {
             $property = trim($matches[1]);
             $propertySql = $this->parsePropertyAccess($property);
-            // Check if propertySql is valid SQL column reference
-            if (!empty($propertySql) && 
-                preg_match('/^[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*$|^\[[^\]]+\]\.\[[^\]]+\]$/', $propertySql)) {
-                return "{$propertySql} IS NOT NULL";
+            // Check if propertySql is valid SQL column reference or navigation property format
+            if (!empty($propertySql)) {
+                // Check if it's a valid SQL column reference (format: alias.ColumnName or [alias].[ColumnName])
+                if (preg_match('/^[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*$|^\[[^\]]+\]\.\[[^\]]+\]$/', $propertySql)) {
+                    return "{$propertySql} IS NOT NULL";
+                }
+                // Check if it's a navigation property format (NAVIGATION:NavProp.Property)
+                // This will be handled by AdvancedQueryBuilder
+                if (preg_match('/^NAVIGATION:/', $propertySql)) {
+                    return "{$propertySql} IS NOT NULL";
+                }
             }
             return null;
         }
         
+        // Before processing patterns, check if expression is just property access without comparison
+        // Pattern: $x->Property or $x->NavProp->Property (no comparison operator)
+        // IMPORTANT: Check this BEFORE pattern matching to avoid false positives
+        if (preg_match('/^\$[a-zA-Z_][a-zA-Z0-9_]*(->[A-Za-z_][A-Za-z0-9_]*)+$/', $expression)) {
+            // Check if there's any comparison operator (but not part of ->)
+            // Look for operators that are NOT immediately after ->
+            if (!preg_match('/(?<!->)\s*(===|==|!==|!=|<=|>=|<|>)\s+/', $expression)) {
+                // This is just property access, not a comparison
+                //log_message('debug', "parseComparison - expression is just property access, not a comparison: {$expression}");
+                return null;
+            }
+        }
+        
         // Match: $x->Property === value, $x->Property == value, etc.
+        // IMPORTANT: Make sure we don't match property access like $x->Property
+        // The pattern should only match if there's a comparison operator that's NOT part of ->
         $patterns = [
             '/^(.+?)\s*===\s*(.+)$/' => '=',
             '/^(.+?)\s*==\s*(.+)$/' => '=',
@@ -514,7 +606,9 @@ class ExpressionParser
             '/^(.+?)\s*<=\s*(.+)$/' => '<=',
             '/^(.+?)\s*>=\s*(.+)$/' => '>=',
             '/^(.+?)\s*<\s*(.+)$/' => '<',
-            '/^(.+?)\s*>\s*(.+)$/' => '>',
+            // For > operator, check that it's not part of -> (property access)
+            // Use a pattern that ensures > is not immediately after ->
+            '/^(.+?)(?<!->)\s*>\s*(.+)$/' => '>',
         ];
         
         foreach ($patterns as $pattern => $operator) {
@@ -522,25 +616,30 @@ class ExpressionParser
                 $left = trim($matches[1]);
                 $right = trim($matches[2]);
                 
-                log_message('debug', "parseComparison - left: {$left}, right: {$right}");
+                // Remove trailing ); characters from right side that might be from method chaining
+                $right = preg_replace('/\s*\)\s*;\s*$/', '', $right);
+                $right = trim($right);
+                
+                //log_message('debug', "parseComparison - left: {$left}, right: {$right}");
                 
                 // Parse left side (property access)
-                // Check if it's a property access pattern ($x->Property)
+                // Check if it's a property access pattern ($x->Property or $x->NavProp->Property)
                 if (preg_match('/^\$[a-zA-Z_][a-zA-Z0-9_]*->/', $left)) {
                     // It's a property access, use parsePropertyAccess directly
+                    // This will handle both simple properties and navigation properties
                     $leftSql = $this->parsePropertyAccess($left);
                 } else {
                     // Otherwise use parseExpression
                     $leftSql = $this->parseExpression($left);
                 }
-                log_message('debug', "parseComparison - leftSql: {$leftSql}");
+                //log_message('debug', "parseComparison - leftSql: {$leftSql}");
                 
                 // Parse right side (value)
                 // Handle type casting first: (int)$id, (string)$value, etc.
                 if (preg_match('/^\((\w+)\)\s*\$?([a-zA-Z_][a-zA-Z0-9_]*)/', $right, $castMatches)) {
                     $type = $castMatches[1];
                     $varName = '$' . $castMatches[2];
-                    log_message('debug', "parseComparison - type casting detected on right side: ({$type}){$varName}");
+                    //log_message('debug', "parseComparison - type casting detected on right side: ({$type}){$varName}");
                     // Parse the value (ignore the cast, SQL will handle it)
                     $rightSql = $this->parseValue($varName);
                 } elseif (preg_match('/^\$[a-zA-Z_][a-zA-Z0-9_]*->/', $right)) {
@@ -549,10 +648,10 @@ class ExpressionParser
                 } else {
                     $rightSql = $this->parseValue($right);
                 }
-                log_message('debug', "parseComparison - rightSql: {$rightSql}");
+                //log_message('debug', "parseComparison - rightSql: {$rightSql}");
                 
                 $result = "{$leftSql} {$operator} {$rightSql}";
-                log_message('debug', "parseComparison - result: {$result}");
+                //log_message('debug', "parseComparison - result: {$result}");
                 return $result;
             }
         }
@@ -854,7 +953,7 @@ class ExpressionParser
                 if (strpos($propertySql, 'NAVIGATION:') === 0) {
                     // Extract navigation property path
                     $navPath = substr($propertySql, 11); // Remove "NAVIGATION:" prefix
-                    log_message('debug', "parseIn - navigation property path detected: {$navPath}");
+                    //log_message('debug', "parseIn - navigation property path detected: {$navPath}");
                     
                     // Check if we have the array value in variableValues
                     if (isset($this->variableValues[$varName]) && is_array($this->variableValues[$varName])) {
@@ -863,7 +962,7 @@ class ExpressionParser
                         foreach ($valuesArray as $value) {
                             // Filter out invalid values like 'undefined', 'null', empty strings
                             if (is_string($value) && in_array(strtolower($value), ['undefined', 'null', ''])) {
-                                log_message('debug', "parseIn - filtering out invalid value: '{$value}'");
+                                //log_message('debug', "parseIn - filtering out invalid value: '{$value}'");
                                 continue;
                             }
                             
@@ -884,7 +983,7 @@ class ExpressionParser
                         
                         // If all values were filtered out, return empty result (will be handled by AdvancedQueryBuilder)
                         if (empty($valuesSql)) {
-                            log_message('debug', "parseIn - all values filtered out for navigation path: {$navPath}");
+                            //log_message('debug', "parseIn - all values filtered out for navigation path: {$navPath}");
                             return "NAVIGATION_IN:{$navPath}:";
                         }
                         
@@ -904,7 +1003,7 @@ class ExpressionParser
                 foreach ($valuesArray as $value) {
                     // Filter out invalid values like 'undefined', 'null', empty strings
                     if (is_string($value) && in_array(strtolower($value), ['undefined', 'null', ''])) {
-                        log_message('debug', "parseIn - filtering out invalid value: '{$value}'");
+                        //log_message('debug', "parseIn - filtering out invalid value: '{$value}'");
                         continue;
                     }
                     
@@ -925,7 +1024,7 @@ class ExpressionParser
                 
                 // If all values were filtered out, return a condition that always evaluates to false
                 if (empty($valuesSql)) {
-                    log_message('debug', "parseIn - all values filtered out, returning false condition");
+                    //log_message('debug', "parseIn - all values filtered out, returning false condition");
                     return "1=0";
                 }
                 
@@ -950,7 +1049,7 @@ class ExpressionParser
      */
     private function parsePropertyAccess(string $expression): string
     {
-        log_message('debug', "parsePropertyAccess - input: {$expression}");
+        //log_message('debug', "parsePropertyAccess - input: {$expression}");
         
         // CRITICAL: Filter out method names that should never be treated as properties
         // If expression contains method names like getQueryable, this is an error in extraction
@@ -968,13 +1067,13 @@ class ExpressionParser
         // Handle dynamic property access: $e->{$this->primaryKey}
         if (preg_match('/^\$[a-zA-Z_][a-zA-Z0-9_]*->\{([^}]+)\}/', $expression, $dynamicMatches)) {
             $dynamicProperty = trim($dynamicMatches[1]);
-            log_message('debug', "parsePropertyAccess - dynamic property detected: {$dynamicProperty}");
+            //log_message('debug', "parsePropertyAccess - dynamic property detected: {$dynamicProperty}");
             
             // Try to extract property name from dynamic expression
             // Pattern: $this->primaryKey or $variable->property
             if (preg_match('/\$this->([a-zA-Z_][a-zA-Z0-9_]*)/', $dynamicProperty, $thisMatches)) {
                 $propertyName = $thisMatches[1];
-                log_message('debug', "parsePropertyAccess - extracted property from \$this->: {$propertyName}");
+                //log_message('debug', "parsePropertyAccess - extracted property from \$this->: {$propertyName}");
                 
                 // If it's a common property name like 'primaryKey', try to resolve it
                 // For 'primaryKey', we need to find the actual primary key property from the entity
@@ -985,14 +1084,14 @@ class ExpressionParser
                         $keyAttributes = $prop->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\Key::class);
                         if (!empty($keyAttributes)) {
                             $propertyName = $prop->getName();
-                            log_message('debug', "parsePropertyAccess - found primary key property: {$propertyName}");
+                            //log_message('debug', "parsePropertyAccess - found primary key property: {$propertyName}");
                             break;
                         }
                     }
                     // If no primary key found, default to 'Id'
                     if ($propertyName === 'primaryKey') {
                         $propertyName = 'Id';
-                        log_message('debug', "parsePropertyAccess - using default primary key: Id");
+                        //log_message('debug', "parsePropertyAccess - using default primary key: Id");
                     }
                 }
             } elseif (preg_match('/\$([a-zA-Z_][a-zA-Z0-9_]*)/', $dynamicProperty, $varMatches)) {
@@ -1000,7 +1099,7 @@ class ExpressionParser
                 $varName = $varMatches[1];
                 if (isset($this->variableValues[$varName])) {
                     $propertyName = $this->variableValues[$varName];
-                    log_message('debug', "parsePropertyAccess - resolved dynamic property variable \${$varName} to: {$propertyName}");
+                    //log_message('debug', "parsePropertyAccess - resolved dynamic property variable \${$varName} to: {$propertyName}");
                 } else {
                     // Variable not found - use a default property name (Id) or throw an error
                     log_message('warning', "parsePropertyAccess - cannot resolve dynamic property variable: \${$varName}, using default 'Id'");
@@ -1016,7 +1115,7 @@ class ExpressionParser
             
             $columnName = $this->getColumnName($propertyName);
             $result = "{$this->tableAlias}.{$columnName}";
-            log_message('debug', "parsePropertyAccess - dynamic property result: {$result}");
+            //log_message('debug', "parsePropertyAccess - dynamic property result: {$result}");
             return $result;
         }
         
@@ -1025,20 +1124,35 @@ class ExpressionParser
         $originalExpression = $expression;
         
         // Check for navigation property pattern: $var->NavProp->Property
-        // Example: $p->CafeteriaEvent->CafeteriaAccountId
-        if (preg_match('/^\$[a-zA-Z_][a-zA-Z0-9_]*->([A-Za-z_][A-Za-z0-9_]*)->([A-Za-z_][A-Za-z0-9_]*)/', $expression, $navMatches)) {
+        // Example: $p->CafeteriaEvent->CafeteriaAccountId or $x->CafeteriaEvent->CafeteriaAccountId
+        // Also handle cases where there might be comparison operators: $x->NavProp->Property == value
+        if (preg_match('/^\$[a-zA-Z_][a-zA-Z0-9_]*->([A-Za-z_][A-Za-z0-9_]*)->([A-Za-z_][A-Za-z0-9_]*)(?:\s*[=!<>]+|$)/', $expression, $navMatches)) {
             $navigationProperty = $navMatches[1]; // e.g., "CafeteriaEvent"
             $property = $navMatches[2]; // e.g., "CafeteriaAccountId"
             
-            log_message('debug', "parsePropertyAccess - navigation property detected: {$navigationProperty}.{$property}");
+            //log_message('debug', "parsePropertyAccess - navigation property detected: {$navigationProperty}.{$property} from expression: {$expression}");
             
             // Return in NAVIGATION: format for AdvancedQueryBuilder to handle
             return "NAVIGATION:{$navigationProperty}.{$property}";
         }
         
+        // Extract variable name and normalize to $x if it's the lambda parameter
+        $varName = null;
+        if (preg_match('/^(\$[a-zA-Z_][a-zA-Z0-9_]*)->/', $expression, $varMatches)) {
+            $varName = $varMatches[1];
+            // If it's a lambda parameter (could be $x, $p, $e, etc.), normalize it
+            // The lambda parameter should be recognized by ExpressionParser
+            // We'll keep the original variable name but ensure it's recognized
+            if (!isset($this->variableValues[$varName])) {
+                // Add lambda parameter to variableValues so it's recognized
+                // The actual entity variable should be recognized as the table alias
+                $this->variableValues[$varName] = $varName; // Mark as recognized
+            }
+        }
+        
         $expression = preg_replace('/^\$[a-zA-Z_][a-zA-Z0-9_]*->/', '', $expression);
         
-        log_message('debug', "parsePropertyAccess - after removing variable prefix: {$expression}");
+        //log_message('debug', "parsePropertyAccess - after removing variable prefix: {$expression}");
         
         // If there's still a $ sign, it means we have a dynamic property like $e->$field
         // Try to resolve the variable from variableValues first
@@ -1047,10 +1161,10 @@ class ExpressionParser
             // Check if this variable has a value in variableValues (e.g., $field = "EmployeeID")
             if (isset($this->variableValues[$varName])) {
                 $varValue = $this->variableValues[$varName];
-                log_message('debug', "parsePropertyAccess - resolving variable \${$varName} to: {$varValue}");
+                //log_message('debug', "parsePropertyAccess - resolving variable \${$varName} to: {$varValue}");
                 // Replace the variable with its value
                 $expression = preg_replace('/\$' . preg_quote($varName, '/') . '/', $varValue, $expression);
-                log_message('debug', "parsePropertyAccess - after resolving variable: {$expression}");
+                //log_message('debug', "parsePropertyAccess - after resolving variable: {$expression}");
             } else {
                 // Variable not found in variableValues - remove it (fallback behavior)
                 log_message('warning', "parsePropertyAccess - variable \${$varName} not found in variableValues, removing it");
@@ -1058,7 +1172,7 @@ class ExpressionParser
                 // Clean up any leftover -> operators
                 $expression = preg_replace('/^->+/', '', $expression);
                 $expression = ltrim($expression);
-                log_message('debug', "parsePropertyAccess - after removing unresolved variable: {$expression}");
+                //log_message('debug', "parsePropertyAccess - after removing unresolved variable: {$expression}");
             }
         }
         
@@ -1066,7 +1180,7 @@ class ExpressionParser
         $expression = preg_replace('/->/', '', $expression);
         $expression = trim($expression);
         
-        log_message('debug', "parsePropertyAccess - after removing -> operators: {$expression}");
+        //log_message('debug', "parsePropertyAccess - after removing -> operators: {$expression}");
         
         // If expression is empty or contains only spaces/dashes, something went wrong
         if (empty($expression) || preg_match('/^[\s\-\.]+$/', $expression)) {
@@ -1074,7 +1188,7 @@ class ExpressionParser
             // Try to extract property name from original expression
             if (preg_match('/->([A-Za-z_][A-Za-z0-9_]*)/', $originalExpression, $propMatches)) {
                 $expression = $propMatches[1];
-                log_message('debug', "parsePropertyAccess - extracted property name: {$expression}");
+                //log_message('debug', "parsePropertyAccess - extracted property name: {$expression}");
             } else {
                 // Fallback: use a default
                 return "{$this->tableAlias}.Id";
@@ -1088,7 +1202,7 @@ class ExpressionParser
             // If there are spaces, take the last word (property name)
             $parts = explode(' ', $expression);
             $expression = end($parts);
-            log_message('debug', "parsePropertyAccess - after extracting last word: {$expression}");
+            //log_message('debug', "parsePropertyAccess - after extracting last word: {$expression}");
         }
         
         // Check if expression contains navigation property path (e.g., "EmployeeDepartments.Department.DepartmentID")
@@ -1096,7 +1210,7 @@ class ExpressionParser
         if (strpos($expression, '.') !== false && preg_match('/^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+$/', $expression)) {
             // This is a navigation property path - return it as-is for AdvancedQueryBuilder to handle
             // Format: NAVIGATION:CollectionProperty.ReferenceProperty.Column
-            log_message('debug', "parsePropertyAccess - navigation property path detected: {$expression}");
+            //log_message('debug', "parsePropertyAccess - navigation property path detected: {$expression}");
             return "NAVIGATION:{$expression}";
         }
         
@@ -1117,7 +1231,7 @@ class ExpressionParser
         $columnName = $this->getColumnName($expression);
         
         $result = "{$this->tableAlias}.{$columnName}";
-        log_message('debug', "parsePropertyAccess - result: {$result}");
+        //log_message('debug', "parsePropertyAccess - result: {$result}");
         
         return $result;
     }
@@ -1178,12 +1292,12 @@ class ExpressionParser
         if (preg_match('/^\$([a-zA-Z_][a-zA-Z0-9_]*)$/', $value, $varMatches)) {
             $varName = $varMatches[1];
             
-            log_message('debug', "parseValue - variable: \${$varName}, variableValues: " . json_encode(array_keys($this->variableValues)));
+            //log_message('debug', "parseValue - variable: \${$varName}, variableValues: " . json_encode(array_keys($this->variableValues)));
             
             // Check if we have the value in variableValues
             if (isset($this->variableValues[$varName])) {
                 $varValue = $this->variableValues[$varName];
-                log_message('debug', "parseValue - found value for \${$varName}: " . (is_scalar($varValue) ? $varValue : gettype($varValue)));
+                //log_message('debug', "parseValue - found value for \${$varName}: " . (is_scalar($varValue) ? $varValue : gettype($varValue)));
                 
                 // Parse the actual value
                 if (is_string($varValue)) {
@@ -1201,7 +1315,7 @@ class ExpressionParser
                 }
             }
             
-            log_message('debug', "parseValue - value not found for \${$varName}, using parameter binding");
+            //log_message('debug', "parseValue - value not found for \${$varName}, using parameter binding");
             
             // If value not found, use parameter binding with ? placeholder (CodeIgniter style)
             $paramIndex = $this->parameterIndex++;

@@ -516,6 +516,29 @@ abstract class DbContext
                 $value = $property->getValue($entity);
             }
             
+            // Check if property type is an Entity class (navigation property)
+            $propertyType = $property->getType();
+            $isNavigationProperty = false;
+            
+            if ($propertyType instanceof \ReflectionNamedType) {
+                $typeName = $propertyType->getName();
+                // Check if type is Entity or extends Entity
+                if (class_exists($typeName) && is_subclass_of($typeName, \Yakupeyisan\CodeIgniter4\EntityFramework\Core\Entity::class)) {
+                    $isNavigationProperty = true;
+                }
+            } elseif ($propertyType instanceof \ReflectionUnionType) {
+                // For union types (e.g., ?Entity), check if any type is Entity
+                foreach ($propertyType->getTypes() as $type) {
+                    if ($type instanceof \ReflectionNamedType) {
+                        $typeName = $type->getName();
+                        if (class_exists($typeName) && is_subclass_of($typeName, \Yakupeyisan\CodeIgniter4\EntityFramework\Core\Entity::class)) {
+                            $isNavigationProperty = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            
             // Skip navigation properties (objects, arrays, and properties with InverseProperty attribute)
             if (is_object($value) && !($value instanceof \DateTime) && !($value instanceof \DateTimeInterface)) {
                 continue;
@@ -529,6 +552,11 @@ abstract class DbContext
             // Skip properties with InverseProperty attribute (navigation properties)
             $inversePropertyAttributes = $property->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\InverseProperty::class);
             if (!empty($inversePropertyAttributes)) {
+                continue;
+            }
+            
+            // Skip properties whose type is Entity (navigation properties)
+            if ($isNavigationProperty) {
                 continue;
             }
             
@@ -552,9 +580,19 @@ abstract class DbContext
             // Get inserted ID if auto-increment
             $insertId = $this->connection->insertID();
             if ($insertId > 0) {
-                $idProperty = $reflection->getProperty('Id');
-                $idProperty->setAccessible(true);
-                $idProperty->setValue($entity, $insertId);
+                // Find primary key property dynamically
+                $primaryKeyProperty = null;
+                foreach ($reflection->getProperties() as $property) {
+                    if ($this->isPrimaryKey($reflection, $property->getName())) {
+                        $primaryKeyProperty = $property;
+                        break;
+                    }
+                }
+                
+                if ($primaryKeyProperty !== null) {
+                    $primaryKeyProperty->setAccessible(true);
+                    $primaryKeyProperty->setValue($entity, $insertId);
+                }
             }
             return 1;
         }
@@ -598,6 +636,29 @@ abstract class DbContext
             $property->setAccessible(true);
             $value = $property->getValue($entity);
             
+            // Check if property type is an Entity class (navigation property)
+            $propertyType = $property->getType();
+            $isNavigationProperty = false;
+            
+            if ($propertyType instanceof \ReflectionNamedType) {
+                $typeName = $propertyType->getName();
+                // Check if type is Entity or extends Entity
+                if (class_exists($typeName) && is_subclass_of($typeName, \Yakupeyisan\CodeIgniter4\EntityFramework\Core\Entity::class)) {
+                    $isNavigationProperty = true;
+                }
+            } elseif ($propertyType instanceof \ReflectionUnionType) {
+                // For union types (e.g., ?Entity), check if any type is Entity
+                foreach ($propertyType->getTypes() as $type) {
+                    if ($type instanceof \ReflectionNamedType) {
+                        $typeName = $type->getName();
+                        if (class_exists($typeName) && is_subclass_of($typeName, \Yakupeyisan\CodeIgniter4\EntityFramework\Core\Entity::class)) {
+                            $isNavigationProperty = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            
             // Skip navigation properties (objects, arrays, and properties with InverseProperty attribute)
             if (is_object($value) && !($value instanceof \DateTime) && !($value instanceof \DateTimeInterface)) {
                 continue;
@@ -611,6 +672,11 @@ abstract class DbContext
             // Skip properties with InverseProperty attribute (navigation properties)
             $inversePropertyAttributes = $property->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\InverseProperty::class);
             if (!empty($inversePropertyAttributes)) {
+                continue;
+            }
+            
+            // Skip properties whose type is Entity (navigation properties)
+            if ($isNavigationProperty) {
                 continue;
             }
             
