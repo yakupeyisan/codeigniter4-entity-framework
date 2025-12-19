@@ -429,9 +429,9 @@ class AdvancedQueryBuilder
                 $row = $result->getRowArray();
                 return (int)($row['count'] ?? 0);
             } catch (\Exception $e) {
-                //log_message('error', 'SQL Query Error: ' . $e->getMessage());
-                //log_message('error', 'Failed SQL Query: ' . $sql);
-                //log_message('error', 'SQL Parameters: ' . json_encode($this->rawSqlParameters));
+                log_message('error', 'SQL Query Error: ' . $e->getMessage());
+                log_message('error', 'Failed SQL Query: ' . $sql);
+                log_message('error', 'SQL Parameters: ' . json_encode($this->rawSqlParameters));
                 throw $e;
             }
         }
@@ -944,8 +944,8 @@ class AdvancedQueryBuilder
             $results = $query->getResultArray();
         } catch (\Exception $e) {
             $sql = $builder->getCompiledSelect(false);
-            //log_message('error', 'SQL Query Error: ' . $e->getMessage());
-            //log_message('error', 'Failed SQL Query: ' . $sql);
+            log_message('error', 'SQL Query Error: ' . $e->getMessage());
+            log_message('error', 'Failed SQL Query: ' . $sql);
             throw $e;
         }
         $entities = $this->mapToEntities($results);
@@ -1089,7 +1089,8 @@ class AdvancedQueryBuilder
                     $whereParams = array_merge($whereParams, $paramValues);
                 }
             } catch (\Exception $e) {
-                //log_message('debug', 'Error parsing WHERE clause: ' . $e->getMessage());
+                log_message('debug', 'Error parsing WHERE clause: ' . $e->getMessage());
+                log_message('debug', 'Exception trace: ' . $e->getTraceAsString());
             }
         }
         
@@ -1120,17 +1121,12 @@ class AdvancedQueryBuilder
         
         // Execute query
         try {
-        try {
             $query = $this->connection->query($sql);
             $results = $query->getResultArray();
         } catch (\Exception $e) {
-            //log_message('error', 'SQL Query Error: ' . $e->getMessage());
-            //log_message('error', 'Failed SQL Query: ' . $sql);
-            throw $e;
-        }
-        } catch (\Exception $e) {
-            //log_message('error', 'SQL Query Error: ' . $e->getMessage());
-            //log_message('error', 'Failed SQL Query: ' . $sql);
+            log_message('error', 'SQL Query Error: ' . $e->getMessage());
+            log_message('error', 'Exception trace: ' . $e->getTraceAsString());
+            log_message('error', 'Failed SQL Query: ' . $sql);
             throw $e;
         }
         
@@ -1210,7 +1206,7 @@ class AdvancedQueryBuilder
                     $whereConditions[] = $sqlCondition;
                 }
             } catch (\Exception $e) {
-                //log_message('debug', 'Error parsing WHERE clause: ' . $e->getMessage());
+                log_message('debug', 'Error parsing WHERE clause: ' . $e->getMessage());
             }
         }
         
@@ -1235,17 +1231,11 @@ class AdvancedQueryBuilder
         
         // Execute query
         try {
-        try {
             $query = $this->connection->query($sql);
             $results = $query->getResultArray();
         } catch (\Exception $e) {
-            //log_message('error', 'SQL Query Error: ' . $e->getMessage());
-            //log_message('error', 'Failed SQL Query: ' . $sql);
-            throw $e;
-        }
-        } catch (\Exception $e) {
-            //log_message('error', 'SQL Query Error: ' . $e->getMessage());
-            //log_message('error', 'Failed SQL Query: ' . $sql);
+            log_message('error', 'SQL Query Error: ' . $e->getMessage());
+            log_message('error', 'Failed SQL Query: ' . $sql);
             throw $e;
         }
         
@@ -1317,20 +1307,14 @@ class AdvancedQueryBuilder
         
         // Execute raw SQL
         try {
-        try {
             $query = $this->connection->query($sql);
             $results = $query->getResultArray();
         } catch (\Exception $e) {
-            //log_message('error', 'SQL Query Error: ' . $e->getMessage());
-            //log_message('error', 'Failed SQL Query: ' . $sql);
+            log_message('error', 'SQL Query Error: ' . $e->getMessage());
+            log_message('error', 'SQL Query Error: ' . $e->getTraceAsString());
+            log_message('error', 'Failed SQL Query: ' . $sql);
             throw $e;
         }
-        } catch (\Exception $e) {
-            //log_message('error', 'SQL Query Error: ' . $e->getMessage());
-            //log_message('error', 'Failed SQL Query: ' . $sql);
-            throw $e;
-        }
-        
         // Log actual SQL executed
         //log_message('debug', 'EF Core Style SQL executed: ' . substr($sql, 0, 500) . '...');
         
@@ -1373,9 +1357,9 @@ class AdvancedQueryBuilder
             $query = $this->connection->query($this->rawSql, $this->rawSqlParameters);
             $results = $query->getResultArray();
         } catch (\Exception $e) {
-            //log_message('error', 'SQL Query Error: ' . $e->getMessage());
-            //log_message('error', 'Failed SQL Query: ' . $this->rawSql);
-            //log_message('error', 'SQL Parameters: ' . json_encode($this->rawSqlParameters));
+            log_message('error', 'SQL Query Error: ' . $e->getMessage());
+            log_message('error', 'Failed SQL Query: ' . $this->rawSql);
+            log_message('error', 'SQL Parameters: ' . json_encode($this->rawSqlParameters));
             throw $e;
         }
         $entities = $this->mapToEntities($results);
@@ -1479,7 +1463,7 @@ class AdvancedQueryBuilder
                 try {
                     return new \DateTime($value);
                 } catch (\Exception $e) {
-                    //log_message('error', "Failed to convert value '{$value}' to DateTime: " . $e->getMessage());
+                    log_message('error', "Failed to convert value '{$value}' to DateTime: " . $e->getMessage());
                     return null;
                 }
             }
@@ -1994,8 +1978,8 @@ class AdvancedQueryBuilder
             }
         } catch (\Exception $e) {
             // If parsing fails, fall back to old method
-            //log_message('debug', 'ExpressionParser failed: ' . $e->getMessage());
-            //log_message('debug', 'Exception trace: ' . $e->getTraceAsString());
+            log_message('debug', 'ExpressionParser failed: ' . $e->getMessage());
+            log_message('debug', 'Exception trace: ' . $e->getTraceAsString());
             $this->applySimpleWhereFallback($builder, $predicate);
         }
     }
@@ -2509,8 +2493,8 @@ class AdvancedQueryBuilder
             $relatedResults = $query->getResultArray();
         } catch (\Exception $e) {
             $sql = $builder->getCompiledSelect(false);
-            //log_message('error', 'SQL Query Error (Navigation): ' . $e->getMessage());
-            //log_message('error', 'Failed SQL Query: ' . $sql);
+            log_message('error', 'SQL Query Error (Navigation): ' . $e->getMessage());
+            log_message('error', 'Failed SQL Query: ' . $sql);
             throw $e;
         }
         
@@ -2579,8 +2563,8 @@ class AdvancedQueryBuilder
                 $relatedResults = $query->getResultArray();
             } catch (\Exception $e) {
                 $sql = $builder->getCompiledSelect(false);
-                //log_message('error', 'SQL Query Error (Navigation): ' . $e->getMessage());
-                //log_message('error', 'Failed SQL Query: ' . $sql);
+                log_message('error', 'SQL Query Error (Navigation): ' . $e->getMessage());
+                log_message('error', 'Failed SQL Query: ' . $sql);
                 throw $e;
             }
             
@@ -2657,8 +2641,8 @@ class AdvancedQueryBuilder
             $relatedResults = $query->getResultArray();
         } catch (\Exception $e) {
             $sql = $builder->getCompiledSelect(false);
-            //log_message('error', 'SQL Query Error (Navigation): ' . $e->getMessage());
-            //log_message('error', 'Failed SQL Query: ' . $sql);
+            log_message('error', 'SQL Query Error (Navigation): ' . $e->getMessage());
+            log_message('error', 'Failed SQL Query: ' . $sql);
             throw $e;
         }
         
@@ -4966,7 +4950,7 @@ class AdvancedQueryBuilder
         }
         
         // Log the generated SQL for debugging
-        //log_message('debug', 'Generated EF Core Style SQL: ' . $finalQuery);
+        log_message('debug', 'Generated EF Core Style SQL: ' . $finalQuery);
         //log_message('debug', 'buildEfCoreStyleQuery: ORDER BY columns: ' . implode(', ', $orderByColumns));
         
         return $finalQuery;
@@ -5529,11 +5513,35 @@ class AdvancedQueryBuilder
                 $fkAttributes = $property->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\ForeignKey::class);
                 if (!empty($fkAttributes)) {
                     $fkAttr = $fkAttributes[0]->newInstance();
-                    // Check if this FK points to the main entity (navigation property name matches main entity short name)
-                    if ($fkAttr->navigationProperty === $mainEntityShortName || 
-                        $fkAttr->navigationProperty === $navigationProperty ||
-                        strcasecmp($property->getName(), $mainEntityShortName . 'Id') === 0) {
-                        $foreignKey = $property->getName();
+                    $propName = $property->getName();
+                    
+                    // Check if this FK points to the main entity
+                    // 1. Navigation property name in FK attribute matches main entity short name (case-insensitive)
+                    // 2. Navigation property name in FK attribute matches the navigation property name
+                    // 3. Property name matches convention (MainEntityName + "Id") - case-insensitive
+                    $matchesFk = (strcasecmp($fkAttr->navigationProperty, $mainEntityShortName) === 0 || 
+                                 strcasecmp($fkAttr->navigationProperty, $navigationProperty) === 0 ||
+                                 strcasecmp($propName, $mainEntityShortName . 'Id') === 0);
+                    
+                    // Also check if there's a navigation property in the related entity with InverseProperty
+                    // pointing to our navigation property, and this FK property's ForeignKey points to main entity
+                    if (!$matchesFk) {
+                        foreach ($relatedEntityReflection->getProperties() as $navProp) {
+                            $navInverseAttrs = $navProp->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\InverseProperty::class);
+                            if (!empty($navInverseAttrs)) {
+                                $navInverseAttr = $navInverseAttrs[0]->newInstance();
+                                // If InverseProperty points to our navigation and FK points to main entity, it's a match
+                                if (strcasecmp($navInverseAttr->navigationProperty, $navigationProperty) === 0 &&
+                                    strcasecmp($fkAttr->navigationProperty, $mainEntityShortName) === 0) {
+                                    $matchesFk = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    
+                    if ($matchesFk) {
+                        $foreignKey = $propName;
                         $foundFk = true;
                         //log_message('debug', "getNavigationInfo: Found FK property '{$foreignKey}' from ForeignKey attribute for '{$navigationProperty}'");
                         break;
@@ -7522,8 +7530,8 @@ class AdvancedQueryBuilder
                 }
             }
         } catch (\Exception $e) {
-            //log_message('debug', 'convertSimpleWhereToSql failed: ' . $e->getMessage());
-            //log_message('debug', 'Exception trace: ' . $e->getTraceAsString());
+            log_message('debug', 'convertSimpleWhereToSql failed: ' . $e->getMessage());
+            log_message('debug', 'Exception trace: ' . $e->getTraceAsString());
         }
         
         return null;
@@ -7596,6 +7604,19 @@ class AdvancedQueryBuilder
                     $endLine = min(count($lines), $closureEndLine);
                     $closureCode = implode('', array_slice($lines, $startLine - 1, $endLine - $startLine + 1));
                     
+                    // CRITICAL: Remove method calls like getQueryable() that might have been captured from previous lines
+                    // These should never be treated as properties
+                    $invalidMethodNames = ['getQueryable', 'toList', 'toArray', 'count', 'first', 'single', 'skip', 'take', 'include', 'thenInclude', 'orderBy', 'orderByDescending', 'where', 'and', 'or', 'not'];
+                    foreach ($invalidMethodNames as $methodName) {
+                        // Remove method calls: Manager->getQueryable(), $var->getQueryable(), etc.
+                        $closureCode = preg_replace('/[a-zA-Z_][a-zA-Z0-9_]*\s*->\s*' . preg_quote($methodName, '/') . '\s*\([^)]*\)/i', '', $closureCode);
+                        $closureCode = preg_replace('/\$[a-zA-Z_][a-zA-Z0-9_]*\s*->\s*' . preg_quote($methodName, '/') . '\s*\([^)]*\)/i', '', $closureCode);
+                        // Remove standalone method name if it appears as a word
+                        $closureCode = preg_replace('/\b' . preg_quote($methodName, '/') . '\b/i', '', $closureCode);
+                    }
+                    // Clean up extra whitespace
+                    $closureCode = preg_replace('/\s+/', ' ', $closureCode);
+                    
                     // Pattern: $e->NavProp->Property (navigation property)
                     if (preg_match('/\$[a-zA-Z_][a-zA-Z0-9_]*\s*->\s*([A-Z][a-zA-Z0-9_]*)\s*->\s*([A-Z][a-zA-Z0-9_]*)/', $closureCode, $matches)) {
                         $navigationProperty = $matches[1];
@@ -7615,6 +7636,12 @@ class AdvancedQueryBuilder
                     } elseif (preg_match('/\$[a-zA-Z_][a-zA-Z0-9_]*\s*->\s*([a-zA-Z_][a-zA-Z0-9_]*)/', $closureCode, $matches)) {
                         // Static property: $e->PropertyName
                         $fieldName = $matches[1];
+                        // CRITICAL: Validate that fieldName is not a method name
+                        if (in_array(strtolower($fieldName), array_map('strtolower', $invalidMethodNames))) {
+                            // This is a method name, not a property - skip it
+                            //log_message('error', "convertOrderByToSql: Detected method name '{$fieldName}' as property, skipping");
+                            return null;
+                        }
                     }
                 }
             }
@@ -7904,8 +7931,8 @@ class AdvancedQueryBuilder
                 return "{$sqlExpression} {$direction}";
             }
         } catch (\Exception $e) {
-            //log_message('debug', 'convertOrderByToSql failed: ' . $e->getMessage());
-            //log_message('debug', 'Exception trace: ' . $e->getTraceAsString());
+            log_message('debug', 'convertOrderByToSql failed: ' . $e->getMessage());
+            log_message('debug', 'Exception trace: ' . $e->getTraceAsString());
         }
         
         return null;
@@ -8793,34 +8820,75 @@ class AdvancedQueryBuilder
                                     if ($docComment) {
                                         //log_message('debug', "parseEfCoreStyleResults: Property '{$prop->getName()}' docComment: " . trim($docComment));
                                     }
-                                    if (!$docComment) {
+                                    
+                                    $navPropType = null;
+                                    $isCollection = false;
+                                    
+                                    // Try to get type from @var annotation first
+                                    if ($docComment && preg_match('/@var\s+(\\\?[A-Za-z_][A-Za-z0-9_]*(?:\\\\[A-Za-z_][A-Za-z0-9_]*)*)(\[\])?/', $docComment, $matches)) {
+                                        $navPropType = $matches[1];
+                                        $isCollection = !empty($matches[2]);
+                                        
+                                        //log_message('debug', "parseEfCoreStyleResults: Found navigation property '{$prop->getName()}' with type '{$navPropType}' from @var annotation" . ($isCollection ? '[]' : ''));
+                                        
+                                        // Resolve namespace using use statements (only if not fully qualified)
+                                        if ($navPropType && !str_starts_with($navPropType, '\\')) {
+                                            $resolved = $this->resolveEntityType($navPropType, $collectionItemReflection);
+                                            if ($resolved !== null) {
+                                                //log_message('debug', "parseEfCoreStyleResults: Resolved '{$navPropType}' to '{$resolved}'");
+                                                $navPropType = $resolved;
+                                            }
+                                        }
+                                    }
+                                    // If no @var annotation, try to get type from type hint
+                                    elseif ($prop->hasType()) {
+                                        $type = $prop->getType();
+                                        if ($type instanceof \ReflectionNamedType && !$type->isBuiltin()) {
+                                            $navPropType = $type->getName();
+                                            // Check if it's a collection by checking if property type is array
+                                            $isCollection = $type->getName() === 'array';
+                                            
+                                            //log_message('debug', "parseEfCoreStyleResults: Found navigation property '{$prop->getName()}' with type '{$navPropType}' from type hint" . ($isCollection ? '[]' : ''));
+                                            
+                                            // If not fully qualified, resolve namespace
+                                            if ($navPropType && !str_starts_with($navPropType, '\\')) {
+                                                $resolved = $this->resolveEntityType($navPropType, $collectionItemReflection);
+                                                if ($resolved !== null) {
+                                                    //log_message('debug', "parseEfCoreStyleResults: Resolved type hint '{$navPropType}' to '{$resolved}'");
+                                                    $navPropType = $resolved;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    
+                                    // Skip if no type found or if it's a collection
+                                    if (!$navPropType) {
                                         continue;
                                     }
                                     
-                                    // Check if this is a reference navigation property (not a collection)
-                                    // First check if it's a collection (ends with [])
-                                    if (preg_match('/\[\]$/', $docComment)) {
+                                    if ($isCollection) {
                                         //log_message('debug', "parseEfCoreStyleResults: Property '{$prop->getName()}' is a collection, skipping");
                                         continue;
                                     }
                                     
-                                    // Extract type from @var annotation
-                                    // Pattern: @var \App\Entities\General\Department or @var Department
-                                    // Updated regex to handle fully qualified class names starting with \
-                                    if (preg_match('/@var\s+((?:\\\\?[A-Za-z_][A-Za-z0-9_]*)(?:\\\\[A-Za-z_][A-Za-z0-9_]*)*)/', $docComment, $matches)) {
-                                        $navPropType = $matches[1];
-                                        //log_message('debug', "parseEfCoreStyleResults: Found navigation property '{$prop->getName()}' with type '{$navPropType}'");
-                                        
-                                        // Check if this navigation property's entity is JOINed in collection subquery
-                                        // Related entity primary key column is aliased as Id{EntityName}0 (e.g., IdDepartment0)
-                                        // But in final SELECT it's prefixed with subquery alias: s0_IdDepartment0
-                                        $navPropShortName = (new ReflectionClass($navPropType))->getShortName();
-                                        $relatedIdKey = $subqueryAlias . '_Id' . ucfirst($navPropShortName) . '0'; // e.g., s0_IdDepartment0
-                                        
-                                        //log_message('debug', "parseEfCoreStyleResults: Checking navigation property '{$prop->getName()}' (type: {$navPropType}, shortName: {$navPropShortName}, relatedIdKey: {$relatedIdKey})");
-                                        //log_message('debug', "parseEfCoreStyleResults: relatedIdKey exists: " . (isset($row[$relatedIdKey]) ? 'yes' : 'no') . ", value: " . ($row[$relatedIdKey] ?? 'null'));
-                                        
-                                        if (isset($row[$relatedIdKey]) && $row[$relatedIdKey] !== null) {
+                                    // Check if class exists
+                                    if (!class_exists($navPropType)) {
+                                        //log_message('warning', "parseEfCoreStyleResults: Class '{$navPropType}' does not exist for property '{$prop->getName()}'");
+                                        continue;
+                                    }
+                                    
+                                    //log_message('debug', "parseEfCoreStyleResults: Found navigation property '{$prop->getName()}' with type '{$navPropType}'");
+                                    
+                                    // Check if this navigation property's entity is JOINed in collection subquery
+                                    // Related entity primary key column is aliased as Id{EntityName}0 (e.g., IdDepartment0)
+                                    // But in final SELECT it's prefixed with subquery alias: s0_IdDepartment0
+                                    $navPropShortName = (new ReflectionClass($navPropType))->getShortName();
+                                    $relatedIdKey = $subqueryAlias . '_Id' . ucfirst($navPropShortName) . '0'; // e.g., s0_IdDepartment0
+                                    
+                                    //log_message('debug', "parseEfCoreStyleResults: Checking navigation property '{$prop->getName()}' (type: {$navPropType}, shortName: {$navPropShortName}, relatedIdKey: {$relatedIdKey})");
+                                    //log_message('debug', "parseEfCoreStyleResults: relatedIdKey exists: " . (isset($row[$relatedIdKey]) ? 'yes' : 'no') . ", value: " . ($row[$relatedIdKey] ?? 'null'));
+                                    
+                                    if (isset($row[$relatedIdKey]) && $row[$relatedIdKey] !== null) {
                                             // Related entity exists in collection subquery - parse it
                                             $navPropReflection = new ReflectionClass($navPropType);
                                             $navPropColumns = $this->getEntityColumns($navPropReflection);
@@ -8925,10 +8993,9 @@ class AdvancedQueryBuilder
                                                 }
                                             }
                                             
-                                            // Parse nested collections for reference navigation
-                                            if (!empty($refThenIncludes)) {
-                                                $this->parseNestedCollections($navPropEntity, $navPropType, $refThenIncludes, $row, $subqueryAlias, $info['index']);
-                                            }
+                                        // Parse nested collections for reference navigation
+                                        if (!empty($refThenIncludes)) {
+                                            $this->parseNestedCollections($navPropEntity, $navPropType, $refThenIncludes, $row, $subqueryAlias, $info['index']);
                                         }
                                     }
                                 }
@@ -9453,12 +9520,12 @@ class AdvancedQueryBuilder
                             try {
                                 $value = new \DateTime($value);
                             } catch (\Exception $e) {
-                                //log_message('warning', "mapRowToEntity: Failed to convert '{$value}' to DateTime for property {$property->getName()}: " . $e->getMessage());
+                                log_message('warning', "mapRowToEntity: Failed to convert '{$value}' to DateTime for property {$property->getName()}: " . $e->getMessage());
                                 // If property is nullable, set to null, otherwise skip
                                 if ($isNullable) {
                                     $value = null;
                                 } else {
-                                    //log_message('debug', "mapRowToEntity: Skipping failed DateTime conversion for non-nullable property {$property->getName()}");
+                                    log_message('debug', "mapRowToEntity: Skipping failed DateTime conversion for non-nullable property {$property->getName()}");
                                     continue;
                                 }
                             }
