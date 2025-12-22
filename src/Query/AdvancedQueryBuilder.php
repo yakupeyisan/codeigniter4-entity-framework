@@ -1657,6 +1657,7 @@ class AdvancedQueryBuilder
             }
             
             // Check for method calls: startsWith, contains, endsWith
+            // Pattern 1: $e->$field->startsWith($value) - dynamic field and value variables
             if (preg_match('/\$[a-zA-Z_][a-zA-Z0-9_]*\s*->\s*\$([a-zA-Z_][a-zA-Z0-9_]*)\s*->\s*(startsWith|contains|endsWith)\s*\(\s*\$([a-zA-Z_][a-zA-Z0-9_]*)\s*\)/', $closureCodeForMethodCheck, $methodMatches)) {
                 // This is a method call like $e->$field->startsWith($formattedValue)
                 $fieldVarName = $methodMatches[1]; // e.g., "field"
@@ -1666,6 +1667,51 @@ class AdvancedQueryBuilder
                 // Get field name and value from variable values
                 $fieldName = $variableValues[$fieldVarName] ?? null;
                 $value = $variableValues[$valueVarName] ?? null;
+                
+                if ($fieldName !== null && $value !== null) {
+                    // Check if fieldName is a navigation property path (contains a dot)
+                    if (strpos($fieldName, '.') !== false) {
+                        // Navigation property path - use ExpressionParser to generate NAVIGATION:... format
+                        // ExpressionParser will handle this correctly
+                        $sqlCondition = null; // Let ExpressionParser handle it
+                    } else {
+                        // Direct property - build SQL directly
+                        // Get column name from property name
+                        $entityReflection = new \ReflectionClass($this->entityType);
+                        $columnName = $this->getColumnNameFromProperty($entityReflection, $fieldName);
+                        
+                        // Get table alias
+                        $tableAlias = $this->getTableAliasForParser();
+                        $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
+                        $quotedAlias = $provider->escapeIdentifier($tableAlias);
+                        $quotedColumn = $provider->escapeIdentifier($columnName);
+                        
+                        // Build SQL condition based on method
+                        $escapedValue = str_replace("'", "''", (string)$value);
+                        switch ($methodName) {
+                            case 'startsWith':
+                                $sqlCondition = "{$quotedAlias}.{$quotedColumn} LIKE '{$escapedValue}%'";
+                                break;
+                            case 'contains':
+                                $sqlCondition = "{$quotedAlias}.{$quotedColumn} LIKE '%{$escapedValue}%'";
+                                break;
+                            case 'endsWith':
+                                $sqlCondition = "{$quotedAlias}.{$quotedColumn} LIKE '%{$escapedValue}'";
+                                break;
+                        }
+                        
+                        if ($sqlCondition !== null) {
+                            //log_message('debug', 'Method call detected: ' . $methodName . ' -> SQL: ' . $sqlCondition);
+                        }
+                    }
+                }
+            }
+            // Pattern 2: $f->Field->startsWith('value') - static field name with string literal value
+            elseif (preg_match('/\$[a-zA-Z_][a-zA-Z0-9_]*\s*->\s*([A-Za-z_][A-Za-z0-9_]*)\s*->\s*(startsWith|contains|endsWith)\s*\(\s*([\'"])(.*?)\3\s*\)/', $closureCodeForMethodCheck, $methodMatches)) {
+                // This is a method call like $f->Field->startsWith('CustomField.')
+                $fieldName = $methodMatches[1]; // e.g., "Field"
+                $methodName = $methodMatches[2]; // e.g., "startsWith"
+                $value = $methodMatches[4]; // e.g., "CustomField." (string literal value)
                 
                 if ($fieldName !== null && $value !== null) {
                     // Check if fieldName is a navigation property path (contains a dot)
@@ -2037,8 +2083,19 @@ class AdvancedQueryBuilder
     {
         // When using CodeIgniter's base builder (no explicit alias), use the table name.
         // For advanced scenarios (raw joins, includes, masking) aliases are handled separately.
-        if ($this->useRawSql || !empty($this->rawJoins) || !empty($this->includes) || !empty($this->requiredJoins)) {
+        if ($this->useRawSql || !empty($this->rawJoins)) {
             return 't0';
+        }
+        
+        // For EF Core style queries (includes or navigation filters), use 'u' as alias (matching buildEfCoreStyleQuery)
+        // Use same logic as executeQuery to determine if EF Core style query will be used
+        if (!empty($this->includes) || $this->hasNavigationFilters()) {
+            return 'u';
+        }
+        
+        // Also check requiredJoins as they indicate EF Core style query usage
+        if (!empty($this->requiredJoins)) {
+            return 'u';
         }
 
         return $this->context->getTableName($this->entityType);

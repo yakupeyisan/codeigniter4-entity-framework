@@ -634,6 +634,14 @@ abstract class DbContext
             }
             
             $property->setAccessible(true);
+            
+            // Check if property is initialized (for typed properties in PHP 7.4+)
+            if (!$property->isInitialized($entity)) {
+                // For properties that are not initialized, skip them in update
+                // (they should not be updated if they were never set)
+                continue;
+            }
+            
             $value = $property->getValue($entity);
             
             // Check if property type is an Entity class (navigation property)

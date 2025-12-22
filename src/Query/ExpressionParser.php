@@ -370,7 +370,15 @@ class ExpressionParser
         
         //log_message('debug', "parseExpression - input: {$expression}");
         
-        // Handle parentheses FIRST
+        // Handle method calls (Contains, StartsWith, EndsWith, etc.) FIRST - BEFORE parentheses
+        // Method calls like ->startsWith() should be parsed before anything else to prevent breaking
+        $sql = $this->parseMethodCall($expression);
+        if ($sql !== null) {
+            //log_message('debug', "parseExpression - method call result: {$sql}");
+            return $sql;
+        }
+        
+        // Handle parentheses AFTER method calls
         if (preg_match('/^\((.*)\)$/', $expression, $matches)) {
             return '(' . $this->parseExpression($matches[1]) . ')';
         }
@@ -408,14 +416,6 @@ class ExpressionParser
         $sql = $this->parseIn($expression);
         if ($sql !== null) {
             //log_message('debug', "parseExpression - in result: {$sql}");
-            return $sql;
-        }
-        
-        // Handle method calls (Contains, StartsWith, EndsWith, etc.) BEFORE comparison
-        // Method calls like ->startsWith() should be parsed before comparison operators
-        $sql = $this->parseMethodCall($expression);
-        if ($sql !== null) {
-            //log_message('debug', "parseExpression - method call result: {$sql}");
             return $sql;
         }
         
@@ -722,8 +722,25 @@ class ExpressionParser
      */
     private function parseMethodCall(string $expression): ?string
     {
-        // Contains: $x->Property->contains('value')
-        if (preg_match('/^(.+?)->contains\((.+?)\)$/i', $expression, $matches)) {
+        //log_message('debug', "parseMethodCall - input: {$expression}");
+        // Contains: $x->Property->contains('value') or $x->Property->contains("value")
+        // Match both quoted strings and variables
+        // Use non-greedy matching and don't require end anchor to handle incomplete expressions
+        if (preg_match('/^(.+?)->contains\s*\(\s*([\'"])(.*?)\2\s*\)/i', $expression, $matches)) {
+            // String literal value (quoted)
+            $property = trim($matches[1]);
+            $value = trim($matches[3]); // Extract the string value without quotes
+            // Use parsePropertyAccess if it's a property access pattern, otherwise use parseExpression
+            if (preg_match('/^\$[a-zA-Z_][a-zA-Z0-9_]*(->\$?[a-zA-Z_][a-zA-Z0-9_]*)*$/', $property)) {
+                $propertySql = $this->parsePropertyAccess($property);
+            } else {
+                $propertySql = $this->parseExpression($property);
+            }
+            // Escape single quotes for SQL
+            $escapedValue = str_replace("'", "''", $value);
+            return "{$propertySql} LIKE '%{$escapedValue}%'";
+        } elseif (preg_match('/^(.+?)->contains\s*\(\s*(.+?)\s*\)/i', $expression, $matches)) {
+            // Variable value (not quoted)
             $property = trim($matches[1]);
             $value = trim($matches[2]);
             // Use parsePropertyAccess if it's a property access pattern, otherwise use parseExpression
@@ -736,8 +753,26 @@ class ExpressionParser
             return "{$propertySql} LIKE CONCAT('%', {$valueSql}, '%')";
         }
         
-        // StartsWith: $x->Property->startsWith('value')
-        if (preg_match('/^(.+?)->startsWith\((.+?)\)$/i', $expression, $matches)) {
+        // StartsWith: $x->Property->startsWith('value') or $x->Property->startsWith("value")
+        // Match both quoted strings and variables
+        // Use non-greedy matching and don't require end anchor to handle incomplete expressions
+        // Make closing parenthesis optional to handle extraction issues
+        if (preg_match('/^(.+?)->startsWith\s*\(\s*([\'"])(.*?)\2\s*\)?/i', $expression, $matches)) {
+            //log_message('debug', "parseMethodCall - startsWith string literal matched: property={$matches[1]}, value={$matches[3]}");
+            // String literal value (quoted)
+            $property = trim($matches[1]);
+            $value = trim($matches[3]); // Extract the string value without quotes
+            // Use parsePropertyAccess if it's a property access pattern, otherwise use parseExpression
+            if (preg_match('/^\$[a-zA-Z_][a-zA-Z0-9_]*(->\$?[a-zA-Z_][a-zA-Z0-9_]*)*$/', $property)) {
+                $propertySql = $this->parsePropertyAccess($property);
+            } else {
+                $propertySql = $this->parseExpression($property);
+            }
+            // Escape single quotes for SQL
+            $escapedValue = str_replace("'", "''", $value);
+            return "{$propertySql} LIKE '{$escapedValue}%'";
+        } elseif (preg_match('/^(.+?)->startsWith\s*\(\s*(.+?)\s*\)/i', $expression, $matches)) {
+            // Variable value (not quoted)
             $property = trim($matches[1]);
             $value = trim($matches[2]);
             // Use parsePropertyAccess if it's a property access pattern, otherwise use parseExpression
@@ -747,11 +782,28 @@ class ExpressionParser
                 $propertySql = $this->parseExpression($property);
             }
             $valueSql = $this->parseValue($value);
+            // For SQL Server, use LIKE with CONCAT or string concatenation
+            // Use CONCAT for better compatibility
             return "{$propertySql} LIKE CONCAT({$valueSql}, '%')";
         }
         
-        // EndsWith: $x->Property->endsWith('value')
-        if (preg_match('/^(.+?)->endsWith\((.+?)\)$/i', $expression, $matches)) {
+        // EndsWith: $x->Property->endsWith('value') or $x->Property->endsWith("value")
+        // Match both quoted strings and variables
+        if (preg_match('/^(.+?)->endsWith\s*\(\s*([\'"])(.*?)\2\s*\)$/i', $expression, $matches)) {
+            // String literal value (quoted)
+            $property = trim($matches[1]);
+            $value = trim($matches[3]); // Extract the string value without quotes
+            // Use parsePropertyAccess if it's a property access pattern, otherwise use parseExpression
+            if (preg_match('/^\$[a-zA-Z_][a-zA-Z0-9_]*(->\$?[a-zA-Z_][a-zA-Z0-9_]*)*$/', $property)) {
+                $propertySql = $this->parsePropertyAccess($property);
+            } else {
+                $propertySql = $this->parseExpression($property);
+            }
+            // Escape single quotes for SQL
+            $escapedValue = str_replace("'", "''", $value);
+            return "{$propertySql} LIKE '%{$escapedValue}'";
+        } elseif (preg_match('/^(.+?)->endsWith\s*\(\s*(.+?)\s*\)/i', $expression, $matches)) {
+            // Variable value (not quoted)
             $property = trim($matches[1]);
             $value = trim($matches[2]);
             // Use parsePropertyAccess if it's a property access pattern, otherwise use parseExpression
@@ -1138,15 +1190,17 @@ class ExpressionParser
         
         // Extract variable name and normalize to $x if it's the lambda parameter
         $varName = null;
+        $isLambdaParameter = false;
         if (preg_match('/^(\$[a-zA-Z_][a-zA-Z0-9_]*)->/', $expression, $varMatches)) {
             $varName = $varMatches[1];
-            // If it's a lambda parameter (could be $x, $p, $e, etc.), normalize it
-            // The lambda parameter should be recognized by ExpressionParser
-            // We'll keep the original variable name but ensure it's recognized
+            // If it's a lambda parameter (could be $x, $p, $e, $f, etc.), it may not be in variableValues
+            // Lambda parameters are single-character or short variable names representing the entity
+            // If it's not in variableValues, treat it as a lambda parameter (entity reference)
             if (!isset($this->variableValues[$varName])) {
-                // Add lambda parameter to variableValues so it's recognized
-                // The actual entity variable should be recognized as the table alias
-                $this->variableValues[$varName] = $varName; // Mark as recognized
+                // This is likely a lambda parameter (entity variable)
+                // For lambda parameters, we just remove the prefix and process the property
+                // Don't add to variableValues as it's not a resolved value, it's the entity itself
+                $isLambdaParameter = true;
             }
         }
         
@@ -1166,13 +1220,23 @@ class ExpressionParser
                 $expression = preg_replace('/\$' . preg_quote($varName, '/') . '/', $varValue, $expression);
                 //log_message('debug', "parsePropertyAccess - after resolving variable: {$expression}");
             } else {
-                // Variable not found in variableValues - remove it (fallback behavior)
-                log_message('warning', "parsePropertyAccess - variable \${$varName} not found in variableValues, removing it");
-                $expression = preg_replace('/\$[a-zA-Z_][a-zA-Z0-9_]*/', '', $expression);
-                // Clean up any leftover -> operators
-                $expression = preg_replace('/^->+/', '', $expression);
-                $expression = ltrim($expression);
-                //log_message('debug', "parsePropertyAccess - after removing unresolved variable: {$expression}");
+                // Variable not found in variableValues
+                // If this looks like a lambda parameter (single char or short name), it's the entity reference
+                // Don't remove it, just continue processing - the property name should come after ->
+                // If we're in the context of a method call parse (like startsWith), this is likely a lambda parameter
+                // Check if there's a property name after this variable (e.g., $f->Field)
+                if (preg_match('/\$[a-zA-Z_][a-zA-Z0-9_]*->([A-Za-z_][A-Za-z0-9_]*)/', $originalExpression, $propMatch)) {
+                    // This is likely a lambda parameter with a property access pattern
+                    // Extract the property name and use it
+                    $expression = $propMatch[1];
+                } else {
+                    // Fallback: remove the variable (but log as debug, not warning, as this might be expected)
+                    //log_message('debug', "parsePropertyAccess - variable \${$varName} not found, removing it (may be lambda parameter in different context)");
+                    $expression = preg_replace('/\$[a-zA-Z_][a-zA-Z0-9_]*/', '', $expression);
+                    // Clean up any leftover -> operators
+                    $expression = preg_replace('/^->+/', '', $expression);
+                    $expression = ltrim($expression);
+                }
             }
         }
         
