@@ -5672,7 +5672,7 @@ class AdvancedQueryBuilder
                             if (!empty($navInverseAttrs)) {
                                 $navInverseAttr = $navInverseAttrs[0]->newInstance();
                                 // If InverseProperty points to our navigation and FK points to main entity, it's a match
-                                if (strcasecmp($navInverseAttr->navigationProperty, $navigationProperty) === 0 &&
+                                if (strcasecmp($navInverseAttr->property, $navigationProperty) === 0 &&
                                     strcasecmp($fkAttr->navigationProperty, $mainEntityShortName) === 0) {
                                     $matchesFk = true;
                                     break;
