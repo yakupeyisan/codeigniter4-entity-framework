@@ -429,9 +429,9 @@ class AdvancedQueryBuilder
                 $row = $result->getRowArray();
                 return (int)($row['count'] ?? 0);
             } catch (\Exception $e) {
-                log_message('error', 'SQL Query Error: ' . $e->getMessage());
-                log_message('error', 'Failed SQL Query: ' . $sql);
-                log_message('error', 'SQL Parameters: ' . json_encode($this->rawSqlParameters));
+                //log_message('error', 'SQL Query Error: ' . $e->getMessage());
+                //log_message('error', 'Failed SQL Query: ' . $sql);
+                //log_message('error', 'SQL Parameters: ' . json_encode($this->rawSqlParameters));
                 throw $e;
             }
         }
@@ -944,8 +944,8 @@ class AdvancedQueryBuilder
             $results = $query->getResultArray();
         } catch (\Exception $e) {
             $sql = $builder->getCompiledSelect(false);
-            log_message('error', 'SQL Query Error: ' . $e->getMessage());
-            log_message('error', 'Failed SQL Query: ' . $sql);
+            //log_message('error', 'SQL Query Error: ' . $e->getMessage());
+            //log_message('error', 'Failed SQL Query: ' . $sql);
             throw $e;
         }
         $entities = $this->mapToEntities($results);
@@ -1089,8 +1089,8 @@ class AdvancedQueryBuilder
                     $whereParams = array_merge($whereParams, $paramValues);
                 }
             } catch (\Exception $e) {
-                log_message('error', 'Error parsing WHERE clause: ' . $e->getMessage());
-                log_message('error', 'Exception trace: ' . $e->getTraceAsString());
+                //log_message('error', 'Error parsing WHERE clause: ' . $e->getMessage());
+                //log_message('error', 'Exception trace: ' . $e->getTraceAsString());
             }
         }
         
@@ -1124,9 +1124,9 @@ class AdvancedQueryBuilder
             $query = $this->connection->query($sql);
             $results = $query->getResultArray();
         } catch (\Exception $e) {
-            log_message('error', 'SQL Query Error: ' . $e->getMessage());
-            log_message('error', 'Exception trace: ' . $e->getTraceAsString());
-            log_message('error', 'Failed SQL Query: ' . $sql);
+            //log_message('error', 'SQL Query Error: ' . $e->getMessage());
+            //log_message('error', 'Exception trace: ' . $e->getTraceAsString());
+            //log_message('error', 'Failed SQL Query: ' . $sql);
             throw $e;
         }
         
@@ -1206,7 +1206,7 @@ class AdvancedQueryBuilder
                     $whereConditions[] = $sqlCondition;
                 }
             } catch (\Exception $e) {
-                log_message('error', 'Error parsing WHERE clause: ' . $e->getMessage());
+                //log_message('error', 'Error parsing WHERE clause: ' . $e->getMessage());
             }
         }
         
@@ -1234,8 +1234,8 @@ class AdvancedQueryBuilder
             $query = $this->connection->query($sql);
             $results = $query->getResultArray();
         } catch (\Exception $e) {
-            log_message('error', 'SQL Query Error: ' . $e->getMessage());
-            log_message('error', 'Failed SQL Query: ' . $sql);
+            //log_message('error', 'SQL Query Error: ' . $e->getMessage());
+            //log_message('error', 'Failed SQL Query: ' . $sql);
             throw $e;
         }
         
@@ -1308,17 +1308,17 @@ class AdvancedQueryBuilder
         // Execute raw SQL
         try {
             // Log SQL query before execution for debugging
-            log_message('debug', 'Executing SQL Query: ' . substr($sql, 0, 1000));
+            //log_message('debug', 'Executing SQL Query: ' . substr($sql, 0, 1000));
             if (strlen($sql) > 1000) {
-                log_message('debug', 'SQL Query (continued): ' . substr($sql, 1000, 1000));
+                //log_message('debug', 'SQL Query (continued): ' . substr($sql, 1000, 1000));
             }
             
             $query = $this->connection->query($sql);
             $results = $query->getResultArray();
         } catch (\Exception $e) {
-            log_message('error', 'SQL Query Error: ' . $e->getMessage());
-            log_message('error', 'SQL Query Error: ' . $e->getTraceAsString());
-            log_message('error', 'Failed SQL Query: ' . $sql);
+            //log_message('error', 'SQL Query Error: ' . $e->getMessage());
+            //log_message('error', 'SQL Query Error: ' . $e->getTraceAsString());
+            //log_message('error', 'Failed SQL Query: ' . $sql);
             throw $e;
         }
         // Log actual SQL executed
@@ -1363,9 +1363,9 @@ class AdvancedQueryBuilder
             $query = $this->connection->query($this->rawSql, $this->rawSqlParameters);
             $results = $query->getResultArray();
         } catch (\Exception $e) {
-            log_message('error', 'SQL Query Error: ' . $e->getMessage());
-            log_message('error', 'Failed SQL Query: ' . $this->rawSql);
-            log_message('error', 'SQL Parameters: ' . json_encode($this->rawSqlParameters));
+            //log_message('error', 'SQL Query Error: ' . $e->getMessage());
+            //log_message('error', 'Failed SQL Query: ' . $this->rawSql);
+            //log_message('error', 'SQL Parameters: ' . json_encode($this->rawSqlParameters));
             throw $e;
         }
         $entities = $this->mapToEntities($results);
@@ -1469,7 +1469,7 @@ class AdvancedQueryBuilder
                 try {
                     return new \DateTime($value);
                 } catch (\Exception $e) {
-                    log_message('error', "Failed to convert value '{$value}' to DateTime: " . $e->getMessage());
+                    //log_message('error', "Failed to convert value '{$value}' to DateTime: " . $e->getMessage());
                     return null;
                 }
             }
@@ -2026,8 +2026,8 @@ class AdvancedQueryBuilder
                         //log_message('debug', 'WHERE clause applied: ' . $sqlCondition);
                     }
                 } else {
-                    log_message('error', 'SQL condition empty or invalid after cleanup, using fallback');
-                    log_message('error', 'SQL condition: ' . $sqlCondition);
+                    //log_message('error', 'SQL condition empty or invalid after cleanup, using fallback');
+                    //log_message('error', 'SQL condition: ' . $sqlCondition);
                     // Fallback if cleanup resulted in empty condition
                     $this->applySimpleWhereFallback($builder, $predicate);
                 }
@@ -2038,8 +2038,8 @@ class AdvancedQueryBuilder
             }
         } catch (\Exception $e) {
             // If parsing fails, fall back to old method
-            log_message('error', 'ExpressionParser failed: ' . $e->getMessage());
-            log_message('error', 'Exception trace: ' . $e->getTraceAsString());
+            //log_message('error', 'ExpressionParser failed: ' . $e->getMessage());
+            //log_message('error', 'Exception trace: ' . $e->getTraceAsString());
             $this->applySimpleWhereFallback($builder, $predicate);
         }
     }
@@ -2333,7 +2333,7 @@ class AdvancedQueryBuilder
                 //log_message('debug', "applyNavigationWhereToSql - failed to parse SQL condition");
             }
         } catch (\Exception $e) {
-            log_message('error', "applyNavigationWhereToSql - error: " . $e->getMessage());
+            //log_message('error', "applyNavigationWhereToSql - error: " . $e->getMessage());
         }
     }
 
@@ -2577,8 +2577,8 @@ class AdvancedQueryBuilder
             $relatedResults = $query->getResultArray();
         } catch (\Exception $e) {
             $sql = $builder->getCompiledSelect(false);
-            log_message('error', 'SQL Query Error (Navigation): ' . $e->getMessage());
-            log_message('error', 'Failed SQL Query: ' . $sql);
+            //log_message('error', 'SQL Query Error (Navigation): ' . $e->getMessage());
+            //log_message('error', 'Failed SQL Query: ' . $sql);
             throw $e;
         }
         
@@ -2647,8 +2647,8 @@ class AdvancedQueryBuilder
                 $relatedResults = $query->getResultArray();
             } catch (\Exception $e) {
                 $sql = $builder->getCompiledSelect(false);
-                log_message('error', 'SQL Query Error (Navigation): ' . $e->getMessage());
-                log_message('error', 'Failed SQL Query: ' . $sql);
+                //log_message('error', 'SQL Query Error (Navigation): ' . $e->getMessage());
+                //log_message('error', 'Failed SQL Query: ' . $sql);
                 throw $e;
             }
             
@@ -2725,8 +2725,8 @@ class AdvancedQueryBuilder
             $relatedResults = $query->getResultArray();
         } catch (\Exception $e) {
             $sql = $builder->getCompiledSelect(false);
-            log_message('error', 'SQL Query Error (Navigation): ' . $e->getMessage());
-            log_message('error', 'Failed SQL Query: ' . $sql);
+            //log_message('error', 'SQL Query Error (Navigation): ' . $e->getMessage());
+            //log_message('error', 'Failed SQL Query: ' . $sql);
             throw $e;
         }
         
@@ -3750,10 +3750,10 @@ class AdvancedQueryBuilder
                 $paths = $this->detectNavigationPaths($where);
                 // Pass referenceNavAliases to use correct aliases in WHERE clause
                 $sqlWhere = $this->convertNavigationWhereToSql($where, $paths, $referenceNavAliases);
-                log_message('debug', "buildEfCoreStyleQuery - navigation filter #{$index}, sqlWhere: " . ($sqlWhere ?? 'NULL'));
+                //log_message('debug', "buildEfCoreStyleQuery - navigation filter #{$index}, sqlWhere: " . ($sqlWhere ?? 'NULL'));
             } else {
                 $sqlWhere = $this->convertSimpleWhereToSql($where, $mainAlias, $referenceNavAliases);
-                log_message('debug', "buildEfCoreStyleQuery - simple filter #{$index}, sqlWhere: " . ($sqlWhere ?? 'NULL'));
+                //log_message('debug', "buildEfCoreStyleQuery - simple filter #{$index}, sqlWhere: " . ($sqlWhere ?? 'NULL'));
             }
             
             if ($sqlWhere && trim($sqlWhere) !== '') {
@@ -3802,7 +3802,7 @@ class AdvancedQueryBuilder
         
         // Debug: Log WHERE clause to help diagnose syntax errors
         if (!empty($whereClause)) {
-            log_message('debug', "buildEfCoreStyleQuery - WHERE clause: {$whereClause}");
+            //log_message('debug', "buildEfCoreStyleQuery - WHERE clause: {$whereClause}");
         }
         
         // Check if any collection subquery has WHERE clause
@@ -5091,7 +5091,7 @@ class AdvancedQueryBuilder
         }
         
         // Log the generated SQL for debugging
-        log_message('info', 'Generated EF Core Style SQL: ' . $finalQuery);
+        //log_message('info', 'Generated EF Core Style SQL: ' . $finalQuery);
         //log_message('debug', 'buildEfCoreStyleQuery: ORDER BY columns: ' . implode(', ', $orderByColumns));
         
         return $finalQuery;
@@ -7408,7 +7408,7 @@ class AdvancedQueryBuilder
                 return null;
             }
         } catch (\Exception $e) {
-            log_message('error', "convertNavigationWhereToSql - error: " . $e->getMessage());
+            //log_message('error', "convertNavigationWhereToSql - error: " . $e->getMessage());
             return null;
         }
     }
@@ -7755,8 +7755,8 @@ class AdvancedQueryBuilder
                 }
             }
         } catch (\Exception $e) {
-            log_message('error', 'convertSimpleWhereToSql failed: ' . $e->getMessage());
-            log_message('error', 'Exception trace: ' . $e->getTraceAsString());
+            //log_message('error', 'convertSimpleWhereToSql failed: ' . $e->getMessage());
+            //log_message('error', 'Exception trace: ' . $e->getTraceAsString());
         }
         
         return null;
@@ -7825,11 +7825,11 @@ class AdvancedQueryBuilder
                 
                 if ($closureFile && file_exists($closureFile) && $closureStartLine && $closureEndLine) {
                     $lines = file($closureFile);
-                    $startLine = max(1, $closureStartLine - 5);
-                    $endLine = min(count($lines), $closureEndLine);
-                    $closureCode = implode('', array_slice($lines, $startLine - 1, $endLine - $startLine + 1));
+                    // CRITICAL: Only parse the closure's own lines, not previous lines
+                    // This prevents matching properties from previous closures (e.g., where clauses)
+                    $closureCode = implode('', array_slice($lines, $closureStartLine - 1, $closureEndLine - $closureStartLine + 1));
                     
-                    // CRITICAL: Remove method calls like getQueryable() that might have been captured from previous lines
+                    // CRITICAL: Remove method calls like getQueryable() that might have been captured
                     // These should never be treated as properties
                     $invalidMethodNames = ['getQueryable', 'toList', 'toArray', 'count', 'first', 'single', 'skip', 'take', 'include', 'thenInclude', 'orderBy', 'orderByDescending', 'where', 'and', 'or', 'not'];
                     foreach ($invalidMethodNames as $methodName) {
@@ -7841,6 +7841,8 @@ class AdvancedQueryBuilder
                     }
                     // Clean up extra whitespace
                     $closureCode = preg_replace('/\s+/', ' ', $closureCode);
+                    
+                    //log_message('debug', "convertOrderByToSql: Parsing closure code (lines {$closureStartLine}-{$closureEndLine}): " . trim($closureCode));
                     
                     // Pattern: $e->NavProp->Property (navigation property)
                     if (preg_match('/\$[a-zA-Z_][a-zA-Z0-9_]*\s*->\s*([A-Z][a-zA-Z0-9_]*)\s*->\s*([A-Z][a-zA-Z0-9_]*)/', $closureCode, $matches)) {
@@ -7867,7 +7869,42 @@ class AdvancedQueryBuilder
                             //log_message('error', "convertOrderByToSql: Detected method name '{$fieldName}' as property, skipping");
                             return null;
                         }
+                        //log_message('debug', "convertOrderByToSql: Extracted fieldName from closure code: {$fieldName}");
                     }
+                }
+            }
+            
+            // If we found fieldName but haven't processed it yet, process it now
+            if ($fieldName !== null && $navigationProperty === null && $nestedProperty === null) {
+                //log_message('debug', "convertOrderByToSql: Processing simple fieldName: {$fieldName}");
+                
+                // Special case: if fieldName is "primaryKey", get the actual primary key column name
+                if ($fieldName === 'primaryKey') {
+                    $entityReflection = new \ReflectionClass($this->entityType);
+                    $columnName = $this->getPrimaryKeyColumnName($entityReflection);
+                    //log_message('debug', "convertOrderByToSql: Resolved 'primaryKey' to actual column name: {$columnName}");
+                } else {
+                    // This is a simple property (not a navigation property)
+                    // Get column name from property name
+                    $entityReflection = new \ReflectionClass($this->entityType);
+                    $columnName = $this->getColumnNameFromProperty($entityReflection, $fieldName);
+                }
+                
+                if ($columnName) {
+                    // Build ORDER BY SQL
+                    $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
+                    $quotedAlias = $provider->escapeIdentifier($alias);
+                    $quotedColumn = $provider->escapeIdentifier($columnName);
+                    
+                    // Add direction
+                    $direction = strtoupper($direction);
+                    if ($direction !== 'ASC' && $direction !== 'DESC') {
+                        $direction = 'ASC';
+                    }
+                    
+                    $orderBySql = "{$quotedAlias}.{$quotedColumn} {$direction}";
+                    //log_message('debug', "convertOrderByToSql: Generated ORDER BY SQL for simple field: {$orderBySql}");
+                    return $orderBySql;
                 }
             }
             
@@ -8056,7 +8093,13 @@ class AdvancedQueryBuilder
             $parser->setVariableValues($variableValues);
             
             // Parse the key selector to get the column name
-            $sqlExpression = $parser->parse($keySelector);
+            try {
+                $sqlExpression = $parser->parse($keySelector);
+                //log_message('debug', "convertOrderByToSql: ExpressionParser result: " . ($sqlExpression ?? 'null'));
+            } catch (\Exception $e) {
+                //log_message('error', "convertOrderByToSql: ExpressionParser failed: " . $e->getMessage());
+                $sqlExpression = null;
+            }
             
             // Before processing, check if ExpressionParser produced SQL with collection navigation property paths
             // Collection navigation properties cannot be used in main subquery ORDER BY, and if unresolved for final query, skip
@@ -8156,8 +8199,8 @@ class AdvancedQueryBuilder
                 return "{$sqlExpression} {$direction}";
             }
         } catch (\Exception $e) {
-            log_message('error', 'convertOrderByToSql failed: ' . $e->getMessage());
-            log_message('error', 'Exception trace: ' . $e->getTraceAsString());
+            //log_message('error', 'convertOrderByToSql failed: ' . $e->getMessage());
+            //log_message('error', 'Exception trace: ' . $e->getTraceAsString());
         }
         
         return null;
@@ -9745,7 +9788,7 @@ class AdvancedQueryBuilder
                             try {
                                 $value = new \DateTime($value);
                             } catch (\Exception $e) {
-                                log_message('warning', "mapRowToEntity: Failed to convert '{$value}' to DateTime for property {$property->getName()}: " . $e->getMessage());
+                                //log_message('warning', "mapRowToEntity: Failed to convert '{$value}' to DateTime for property {$property->getName()}: " . $e->getMessage());
                                 // If property is nullable, set to null, otherwise skip
                                 if ($isNullable) {
                                     $value = null;

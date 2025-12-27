@@ -1043,7 +1043,7 @@ class ExpressionParser
                         return "NAVIGATION_IN:{$navPath}:" . implode(',', $valuesSql);
                     } else {
                         // Variable not found or not an array - return navigation path for AdvancedQueryBuilder to handle
-                        log_message('warning', "parseIn - variable \${$varName} not found in variableValues or not an array, returning navigation path");
+                        //log_message('warning', "parseIn - variable \${$varName} not found in variableValues or not an array, returning navigation path");
                         return "NAVIGATION_IN:{$navPath}:?";
                     }
                 }
@@ -1083,7 +1083,7 @@ class ExpressionParser
                 return "{$propertySql} IN (" . implode(', ', $valuesSql) . ")";
             } else {
                 // Variable not found or not an array - use parameter binding
-                log_message('warning', "parseIn - variable \${$varName} not found in variableValues or not an array, using parameter binding");
+                //log_message('warning', "parseIn - variable \${$varName} not found in variableValues or not an array, using parameter binding");
                 $paramIndex = $this->parameterIndex++;
                 $paramName = 'param_' . $paramIndex;
                 $this->parameterMap[$paramName] = '$' . $varName;
@@ -1110,7 +1110,7 @@ class ExpressionParser
             // If the expression is just the method name or contains it as a standalone word
             if (preg_match('/\b' . preg_quote($methodName, '/') . '\b/i', $expression)) {
                 // This is not a property, it's a method name that was incorrectly captured
-                log_message('error', "parsePropertyAccess - invalid method name detected in expression: {$expression}");
+                //log_message('error', "parsePropertyAccess - invalid method name detected in expression: {$expression}");
                 // Return fallback to prevent SQL error
                 return "{$this->tableAlias}.Id";
             }
@@ -1154,7 +1154,7 @@ class ExpressionParser
                     //log_message('debug', "parsePropertyAccess - resolved dynamic property variable \${$varName} to: {$propertyName}");
                 } else {
                     // Variable not found - use a default property name (Id) or throw an error
-                    log_message('warning', "parsePropertyAccess - cannot resolve dynamic property variable: \${$varName}, using default 'Id'");
+                    //log_message('warning', "parsePropertyAccess - cannot resolve dynamic property variable: \${$varName}, using default 'Id'");
                     $propertyName = 'Id'; // Fallback
                 }
             } else {
@@ -1248,7 +1248,7 @@ class ExpressionParser
         
         // If expression is empty or contains only spaces/dashes, something went wrong
         if (empty($expression) || preg_match('/^[\s\-\.]+$/', $expression)) {
-            log_message('error', "parsePropertyAccess - expression became empty or invalid: '{$expression}' from '{$originalExpression}'");
+            //log_message('error', "parsePropertyAccess - expression became empty or invalid: '{$expression}' from '{$originalExpression}'");
             // Try to extract property name from original expression
             if (preg_match('/->([A-Za-z_][A-Za-z0-9_]*)/', $originalExpression, $propMatches)) {
                 $expression = $propMatches[1];
@@ -1287,7 +1287,7 @@ class ExpressionParser
         if (in_array(strtolower($expression), array_map('strtolower', $invalidPropertyNames))) {
             // This is not a property, it's a method name that was incorrectly captured
             // Return a fallback (primary key) or empty string
-            log_message('warning', "parsePropertyAccess - invalid property name detected: {$expression}");
+            //log_message('warning', "parsePropertyAccess - invalid property name detected: {$expression}");
             return "{$this->tableAlias}.Id"; // Fallback to Id
         }
         
