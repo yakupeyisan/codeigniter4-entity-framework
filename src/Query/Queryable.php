@@ -5,6 +5,8 @@ namespace Yakupeyisan\CodeIgniter4\EntityFramework\Query;
 use Yakupeyisan\CodeIgniter4\EntityFramework\Core\DbContext;
 use Yakupeyisan\CodeIgniter4\EntityFramework\Query\AdvancedQueryBuilder;
 use CodeIgniter\Database\BaseConnection;
+use ReflectionClass;
+use stdClass;
 
 /**
  * Queryable - Implementation of IQueryable
@@ -162,6 +164,64 @@ class Queryable implements IQueryable
     public function toList(): array
     {
         return $this->queryBuilder->toList();
+    }    
+    public function cleanEntityState($data) {
+        if (is_array($data)) {
+            $cleaned = [];
+            foreach ($data as $key => $value) {
+                // Entity Framework tracking fields
+                if (in_array($key, [
+                    'entityState',
+                    'originalValues',
+                    'currentValues',
+                    'navigationProperties',
+                    'isTracking',
+                    // Variant with null bytes (serialized form)
+                    "\0*\0entityState",
+                    "\0*\0originalValues",
+                    "\0*\0currentValues",
+                    "\0*\0navigationProperties",
+                    "\0*\0isTracking"
+                ])) {
+                    continue;
+                }
+                
+                // Recursive clean for nested arrays/objects
+                $cleaned[$key] = $this->cleanEntityState($value);
+            }
+            return $cleaned;
+        } elseif (is_object($data)) {
+            $cleaned = new stdClass();
+            $reflection = new ReflectionClass($data);
+            $properties = $reflection->getProperties();
+            
+            foreach ($properties as $property) {
+                $property->setAccessible(true);
+                $name = $property->getName();
+                
+                // Skip entity framework fields
+                if (in_array($name, [
+                    'entityState',
+                    'originalValues',
+                    'currentValues',
+                    'navigationProperties',
+                    'isTracking'
+                ])) {
+                    continue;
+                }
+                
+                // Check if property is initialized before accessing (for typed properties)
+                if (!$property->isInitialized($data)) {
+                    continue;
+                }
+                
+                $value = $property->getValue($data);
+                $cleaned->$name = $this->cleanEntityState($value);
+            }
+            return $cleaned;
+        }
+        
+        return $data;
     }
 
     /**

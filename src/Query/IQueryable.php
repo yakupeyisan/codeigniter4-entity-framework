@@ -8,6 +8,8 @@ namespace Yakupeyisan\CodeIgniter4\EntityFramework\Query;
  */
 interface IQueryable
 {
+    public function cleanEntityState($data);
+    
     /**
      * Filter entities (Where)
      * @param callable $predicate Predicate function
