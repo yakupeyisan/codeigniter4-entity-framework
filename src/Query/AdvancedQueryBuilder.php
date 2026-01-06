@@ -5244,7 +5244,7 @@ class AdvancedQueryBuilder
         }
         
         // Log the generated SQL for debugging
-        log_message('info', 'Generated EF Core Style SQL: ' . $finalQuery);
+        log_message('error', 'Generated EF Core Style SQL: ' . $finalQuery);
         log_message('debug', 'buildEfCoreStyleQuery: ORDER BY columns: ' . implode(', ', $orderByColumns));
         
         return $finalQuery;
