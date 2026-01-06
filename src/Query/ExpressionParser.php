@@ -1453,6 +1453,10 @@ class ExpressionParser
                     return $varValue ? '1' : '0';
                 } elseif (is_null($varValue)) {
                     return 'NULL';
+                } elseif (is_object($varValue)) {
+                    // Objects should not be passed as variable values - log error and return NULL
+                    log_message('error', "parseValue - object of type " . get_class($varValue) . " passed as variable value for \${$varName}. Objects cannot be converted to SQL values.");
+                    return 'NULL';
                 } else {
                     $varValue = str_replace("'", "''", (string)$varValue);
                     return "'{$varValue}'";

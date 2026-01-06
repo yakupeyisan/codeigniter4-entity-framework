@@ -1600,10 +1600,12 @@ class AdvancedQueryBuilder
             
             // Try to get variables from static variables first
             foreach ($staticVariables as $varName => $varValue) {
-                // Skip entity objects (they're the lambda parameter)
-                if (!is_object($varValue) || !($varValue instanceof \Yakupeyisan\CodeIgniter4\EntityFramework\Core\Entity)) {
+                // Only include scalar values (string, int, float, bool) and null, or arrays for IN clauses
+                // Skip all objects (including stdClass, Entity, etc.) - they cannot be converted to SQL values
+                if (!is_object($varValue)) {
                     $variableValues[$varName] = $varValue;
                 }
+                // Skip all objects - they cannot be used as SQL literal values
             }
             
             // Try to parse use() clause from closure code and extract variable names
@@ -2395,10 +2397,12 @@ class AdvancedQueryBuilder
             
             // Try to get variables from static variables first
             foreach ($staticVariables as $varName => $varValue) {
-                // Skip entity objects (they're the lambda parameter)
-                if (!is_object($varValue) || !($varValue instanceof \Yakupeyisan\CodeIgniter4\EntityFramework\Core\Entity)) {
+                // Only include scalar values (string, int, float, bool) and null, or arrays for IN clauses
+                // Skip all objects (including stdClass, Entity, etc.) - they cannot be converted to SQL values
+                if (!is_object($varValue)) {
                     $variableValues[$varName] = $varValue;
                 }
+                // Skip all objects - they cannot be used as SQL literal values
             }
             
             // Try to parse use() clause from closure code and extract variable names
@@ -5244,7 +5248,7 @@ class AdvancedQueryBuilder
         }
         
         // Log the generated SQL for debugging
-        log_message('error', 'Generated EF Core Style SQL: ' . $finalQuery);
+        log_message('debug', 'Generated EF Core Style SQL: ' . $finalQuery);
         log_message('debug', 'buildEfCoreStyleQuery: ORDER BY columns: ' . implode(', ', $orderByColumns));
         
         return $finalQuery;
@@ -7471,10 +7475,12 @@ class AdvancedQueryBuilder
             
             // Try to get variables from static variables first
             foreach ($staticVariables as $varName => $varValue) {
-                // Skip entity objects (they're the lambda parameter)
-                if (!is_object($varValue) || !($varValue instanceof \Yakupeyisan\CodeIgniter4\EntityFramework\Core\Entity)) {
+                // Only include scalar values (string, int, float, bool) and null, or arrays for IN clauses
+                // Skip all objects (including stdClass, Entity, etc.) - they cannot be converted to SQL values
+                if (!is_object($varValue)) {
                     $variableValues[$varName] = $varValue;
                 }
+                // Skip all objects - they cannot be used as SQL literal values
             }
             
             // Try to parse use() clause from closure code and extract variable names
@@ -7587,10 +7593,12 @@ class AdvancedQueryBuilder
             
             // Try to get variables from static variables first
             foreach ($staticVariables as $varName => $varValue) {
-                // Skip entity objects (they're the lambda parameter)
-                if (!is_object($varValue) || !($varValue instanceof \Yakupeyisan\CodeIgniter4\EntityFramework\Core\Entity)) {
+                // Only include scalar values (string, int, float, bool) and null, or arrays for IN clauses
+                // Skip all objects (including stdClass, Entity, etc.) - they cannot be converted to SQL values
+                if (!is_object($varValue)) {
                     $variableValues[$varName] = $varValue;
                 }
+                // Skip all objects - they cannot be used as SQL literal values
             }
             
             // Try to parse use() clause from closure code and extract variable names
