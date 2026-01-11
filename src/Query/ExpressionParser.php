@@ -370,7 +370,41 @@ class ExpressionParser
         
         log_message('debug', "parseExpression - input: {$expression}");
         
-        // Handle method calls (Contains, StartsWith, EndsWith, etc.) FIRST - BEFORE parentheses
+        // Handle null comparisons FIRST - BEFORE method calls (for navigation properties)
+        // Pattern: $x->NavProp->Property == null or $x->NavProp->Property === null
+        // This must be checked before parseMethodCall to prevent incorrect parsing
+        if (preg_match('/^(.+?)\s*===\s*null$/i', $expression, $matches)) {
+            $property = trim($matches[1]);
+            $propertySql = $this->parsePropertyAccess($property);
+            if (!empty($propertySql)) {
+                // Check if it's a valid SQL column reference or navigation property format
+                if (preg_match('/^[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*$|^\[[^\]]+\]\.\[[^\]]+\]$/', $propertySql)) {
+                    log_message('debug', "parseExpression - null comparison (===) result: {$propertySql} IS NULL");
+                    return "{$propertySql} IS NULL";
+                }
+                if (preg_match('/^NAVIGATION:/', $propertySql)) {
+                    log_message('debug', "parseExpression - null comparison (===) with navigation result: {$propertySql} IS NULL");
+                    return "{$propertySql} IS NULL";
+                }
+            }
+        }
+        if (preg_match('/^(.+?)\s*==\s*null$/i', $expression, $matches)) {
+            $property = trim($matches[1]);
+            $propertySql = $this->parsePropertyAccess($property);
+            if (!empty($propertySql)) {
+                // Check if it's a valid SQL column reference or navigation property format
+                if (preg_match('/^[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*$|^\[[^\]]+\]\.\[[^\]]+\]$/', $propertySql)) {
+                    log_message('debug', "parseExpression - null comparison (==) result: {$propertySql} IS NULL");
+                    return "{$propertySql} IS NULL";
+                }
+                if (preg_match('/^NAVIGATION:/', $propertySql)) {
+                    log_message('debug', "parseExpression - null comparison (==) with navigation result: {$propertySql} IS NULL");
+                    return "{$propertySql} IS NULL";
+                }
+            }
+        }
+        
+        // Handle method calls (Contains, StartsWith, EndsWith, etc.) - AFTER null checks
         // Method calls like ->startsWith() should be parsed before anything else to prevent breaking
         $sql = $this->parseMethodCall($expression);
         if ($sql !== null) {
@@ -417,35 +451,6 @@ class ExpressionParser
         if ($sql !== null) {
             log_message('debug', "parseExpression - in result: {$sql}");
             return $sql;
-        }
-        
-        // Handle null comparisons BEFORE other comparisons (for navigation properties)
-        // Pattern: $x->NavProp->Property == null or $x->NavProp->Property === null
-        if (preg_match('/^(.+?)\s*===\s*null$/i', $expression, $matches)) {
-            $property = trim($matches[1]);
-            $propertySql = $this->parsePropertyAccess($property);
-            if (!empty($propertySql)) {
-                // Check if it's a valid SQL column reference or navigation property format
-                if (preg_match('/^[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*$|^\[[^\]]+\]\.\[[^\]]+\]$/', $propertySql)) {
-                    return "{$propertySql} IS NULL";
-                }
-                if (preg_match('/^NAVIGATION:/', $propertySql)) {
-                    return "{$propertySql} IS NULL";
-                }
-            }
-        }
-        if (preg_match('/^(.+?)\s*==\s*null$/i', $expression, $matches)) {
-            $property = trim($matches[1]);
-            $propertySql = $this->parsePropertyAccess($property);
-            if (!empty($propertySql)) {
-                // Check if it's a valid SQL column reference or navigation property format
-                if (preg_match('/^[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*$|^\[[^\]]+\]\.\[[^\]]+\]$/', $propertySql)) {
-                    return "{$propertySql} IS NULL";
-                }
-                if (preg_match('/^NAVIGATION:/', $propertySql)) {
-                    return "{$propertySql} IS NULL";
-                }
-            }
         }
         
         // Handle comparison operators (before arithmetic, because === has higher precedence than -)
@@ -1258,9 +1263,14 @@ class ExpressionParser
         // Check for navigation property pattern: $var->NavProp->Property
         // Example: $p->CafeteriaEvent->CafeteriaAccountId or $x->CafeteriaEvent->CafeteriaAccountId
         // Also handle cases where there might be comparison operators: $x->NavProp->Property == value
-        if (preg_match('/^\$[a-zA-Z_][a-zA-Z0-9_]*->([A-Za-z_][A-Za-z0-9_]*)->([A-Za-z_][A-Za-z0-9_]*)(?:\s*[=!<>]+|$)/', $expression, $navMatches)) {
-            $navigationProperty = $navMatches[1]; // e.g., "CafeteriaEvent"
-            $property = $navMatches[2]; // e.g., "CafeteriaAccountId"
+        // This MUST be checked BEFORE removing the variable prefix to ensure we catch navigation properties
+        // Pattern matches: $var->NavProp->Property (with or without trailing comparison operators)
+        $trimmedExpression = trim($expression);
+        // Match navigation property pattern: $var->NavProp->Property
+        // Use a simpler pattern that just matches the navigation property part, ignoring what comes after
+        if (preg_match('/^\$[a-zA-Z_][a-zA-Z0-9_]*->([A-Za-z_][A-Za-z0-9_]*)->([A-Za-z_][A-Za-z0-9_]*)/', $trimmedExpression, $navMatches)) {
+            $navigationProperty = $navMatches[1]; // e.g., "CafeteriaEvent" or "Employee"
+            $property = $navMatches[2]; // e.g., "CafeteriaAccountId" or "DeletedAt"
             
             log_message('debug', "parsePropertyAccess - navigation property detected: {$navigationProperty}.{$property} from expression: {$expression}");
             

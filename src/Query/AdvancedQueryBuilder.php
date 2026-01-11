@@ -2457,9 +2457,10 @@ class AdvancedQueryBuilder
                 if (strpos($sqlCondition, 'NAVIGATION:') !== false) {
                     // Extract navigation property path and SQL expression
                     // Format: NAVIGATION:CollectionProperty.Property SQL_OPERATOR
-                    if (preg_match('/NAVIGATION:([^\s]+)\s+(.+)$/', $sqlCondition, $navMatches)) {
-                        $navPath = $navMatches[1]; // e.g., "ReaderAccessCards.ReaderID"
-                        $sqlOperator = $navMatches[2]; // e.g., "= 86"
+                    // Handle both simple operators (= 86) and complex ones (IS NULL, IS NOT NULL)
+                    if (preg_match('/NAVIGATION:([^\s]+)\s+(.+)$/', trim($sqlCondition), $navMatches)) {
+                        $navPath = $navMatches[1]; // e.g., "ReaderAccessCards.ReaderID" or "Employee.DeletedAt"
+                        $sqlOperator = trim($navMatches[2]); // e.g., "= 86" or "IS NULL"
                         
                         $pathParts = explode('.', $navPath);
                         
@@ -2472,35 +2473,24 @@ class AdvancedQueryBuilder
                             $navInfo = $this->getNavigationInfo($navigationProperty);
                             if ($navInfo) {
                                 if ($navInfo['isCollection']) {
-                                    // Build EXISTS subquery for collection property
+                                    // For count() method, use JOIN table name directly (JOIN already added)
+                                    // This is more efficient than EXISTS subquery for count operations
                                     $collectionTableName = $this->context->getTableName($navInfo['entityType']);
                                     
-                                    // Get primary key column of main entity
-                                    $mainEntityReflection = new \ReflectionClass($this->entityType);
-                                    $mainPkColumn = $this->getPrimaryKeyColumnName($mainEntityReflection);
-                                    
-                                    // Get foreign key column in collection entity (points to main entity)
-                                    $collectionFkProperty = $navInfo['foreignKey'];
-                                    $collectionEntityReflection = new \ReflectionClass($navInfo['entityType']);
-                                    $collectionFkColumn = $this->getColumnNameFromProperty($collectionEntityReflection, $collectionFkProperty);
-                                    
                                     // Get column name from collection entity for the filter column
+                                    $collectionEntityReflection = new \ReflectionClass($navInfo['entityType']);
                                     $filterColumnName = $this->getColumnNameFromProperty($collectionEntityReflection, $columnName);
                                     
                                     $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
                                     
-                                    // For count() method, use table name as alias (CodeIgniter Query Builder)
-                                    $mainTableName = $this->context->getTableName($this->entityType);
-                                    $quotedMainTable = $provider->escapeIdentifier($mainTableName);
-                                    $quotedMainPk = $provider->escapeIdentifier($mainPkColumn);
+                                    // Use table name as identifier (CodeIgniter Query Builder uses table name directly)
                                     $quotedCollectionTable = $provider->escapeIdentifier($collectionTableName);
-                                    $quotedCollectionFk = $provider->escapeIdentifier($collectionFkColumn);
                                     $quotedFilterColumn = $provider->escapeIdentifier($filterColumnName);
                                     
-                                    // Build EXISTS subquery
-                                    $sqlCondition = "EXISTS (SELECT 1 FROM {$quotedCollectionTable} WHERE {$quotedCollectionTable}.{$quotedCollectionFk} = {$quotedMainTable}.{$quotedMainPk} AND {$quotedCollectionTable}.{$quotedFilterColumn} {$sqlOperator})";
+                                    // Build WHERE condition using JOIN table name directly
+                                    $sqlCondition = "{$quotedCollectionTable}.{$quotedFilterColumn} {$sqlOperator}";
                                     
-                                    log_message('debug', 'applyNavigationWhereToSql - converted NAVIGATION: prefix to EXISTS subquery: ' . $sqlCondition);
+                                    log_message('debug', 'applyNavigationWhereToSql - converted NAVIGATION: prefix to JOIN table filter: ' . $sqlCondition);
                                 } else {
                                     // Reference navigation property - use JOIN alias
                                     $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
@@ -4335,7 +4325,7 @@ class AdvancedQueryBuilder
                 $where = $whereItem;
             }
             
-            if ($where === null) {
+            if ($where === null || !is_callable($where)) {
                 continue;
             }
             
