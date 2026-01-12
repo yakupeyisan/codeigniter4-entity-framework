@@ -86,6 +86,7 @@ DatabaseProviderFactory::register(new OracleProvider());
    - Join / Left Join
    - **JoinRaw** - Join with raw SQL (derived tables, CTEs, date generation queries, etc.)
    - Raw SQL (FromSqlRaw)
+   - **Table-Valued Functions** - SQL Server ve PostgreSQL table-valued function desteği
    - **SensitiveValue** - SQL seviyesinde hassas veri maskeleme (kredi kartı, SSN vb.)
    - **Advanced Expression Tree Parsing**
      - Complex WHERE clause support (AND, OR, NOT)
@@ -1071,6 +1072,251 @@ $results = $context->Orders()
 3. **Join Type**: 'LEFT', 'INNER', 'RIGHT', 'FULL' join tiplerini kullanabilirsiniz
 4. **Parametreler**: Raw SQL'de parametreler kullanıyorsanız, `joinRaw` metodunun son parametresine dizi olarak geçebilirsiniz
 5. **SQL Injection**: Parametreli sorgular kullanarak SQL injection'dan korunun
+
+### Table-Valued Functions - SQL Server ve PostgreSQL Function Desteği
+
+SQL Server ve PostgreSQL'deki table-valued function'ları object-oriented bir şekilde çağırabilirsiniz. Function sonuçları entity class'larına map edilir ve normal query'ler gibi işlenebilir.
+
+#### Desteklenen Veritabanları
+
+- ✅ **SQL Server**: Tam destek
+- ✅ **PostgreSQL**: Tam destek
+- ❌ **MySQL**: Desteklenmiyor (stored procedure veya view kullanın)
+- ❌ **SQLite**: Desteklenmiyor (view veya subquery kullanın)
+
+#### Entity Class Oluşturma
+
+Function sonuçlarını temsil eden bir entity class'ı oluşturun:
+
+```php
+use Yakupeyisan\CodeIgniter4\EntityFramework\Core\Entity;
+use Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\Column;
+use Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\NotMapped;
+
+#[NotMapped]
+class CafeteriaSummary extends Entity
+{
+    #[Column(name: 'ApplicationName')]
+    public ?string $ApplicationName = null;
+
+    #[Column(name: 'CafeteriaGroupName')]
+    public ?string $CafeteriaGroupName = null;
+
+    #[Column(name: 'Subscription')]
+    public ?int $Subscription = null;
+
+    #[Column(name: 'FirstPass')]
+    public ?int $FirstPass = null;
+
+    #[Column(name: 'FirstPassPrice')]
+    public ?float $FirstPassPrice = null;
+
+    #[Column(name: 'SecondPass')]
+    public ?int $SecondPass = null;
+
+    #[Column(name: 'SecondPassPrice')]
+    public ?float $SecondPassPrice = null;
+}
+```
+
+**Önemli Notlar:**
+- `#[NotMapped]` attribute'u kullanın çünkü bu bir tablo değil, function sonucudur
+- Her property için `#[Column]` attribute'u ile veritabanı kolon adını belirtin
+- Primary key tanımlamaya gerek yoktur (function sonuçları genellikle primary key içermez)
+
+#### Function Çağırma
+
+DbContext'in `fromFunction` method'unu kullanarak function'ı çağırabilirsiniz:
+
+```php
+use App\EntityFramework\ApplicationDbContext;
+use App\Entities\CafeteriaSummary;
+
+$context = new ApplicationDbContext();
+
+$startDate = new \DateTime('2024-01-01');
+$endDate = new \DateTime('2024-12-31');
+
+// Function'ı çağır
+$results = $context->fromFunction(
+    CafeteriaSummary::class,      // Entity class
+    'dbo',                         // Schema name (SQL Server için 'dbo', PostgreSQL için 'public')
+    'fnCafeteriaSummary',          // Function name
+    [                              // Function parameters
+        'StartDate' => $startDate->format('Y-m-d H:i:s'),
+        'EndDate' => $endDate->format('Y-m-d H:i:s')
+    ]
+)->toList();
+
+// Sonuçları kullan
+foreach ($results as $summary) {
+    echo "Application: {$summary->ApplicationName}\n";
+    echo "Subscription: {$summary->Subscription}\n";
+    echo "FirstPass: {$summary->FirstPass}\n";
+}
+```
+
+#### SQL Server Function Örneği
+
+Aşağıdaki SQL Server function'ınız için:
+
+```sql
+ALTER FUNCTION [dbo].[fnCafeteriaSummary]
+(
+    @StartDate DATETIME,
+    @EndDate   DATETIME
+)
+RETURNS TABLE
+AS
+RETURN
+(
+    SELECT 
+        ApplicationName,
+        CafeteriaGroupName,
+        SUM(CASE WHEN TransactionType = 2 THEN 1 ELSE 0 END) AS Subscription,
+        SUM(CASE WHEN TransactionType = 3 THEN 1 ELSE 0 END) AS FirstPass,
+        -- ... diğer kolonlar
+    FROM CafeteriaEvent
+    WHERE EventTime BETWEEN @StartDate AND @EndDate
+    GROUP BY ApplicationName, CafeteriaGroupName
+);
+```
+
+PHP'de kullanım:
+
+```php
+$results = $context->fromFunction(
+    CafeteriaSummary::class,
+    'dbo',
+    'fnCafeteriaSummary',
+    [
+        'StartDate' => '2024-01-01 00:00:00',
+        'EndDate' => '2024-12-31 23:59:59'
+    ]
+)->toList();
+```
+
+#### Function Sonuçlarını İşleme
+
+Function sonuçları, normal entity query'leri gibi işlenebilir:
+
+```php
+// Liste olarak al
+$results = $context->fromFunction(...)->toList();
+
+// Array olarak al
+$results = $context->fromFunction(...)->toArray();
+
+// Filtreleme
+$filtered = $context->fromFunction(...)
+    ->where(fn($s) => $s->Subscription > 10)
+    ->toList();
+
+// Sıralama
+$ordered = $context->fromFunction(...)
+    ->orderBy(fn($s) => $s->ApplicationName)
+    ->toList();
+
+// Pagination
+$paged = $context->fromFunction(...)
+    ->skip(0)
+    ->take(10)
+    ->toList();
+
+// Aggregation
+$total = $context->fromFunction(...)
+    ->sum(fn($s) => $s->Subscription);
+
+$average = $context->fromFunction(...)
+    ->average(fn($s) => $s->FirstPassPrice);
+```
+
+#### Parametre İsimlendirme
+
+Function parametreleri, SQL Server'daki parametre isimleriyle eşleşmelidir. `@` işareti olmadan kullanın:
+
+```sql
+-- SQL Server'da
+@StartDate DATETIME,
+@EndDate   DATETIME
+```
+
+```php
+// PHP'de (@ işareti olmadan)
+[
+    'StartDate' => '2024-01-01 00:00:00',
+    'EndDate' => '2024-12-31 23:59:59'
+]
+```
+
+#### PostgreSQL Function Örneği
+
+PostgreSQL'de table-valued function'lar farklı syntax kullanır:
+
+```sql
+CREATE OR REPLACE FUNCTION public.get_sales_summary(
+    start_date DATE,
+    end_date DATE
+)
+RETURNS TABLE (
+    product_id INTEGER,
+    total_sales NUMERIC,
+    order_count INTEGER
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        p.id,
+        SUM(o.amount) as total_sales,
+        COUNT(o.id) as order_count
+    FROM products p
+    JOIN orders o ON o.product_id = p.id
+    WHERE o.order_date BETWEEN start_date AND end_date
+    GROUP BY p.id;
+END;
+$$ LANGUAGE plpgsql;
+```
+
+PHP'de kullanım:
+
+```php
+$results = $context->fromFunction(
+    SalesSummary::class,
+    'public',
+    'get_sales_summary',
+    [
+        'start_date' => '2024-01-01',
+        'end_date' => '2024-12-31'
+    ]
+)->toList();
+```
+
+#### Best Practices
+
+1. **Entity Naming**: Function sonuçları için entity class'ları açıklayıcı isimler kullanın (örn: `CafeteriaSummary`, `SalesReport`)
+
+2. **Nullable Properties**: Function sonuçlarında null değerler olabilir, bu yüzden property'leri nullable yapın (`?string`, `?int`, vb.)
+
+3. **Type Safety**: Property tiplerini function'ın döndürdüğü veri tipleriyle eşleştirin
+
+4. **Error Handling**: Function çağrılarını try-catch blokları içine alın
+
+5. **Performance**: Büyük sonuç setleri için pagination kullanın
+
+#### Sorun Giderme
+
+**Function Bulunamıyor Hatası:**
+- Schema adını kontrol edin (SQL Server için genellikle 'dbo', PostgreSQL için 'public')
+- Function adının doğru olduğundan emin olun
+- Veritabanı bağlantısının doğru olduğunu kontrol edin
+
+**Parametre Hatası:**
+- Parametre isimlerinin SQL Server'daki isimlerle eşleştiğinden emin olun
+- Parametre değerlerinin doğru formatta olduğunu kontrol edin (DateTime için 'Y-m-d H:i:s' formatı)
+
+**Mapping Hatası:**
+- Entity class'ındaki property isimlerinin `#[Column]` attribute'larıyla eşleştiğinden emin olun
+- Property tiplerinin function sonuçlarıyla uyumlu olduğunu kontrol edin
 
 ### SensitiveValue - Hassas Veri Maskeleme
 

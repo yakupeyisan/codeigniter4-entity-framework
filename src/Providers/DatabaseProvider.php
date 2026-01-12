@@ -76,5 +76,15 @@ interface DatabaseProvider
      * @return string SQL expression for masked column
      */
     public function getMaskingSql(string $columnName, string $maskChar = '*', int $visibleStart = 0, int $visibleEnd = 4, ?string $customMask = null): string;
+
+    /**
+     * Get SQL for calling a table-valued function
+     * 
+     * @param string $schema Schema name (e.g., 'dbo')
+     * @param string $functionName Function name
+     * @param array $parameters Function parameters (associative array: parameter name => value)
+     * @return string SQL query to call the function
+     */
+    public function getFunctionCallSql(string $schema, string $functionName, array $parameters = []): string;
 }
 

@@ -183,5 +183,30 @@ class PostgreSqlProvider implements DatabaseProvider
         }
         return "'" . str_replace("'", "''", $value) . "'";
     }
+
+    /**
+     * Get SQL for calling a table-valued function
+     * PostgreSQL supports table-valued functions
+     * 
+     * @param string $schema Schema name (e.g., 'public')
+     * @param string $functionName Function name
+     * @param array $parameters Function parameters (associative array: parameter name => value)
+     * @return string SQL query to call the function
+     */
+    public function getFunctionCallSql(string $schema, string $functionName, array $parameters = []): string
+    {
+        $quotedSchema = $this->escapeIdentifier($schema);
+        $quotedFunctionName = $this->escapeIdentifier($functionName);
+        
+        $paramList = [];
+        foreach ($parameters as $paramName => $paramValue) {
+            $quotedParamName = $this->escapeIdentifier($paramName);
+            $paramList[] = $this->escapeValue($paramValue);
+        }
+        
+        $params = !empty($paramList) ? implode(', ', $paramList) : '';
+        
+        return "SELECT * FROM {$quotedSchema}.{$quotedFunctionName}({$params})";
+    }
 }
 

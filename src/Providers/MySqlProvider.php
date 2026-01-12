@@ -181,5 +181,21 @@ class MySqlProvider implements DatabaseProvider
         }
         return "'" . str_replace("'", "''", $value) . "'";
     }
+
+    /**
+     * Get SQL for calling a table-valued function
+     * MySQL doesn't support table-valued functions like SQL Server
+     * This is a placeholder that throws an exception
+     * 
+     * @param string $schema Schema name (e.g., 'dbo')
+     * @param string $functionName Function name
+     * @param array $parameters Function parameters (associative array: parameter name => value)
+     * @return string SQL query to call the function
+     * @throws \RuntimeException MySQL doesn't support table-valued functions
+     */
+    public function getFunctionCallSql(string $schema, string $functionName, array $parameters = []): string
+    {
+        throw new \RuntimeException('MySQL does not support table-valued functions. Use stored procedures or views instead.');
+    }
 }
 

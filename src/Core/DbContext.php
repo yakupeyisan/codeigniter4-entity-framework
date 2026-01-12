@@ -802,6 +802,39 @@ abstract class DbContext
     }
 
     /**
+     * Call a table-valued function and return IQueryable
+     * 
+     * @param string $entityType Entity type to map results to
+     * @param string $schema Schema name (e.g., 'dbo')
+     * @param string $functionName Function name
+     * @param array $parameters Function parameters (associative array: parameter name => value)
+     * @return IQueryable Queryable instance for the function results
+     * 
+     * @example
+     * // Call fnCafeteriaSummary function
+     * $results = $context->fromFunction(
+     *     CafeteriaSummary::class,
+     *     'dbo',
+     *     'fnCafeteriaSummary',
+     *     [
+     *         'StartDate' => '2024-01-01 00:00:00',
+     *         'EndDate' => '2024-12-31 23:59:59'
+     *     ]
+     * )->toList();
+     */
+    public function fromFunction(string $entityType, string $schema, string $functionName, array $parameters = []): IQueryable
+    {
+        $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
+        $sql = $provider->getFunctionCallSql($schema, $functionName, $parameters);
+        
+        // Extract parameter values in order for positional binding
+        $paramValues = array_values($parameters);
+        
+        $queryable = new Queryable($this, $entityType, $this->connection);
+        return $queryable->fromSqlRaw($sql, $paramValues);
+    }
+
+    /**
      * Get entity configuration
      */
     public function getEntityConfiguration(string $entityType): array

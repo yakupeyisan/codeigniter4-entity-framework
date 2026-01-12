@@ -184,5 +184,35 @@ class SqlServerProvider implements DatabaseProvider
         }
         return "N'" . str_replace("'", "''", $value) . "'";
     }
+
+    /**
+     * Get SQL for calling a table-valued function
+     * 
+     * @param string $schema Schema name (e.g., 'dbo')
+     * @param string $functionName Function name
+     * @param array $parameters Function parameters (associative array: parameter name => value)
+     *                          Parameter names should NOT include @ prefix (e.g., 'StartDate' not '@StartDate')
+     * @return string SQL query to call the function
+     */
+    public function getFunctionCallSql(string $schema, string $functionName, array $parameters = []): string
+    {
+        $quotedSchema = $this->escapeIdentifier($schema);
+        $quotedFunctionName = $this->escapeIdentifier($functionName);
+        
+        $paramList = [];
+        foreach ($parameters as $paramName => $paramValue) {
+            // Remove @ prefix if present (user might include it or not)
+            $cleanParamName = ltrim($paramName, '@');
+            // Don't use escapeIdentifier for parameter names - SQL Server parameter names don't need brackets
+            // Just ensure it's a valid identifier (alphanumeric and underscore)
+            $cleanParamName = preg_replace('/[^a-zA-Z0-9_]/', '', $cleanParamName);
+            // Use parameter placeholder for binding (CodeIgniter uses ? for positional parameters)
+            $paramList[] = "?";
+        }
+        
+        $params = !empty($paramList) ? implode(', ', $paramList) : '';
+        
+        return "SELECT * FROM {$quotedSchema}.{$quotedFunctionName}({$params})";
+    }
 }
 

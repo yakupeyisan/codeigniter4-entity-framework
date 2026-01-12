@@ -1400,12 +1400,183 @@ class AdvancedQueryBuilder
     private function executeRawSql(): array
     {
         try {
-            $query = $this->connection->query($this->rawSql, $this->rawSqlParameters);
+            $sql = $this->rawSql;
+            $parameters = $this->rawSqlParameters;
+            
+            // If we have WHERE clauses, wrap the raw SQL in a subquery and apply WHERE clauses
+            if (!empty($this->wheres)) {
+                log_message('debug', 'executeRawSql - WHERE clauses count: ' . count($this->wheres));
+                $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
+                $alias = 't0';
+                $quotedAlias = $provider->escapeIdentifier($alias);
+                
+                // Wrap raw SQL in subquery
+                $sql = "SELECT * FROM ({$sql}) AS {$quotedAlias}";
+                
+                // Build WHERE clauses using ExpressionParser
+                $whereConditions = [];
+                $whereParams = [];
+                $inGroup = false;
+                $groupConditions = [];
+                
+                foreach ($this->wheres as $index => $whereItem) {
+                    log_message('debug', "executeRawSql - Processing WHERE item #{$index}, type: " . gettype($whereItem) . ", is_callable: " . (is_callable($whereItem) ? 'yes' : 'no'));
+                    if (is_array($whereItem)) {
+                        log_message('debug', "executeRawSql - WHERE item #{$index} is array: " . json_encode($whereItem));
+                    }
+                    if (is_array($whereItem)) {
+                        // Handle group markers
+                        if (isset($whereItem['groupStart']) && $whereItem['groupStart']) {
+                            $inGroup = true;
+                            $groupConditions = [];
+                            continue;
+                        }
+                        if (isset($whereItem['groupEnd']) && $whereItem['groupEnd']) {
+                            // Close group - only add if it has conditions
+                            if (!empty($groupConditions)) {
+                                if (count($groupConditions) > 1) {
+                                    $whereConditions[] = '(' . implode(' AND ', $groupConditions) . ')';
+                                } else {
+                                    $whereConditions[] = $groupConditions[0];
+                                }
+                            }
+                            $inGroup = false;
+                            $groupConditions = [];
+                            continue;
+                        }
+                    }
+                    
+                    // Check if whereItem is a callable or has a predicate key
+                    $predicate = null;
+                    if (is_callable($whereItem)) {
+                        $predicate = $whereItem;
+                    } elseif (is_array($whereItem) && isset($whereItem['predicate']) && is_callable($whereItem['predicate'])) {
+                        $predicate = $whereItem['predicate'];
+                    }
+                    
+                    if ($predicate !== null) {
+                        try {
+                            log_message('debug', 'executeRawSql - Processing WHERE clause (callable)');
+                            $parser = new ExpressionParser($this->entityType, $alias, $this->context);
+                            
+                            // Extract static variables from closure
+                            $reflection = new \ReflectionFunction($predicate);
+                            $staticVariables = $reflection->getStaticVariables();
+                            log_message('debug', 'executeRawSql - Static variables: ' . json_encode(array_keys($staticVariables)));
+                            
+                            $variableValues = [];
+                            foreach ($staticVariables as $varName => $varValue) {
+                                if (!is_object($varValue)) {
+                                    $variableValues[$varName] = $varValue;
+                                }
+                            }
+                            $parser->setVariableValues($variableValues);
+                            
+                            $parsedSql = $parser->parse($predicate);
+                            log_message('debug', 'executeRawSql - Parsed SQL: ' . ($parsedSql ?: '(empty)'));
+                            
+                            // If ExpressionParser failed, try to build SQL from static variables
+                            $fallbackParams = [];
+                            if (empty($parsedSql)) {
+                                log_message('debug', 'executeRawSql - ExpressionParser returned empty, trying fallback');
+                                // Check if we have field and formattedValue in static variables (from applyAdvancedFilter)
+                                if (isset($staticVariables['field']) && isset($staticVariables['formattedValue'])) {
+                                    $field = $staticVariables['field'];
+                                    $value = $staticVariables['formattedValue'];
+                                    log_message('debug', "executeRawSql - Found field: {$field}, value: {$value}");
+                                    $quotedField = $provider->escapeIdentifier($field);
+                                    $quotedAlias = $provider->escapeIdentifier($alias);
+                                    
+                                    // Check closure code to determine operator (use predicate's reflection)
+                                    $closureCode = $this->getClosureCode($reflection);
+                                    log_message('debug', 'executeRawSql - Closure code: ' . substr($closureCode, 0, 200));
+                                    if (strpos($closureCode, 'startsWith') !== false) {
+                                        // BEGINS/STARTSWITH operator
+                                        $parsedSql = "{$quotedAlias}.{$quotedField} LIKE ?";
+                                        $fallbackParams[] = $value . '%';
+                                        log_message('debug', 'executeRawSql - Detected startsWith operator');
+                                    } elseif (strpos($closureCode, 'contains') !== false) {
+                                        // CONTAINS operator
+                                        $parsedSql = "{$quotedAlias}.{$quotedField} LIKE ?";
+                                        $fallbackParams[] = '%' . $value . '%';
+                                        log_message('debug', 'executeRawSql - Detected contains operator');
+                                    } elseif (strpos($closureCode, 'endsWith') !== false) {
+                                        // ENDS/ENDSWITH operator
+                                        $parsedSql = "{$quotedAlias}.{$quotedField} LIKE ?";
+                                        $fallbackParams[] = '%' . $value;
+                                        log_message('debug', 'executeRawSql - Detected endsWith operator');
+                                    } elseif (strpos($closureCode, '===') !== false || strpos($closureCode, '==') !== false) {
+                                        // EQUAL operator
+                                        $parsedSql = "{$quotedAlias}.{$quotedField} = ?";
+                                        $fallbackParams[] = $value;
+                                        log_message('debug', 'executeRawSql - Detected equal operator');
+                                    }
+                                    log_message('debug', 'executeRawSql - Built SQL from static variables: ' . $parsedSql);
+                                } else {
+                                    log_message('debug', 'executeRawSql - No field/formattedValue in static variables');
+                                    log_message('debug', 'executeRawSql - Available static variables: ' . json_encode(array_keys($staticVariables)));
+                                }
+                            }
+                            
+                            if (!empty($parsedSql)) {
+                                if ($inGroup) {
+                                    $groupConditions[] = $parsedSql;
+                                } else {
+                                    $whereConditions[] = $parsedSql;
+                                }
+                                // Use fallback params if ExpressionParser didn't provide params
+                                if (!empty($fallbackParams)) {
+                                    $whereParams = array_merge($whereParams, $fallbackParams);
+                                } else {
+                                    $paramValues = $parser->getParameterValues();
+                                    if (!empty($paramValues)) {
+                                        $whereParams = array_merge($whereParams, $paramValues);
+                                    }
+                                }
+                            } else {
+                                log_message('debug', 'ExpressionParser returned empty SQL for WHERE clause');
+                                log_message('debug', 'Closure file: ' . $reflection->getFileName());
+                                log_message('debug', 'Closure lines: ' . $reflection->getStartLine() . '-' . $reflection->getEndLine());
+                                log_message('debug', 'Static variables: ' . json_encode($staticVariables));
+                            }
+                        } catch (\Exception $e) {
+                            log_message('error', 'Error parsing WHERE clause: ' . $e->getMessage());
+                            log_message('error', 'Stack trace: ' . $e->getTraceAsString());
+                            // Skip this condition if parsing fails
+                        }
+                    }
+                }
+                
+                // Handle any remaining open group
+                if ($inGroup && !empty($groupConditions)) {
+                    if (count($groupConditions) > 1) {
+                        $whereConditions[] = '(' . implode(' AND ', $groupConditions) . ')';
+                    } else {
+                        $whereConditions[] = $groupConditions[0];
+                    }
+                }
+                
+                // Only add WHERE clause if we have actual conditions (not just group markers)
+                $validConditions = array_filter($whereConditions, function($cond) {
+                    return !empty(trim($cond)) && $cond !== '(' && $cond !== ')';
+                });
+                
+                if (!empty($validConditions)) {
+                    $sql .= ' WHERE ' . implode(' AND ', $validConditions);
+                    $parameters = array_merge($parameters, $whereParams);
+                }
+                
+                // Log the final SQL query
+                log_message('debug', 'executeRawSql - Final SQL: ' . $sql);
+                log_message('debug', 'executeRawSql - Parameters: ' . json_encode($parameters));
+            }
+            
+            $query = $this->connection->query($sql, $parameters);
             $results = $query->getResultArray();
         } catch (\Exception $e) {
             log_message('error', 'SQL Query Error: ' . $e->getMessage());
-            log_message('error', 'Failed SQL Query: ' . $this->rawSql);
-            log_message('error', 'SQL Parameters: ' . json_encode($this->rawSqlParameters));
+            log_message('error', 'Failed SQL Query: ' . ($sql ?? $this->rawSql));
+            log_message('error', 'SQL Parameters: ' . json_encode($parameters ?? $this->rawSqlParameters));
             throw $e;
         }
         $entities = $this->mapToEntities($results);
@@ -1420,6 +1591,24 @@ class AdvancedQueryBuilder
         }
         
         return $entities;
+    }
+    
+    /**
+     * Get closure source code for analysis
+     */
+    private function getClosureCode(\ReflectionFunction $reflection): string
+    {
+        $file = $reflection->getFileName();
+        $start = $reflection->getStartLine();
+        $end = $reflection->getEndLine();
+        
+        if (!$file || !$start || !$end || !file_exists($file)) {
+            return '';
+        }
+        
+        $lines = file($file);
+        $code = implode('', array_slice($lines, max(0, $start - 1), $end - $start + 1));
+        return $code;
     }
 
     /**
