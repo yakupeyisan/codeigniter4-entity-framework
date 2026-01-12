@@ -4318,7 +4318,14 @@ class AdvancedQueryBuilder
             
             // If no ORDER BY from user but we have OFFSET/FETCH, use default
             if (empty($mainOrderByClause)) {
-                $mainOrderByClause = "ORDER BY (SELECT 1)\n";
+                // Get primary key column name for main entity
+                $mainEntityReflection = new ReflectionClass($this->entityType);
+                $mainPrimaryKeyColumn = $this->getPrimaryKeyColumnName($mainEntityReflection);
+                $quotedMainAlias = $provider->escapeIdentifier($mainAlias);
+                $quotedPkColumn = $provider->escapeIdentifier($mainPrimaryKeyColumn);
+                // escapeIdentifier already adds brackets, so don't add them again
+                $mainOrderByClause = "ORDER BY {$quotedMainAlias}.{$quotedPkColumn} DESC\n";
+                log_message('debug', "buildEfCoreStyleQuery: Using primary key column '{$mainPrimaryKeyColumn}' for default ORDER BY in subquery (DESC)");
             }
         }
         
@@ -5404,8 +5411,8 @@ class AdvancedQueryBuilder
             // Get primary key column name for main entity
             $mainEntityReflection = new ReflectionClass($this->entityType);
             $mainPrimaryKeyColumn = $this->getPrimaryKeyColumnName($mainEntityReflection);
-            log_message('debug', "buildEfCoreStyleQuery: Using primary key column '{$mainPrimaryKeyColumn}' for ORDER BY");
-            $orderByColumns[] = "[{$subqueryAlias}].[{$mainPrimaryKeyColumn}]";
+            log_message('debug', "buildEfCoreStyleQuery: Using primary key column '{$mainPrimaryKeyColumn}' for ORDER BY (DESC)");
+            $orderByColumns[] = "[{$subqueryAlias}].[{$mainPrimaryKeyColumn}] DESC";
             
             foreach ($referenceNavAliases as $navPath => $refAlias) {
                 // Only add if this navigation was included in main subquery
