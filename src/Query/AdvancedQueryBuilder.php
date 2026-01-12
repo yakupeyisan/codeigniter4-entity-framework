@@ -44,6 +44,7 @@ class AdvancedQueryBuilder
     private array $whereRaw = [];
     private array $referenceNavIndexes = []; // Store index for each navigation path (used in SQL building and parsing)
     private array $collectionNavIndexes = []; // Store index for each collection navigation path
+    private $lastThenIncludeParent = null; // Reference to the parent of the last thenInclude (for andInclude)
 
     public function __construct(DbContext $context, string $entityType, BaseConnection $connection)
     {
@@ -195,6 +196,9 @@ class AdvancedQueryBuilder
                 $current = &$current['thenIncludes'][count($current['thenIncludes']) - 1];
             }
             
+            // Store the parent reference for andInclude (the current thenInclude that will contain the new one)
+            $this->lastThenIncludeParent = &$current;
+            
             // Add to the deepest thenInclude's nested thenIncludes
             if (!isset($current['thenIncludes'])) {
                 $current['thenIncludes'] = [];
@@ -202,8 +206,44 @@ class AdvancedQueryBuilder
             $current['thenIncludes'][] = $thenIncludeData;
         } else {
             // No existing thenInclude, add directly to include
+            // Store the parent reference for andInclude (the include itself)
+            $this->lastThenIncludeParent = &$lastInclude;
             $lastInclude['thenIncludes'][] = $thenIncludeData;
         }
+        
+        return $this;
+    }
+
+    /**
+     * AndInclude - Add another thenInclude at the same level as the last thenInclude
+     * This is useful when you need to include multiple navigation properties from the same parent.
+     */
+    public function andInclude(string $navigationProperty, ?string $whereClause = null, string $joinType = 'LEFT', ?string $joinCondition = null): self
+    {
+        if (empty($this->includes)) {
+            throw new \RuntimeException('AndInclude must be called after Include and ThenInclude');
+        }
+        
+        if ($this->lastThenIncludeParent === null) {
+            throw new \RuntimeException('AndInclude must be called after ThenInclude');
+        }
+        
+        $thenIncludeData = ['navigation' => $navigationProperty];
+        if ($whereClause !== null) {
+            $thenIncludeData['whereClause'] = $whereClause;
+        }
+        if ($joinType !== 'LEFT') {
+            $thenIncludeData['joinType'] = strtoupper($joinType);
+        }
+        if ($joinCondition !== null) {
+            $thenIncludeData['joinCondition'] = $joinCondition;
+        }
+        
+        // Add to the same parent as the last thenInclude
+        if (!isset($this->lastThenIncludeParent['thenIncludes'])) {
+            $this->lastThenIncludeParent['thenIncludes'] = [];
+        }
+        $this->lastThenIncludeParent['thenIncludes'][] = $thenIncludeData;
         
         return $this;
     }
@@ -4416,7 +4456,7 @@ class AdvancedQueryBuilder
         }
         
         // Build a subquery for each collection include
-        foreach ($collectionIncludes as $collectionInclude) {
+        foreach ($collectionIncludes as $collectionIncludeIdx => $collectionInclude) {
             $navPath = $collectionInclude['fullPath'];
             $thenIncludes = $collectionInclude['thenIncludes'] ?? [];
             $whereClause = $collectionInclude['whereClause'] ?? null;
@@ -4436,7 +4476,7 @@ class AdvancedQueryBuilder
             
             // Get navigation info
             $navInfo = $this->getNavigationInfo($navPath);
-            log_message('debug', "buildEfCoreStyleQuery: Processing collection include '{$navPath}' (index: {$collectionIndex}) - navInfo: " . ($navInfo ? json_encode($navInfo) : 'null'));
+            log_message('debug', "buildEfCoreStyleQuery: Processing collection include '{$navPath}' (index: {$collectionIndex}, collectionIncludeIdx: {$collectionIncludeIdx}) - navInfo: " . ($navInfo ? json_encode($navInfo) : 'null'));
             
             if ($navInfo && $navInfo['isCollection']) {
                 // Store collection index for parsing
@@ -4448,8 +4488,10 @@ class AdvancedQueryBuilder
                 if ($subquery) {
                     $subquery['joinType'] = $joinType; // Store join type for later use
                     $subquery['parentPath'] = $collectionInclude['parentPath']; // Store parent path for JOIN condition
+                    $subquery['collectionIncludeIdx'] = $collectionIncludeIdx; // Store collection include index to distinguish multiple includes with same navigation path
+                    $subquery['includeIdx'] = $collectionInclude['includeIdx'] ?? null; // Store include index to match nested collections with parent
                     $collectionSubqueries[] = $subquery;
-                    log_message('debug', "buildEfCoreStyleQuery: Added collection subquery for '{$navPath}' with parent '{$collectionInclude['parentPath']}'");
+                    log_message('debug', "buildEfCoreStyleQuery: Added collection subquery for '{$navPath}' with parent '{$collectionInclude['parentPath']}' (collectionIncludeIdx: {$collectionIncludeIdx})");
                     // Update nested subquery index if nested subqueries were added
                     if (isset($subquery['nestedSubqueryIndex'])) {
                         $nestedSubqueryIndex = $subquery['nestedSubqueryIndex'];
@@ -4832,12 +4874,29 @@ class AdvancedQueryBuilder
                         if ($firstPartNavInfo && $firstPartNavInfo['isCollection']) {
                             // Parent is within a collection subquery
                             // Find the collection subquery alias
+                            // When there are multiple collection subqueries with the same navigation path,
+                            // match based on includeIdx to find the correct parent (nested collections belong to same include chain)
+                            $currentIncludeIdx = $subquery['includeIdx'] ?? null;
                             foreach ($collectionSubqueries as $csIdx => $cs) {
-                                if ($cs['navigation'] === $firstParentPart || str_ends_with($cs['navigation'], '.' . $firstParentPart)) {
-                                    $parentIsInCollectionSubquery = true;
-                                    $parentCollectionSubqueryAlias = 's' . $csIdx;
-                                    $parentReferenceNavName = $lastParentPart;
-                                    break;
+                                if (($cs['navigation'] === $firstParentPart || str_ends_with($cs['navigation'], '.' . $firstParentPart))) {
+                                    // Nested collection subqueries belong to the same include chain as their parent
+                                    // So match based on includeIdx
+                                    if ($currentIncludeIdx !== null && isset($cs['includeIdx'])) {
+                                        if ($cs['includeIdx'] === $currentIncludeIdx) {
+                                            $parentIsInCollectionSubquery = true;
+                                            $parentCollectionSubqueryAlias = 's' . $csIdx;
+                                            $parentReferenceNavName = $lastParentPart;
+                                            log_message('debug', "buildEfCoreStyleQuery: Matched parent collection subquery (index: {$csIdx}, includeIdx: {$currentIncludeIdx})");
+                                            break;
+                                        }
+                                    } else {
+                                        // Fallback: use first match (original behavior)
+                                        $parentIsInCollectionSubquery = true;
+                                        $parentCollectionSubqueryAlias = 's' . $csIdx;
+                                        $parentReferenceNavName = $lastParentPart;
+                                        log_message('debug', "buildEfCoreStyleQuery: Using first match for parent collection subquery (index: {$csIdx}) - no includeIdx");
+                                        break;
+                                    }
                                 }
                             }
                         }
@@ -6465,6 +6524,7 @@ class AdvancedQueryBuilder
         $nestedSubqueryJoins = [];
         $nestedSelectColumns = [];
         $currentNestedIndex = $nestedSubqueryIndex;
+        $referenceNavAliasIndex = 0; // Counter for reference navigation aliases at the same level
         
         // Use tracked column names from selectColumns (or extract if not tracked)
         $existingColumnNames = isset($selectColumnNames) ? $selectColumnNames : [];
@@ -6599,7 +6659,9 @@ class AdvancedQueryBuilder
                 $thenForeignKey = $thenNavInfo['foreignKey'];
                 $thenRelatedEntityReflection = new ReflectionClass($thenRelatedEntityType);
                 $thenRelatedTableName = $this->context->getTableName($thenRelatedEntityType);
-                $thenRelatedAlias = $this->getTableAlias($thenIncludeNav, 0);
+                // Use index to ensure unique aliases for same-level reference navigations (e.g., Terminal and TimeZone)
+                $thenRelatedAlias = $this->getTableAlias($thenIncludeNav, $referenceNavAliasIndex);
+                $referenceNavAliasIndex++; // Increment for next reference navigation at the same level
                 
                 // Get columns from thenInclude reference entity
                 $thenRelatedColumnsWithProperties = $this->getEntityColumnsWithProperties($thenRelatedEntityReflection);
@@ -9879,11 +9941,11 @@ class AdvancedQueryBuilder
             $collection = $navProperty->getValue($relatedEntity) ?? [];
             
             // Nested subquery alias (e.g., s1 for AccessGroupReaders within AccessGroup)
-            // The nested subquery columns are prefixed with parent subquery alias
+            // Nested collection subqueries use the next index after parent collection
             // For one-to-many nested collections (e.g., AccessGroupReaders), columns are:
             // s1_AccessGroupReaderID (join entity ID), s1_ReaderID (Terminal ID), s1_SerialNumber (Terminal columns), etc.
             // For many-to-many nested collections, columns might be: s1_Id1, s1_Id00, etc.
-            $nestedSubqueryAlias = $parentSubqueryAlias; // Same alias as parent (s1)
+            $nestedSubqueryAlias = 's' . $nestedSubqueryIndex; // Next index after parent (e.g., s1 if parent is s0)
             
             log_message('debug', "parseNestedCollections: Processing nested collection '{$thenIncludeNav}' for entity '{$relatedEntityType}', using subquery alias: {$nestedSubqueryAlias}, parentIndex: {$parentIndex}");
             
@@ -9899,7 +9961,9 @@ class AdvancedQueryBuilder
                 $nestedJoinEntityPrimaryKeyColumn = $this->getPrimaryKeyColumnName($nestedJoinEntityReflection);
                 
                 // Try multiple possible key patterns because nested subquery columns might be aliased
+                // Collection subqueries always alias the primary key as Id0 in the SELECT
                 $possibleKeys = [
+                    $nestedSubqueryAlias . '_Id0', // Always check Id0 first (standard alias in collection subqueries)
                     $nestedSubqueryAlias . '_' . $nestedJoinEntityPrimaryKeyColumn, // e.g., s1_AccessGroupReaderID
                     $nestedSubqueryAlias . '_' . $nestedJoinEntityPrimaryKeyColumn . '0', // e.g., s1_AccessGroupReaderID0 (if aliased)
                 ];

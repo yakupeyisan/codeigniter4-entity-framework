@@ -283,6 +283,49 @@ $employees = $context->Employees()
         'INNER'
     )
     ->toList();
+```
+
+#### AndInclude - Multiple Navigation Properties from Same Parent
+
+`andInclude()` metodu, son eklenen `thenInclude` ile aynı parent'a başka bir navigation property eklemenizi sağlar. Bu, aynı seviyedeki birden fazla navigation property'yi include etmek için kullanışlıdır.
+
+```php
+use App\EntityFramework\ApplicationDbContext;
+
+$context = new ApplicationDbContext();
+
+// AccessGroupReaders'dan hem Terminal hem de TimeZone include et
+$employees = $context->Employees()
+    ->include('EmployeeAccessGroups')
+        ->thenInclude('AccessGroup')
+            ->thenInclude('AccessGroupReaders')
+                ->thenInclude('Terminal')      // Terminal eklenir
+                ->andInclude('TimeZone');      // TimeZone, Terminal ile aynı seviyede (AccessGroupReaders altında) eklenir
+
+// Birden fazla andInclude kullanımı
+$employees = $context->Employees()
+    ->include('EmployeeAccessGroups')
+        ->thenInclude('AccessGroup')
+            ->thenInclude('AccessGroupReaders')
+                ->thenInclude('Terminal')
+                ->andInclude('TimeZone')       // Terminal ile aynı seviyede
+                ->andInclude('ReaderSettings'); // Terminal ve TimeZone ile aynı seviyede
+
+// WHERE clause ve JOIN type ile birlikte kullanım
+$employees = $context->Employees()
+    ->include('EmployeeAccessGroups')
+        ->thenInclude('AccessGroup')
+            ->thenInclude('AccessGroupReaders')
+                ->thenInclude('Terminal', '{alias}.Status = 1', 'INNER')
+                ->andInclude('TimeZone', '{alias}.IsActive = 1', 'LEFT');
+```
+
+**Önemli Notlar:**
+
+1. **ThenInclude Sonrası**: `andInclude()` mutlaka bir `thenInclude()` çağrısından sonra kullanılmalıdır
+2. **Aynı Seviye**: `andInclude()` son eklenen `thenInclude` ile aynı parent'a ekler (kardeş navigation property)
+3. **WHERE Clause**: `andInclude()` da `whereClause` ve `joinType` parametrelerini destekler
+4. **Custom JOIN Condition**: `andInclude()` da `joinCondition` parametresini destekler
 
 // Özel JOIN koşulu ile reference navigation (varsayılan foreign key yerine)
 // Örnek: AccessEvent.DeviceSerial = Terminals.SerialNumber

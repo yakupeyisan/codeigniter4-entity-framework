@@ -55,6 +55,22 @@ interface IQueryable
     public function thenInclude(string $navigationProperty, ?string $whereClause = null, string $joinType = 'LEFT', ?string $joinCondition = null): IQueryable;
 
     /**
+     * AndInclude - Add another thenInclude at the same level as the last thenInclude
+     * This is useful when you need to include multiple navigation properties from the same parent.
+     * @param string $navigationProperty Navigation property name
+     * @param string|null $whereClause Optional WHERE clause for collection subquery
+     * @param string $joinType Join type: 'LEFT' (default) or 'INNER'
+     * @param string|null $joinCondition Optional custom SQL join condition
+     * @example
+     * $query->include('EmployeeAccessGroups')
+     *     ->thenInclude('AccessGroup')
+     *         ->thenInclude('AccessGroupReaders')
+     *             ->thenInclude('Terminal')
+     *             ->andInclude('TimeZone'); // Adds TimeZone as a sibling to Terminal, both under AccessGroupReaders
+     */
+    public function andInclude(string $navigationProperty, ?string $whereClause = null, string $joinType = 'LEFT', ?string $joinCondition = null): IQueryable;
+
+    /**
      * Order by ascending
      */
     public function orderBy(callable $keySelector): IQueryable;

@@ -63,6 +63,12 @@ class Queryable implements IQueryable
         return $this;
     }
 
+    public function andInclude(string $navigationProperty, ?string $whereClause = null, string $joinType = 'LEFT', ?string $joinCondition = null): IQueryable
+    {
+        $this->queryBuilder->andInclude($navigationProperty, $whereClause, $joinType, $joinCondition);
+        return $this;
+    }
+
     public function orderBy(callable $keySelector): IQueryable
     {
         $this->queryBuilder->orderBy($keySelector, 'ASC');
