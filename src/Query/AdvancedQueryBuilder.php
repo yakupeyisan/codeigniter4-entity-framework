@@ -2157,63 +2157,160 @@ class AdvancedQueryBuilder
                             }
                         }
                         // Handle collection navigation property (e.g., "EmployeeDepartments.Department.DepartmentID")
+                        // OR nested path through reference navigation (e.g., "Employee.EmployeeDepartments.Department.DepartmentID")
                         elseif (count($pathParts) >= 3) {
-                            $collectionProperty = $pathParts[0]; // e.g., "EmployeeDepartments"
-                            $referenceProperty = $pathParts[1]; // e.g., "Department"
-                            $columnName = $pathParts[2]; // e.g., "DepartmentID"
+                            $processed = false;
                             
-                            // Get navigation info for collection property
-                            $navInfo = $this->getNavigationInfo($collectionProperty);
-                            if ($navInfo && $navInfo['isCollection']) {
-                                // Get navigation info for reference property within collection entity
-                                $collectionEntityType = $navInfo['entityType'];
-                                $refNavInfo = $this->getNavigationInfoForEntity($referenceProperty, $collectionEntityType);
+                            // Check if first part is a reference navigation (4+ parts: reference.collection.reference.column)
+                            if (count($pathParts) >= 4) {
+                                $referenceNavProperty = $pathParts[0]; // e.g., "Employee"
+                                $collectionProperty = $pathParts[1]; // e.g., "EmployeeDepartments"
+                                $referenceProperty = $pathParts[2]; // e.g., "Department"
+                                $columnName = $pathParts[3]; // e.g., "DepartmentID"
                                 
+                                // Get navigation info for reference navigation property
+                                $refNavInfo = $this->getNavigationInfo($referenceNavProperty);
                                 if ($refNavInfo && !$refNavInfo['isCollection']) {
-                                    // Build EXISTS subquery
-                                    // For CodeIgniter Query Builder (count() method), use table name instead of alias
-                                    if ($builder !== null) {
-                                        // In count() method, use table name as alias
-                                        $mainTableAlias = $this->context->getTableName($this->entityType);
-                                    } else {
-                                        // In buildEfCoreStyleQuery, use getTableAliasForParser
-                                        $mainTableAlias = $this->getTableAliasForParser();
+                                    // Get the entity type of the reference navigation
+                                    $refEntityType = $refNavInfo['entityType'];
+                                    
+                                    // Get navigation info for collection property from the reference entity
+                                    $navInfo = $this->getNavigationInfoForEntity($collectionProperty, $refEntityType);
+                                    if ($navInfo && $navInfo['isCollection']) {
+                                        // Get the FK in main entity that points to reference entity
+                                        $mainToRefFkProperty = $refNavInfo['foreignKey'];
+                                        $mainEntityReflection = new \ReflectionClass($this->entityType);
+                                        $mainToRefFkColumn = $this->getColumnNameFromProperty($mainEntityReflection, $mainToRefFkProperty);
+                                        
+                                        // Continue with collection navigation processing
+                                        $collectionEntityType = $navInfo['entityType'];
+                                        $refNavInfo2 = $this->getNavigationInfoForEntity($referenceProperty, $collectionEntityType);
+                                        
+                                        if ($refNavInfo2 && !$refNavInfo2['isCollection']) {
+                                            // Build EXISTS subquery with nested navigation
+                                            $collectionTableName = $this->context->getTableName($collectionEntityType);
+                                            $refTableName = $this->context->getTableName($refNavInfo2['entityType']);
+                                            
+                                            // Get FK in collection entity that points to reference entity
+                                            $refFkProperty = $refNavInfo2['foreignKey'];
+                                            $collectionEntityReflection = new \ReflectionClass($collectionEntityType);
+                                            $refFkColumn = $this->getColumnNameFromProperty($collectionEntityReflection, $refFkProperty);
+                                            
+                                            // Get primary key column of reference entity (for JOIN)
+                                            $refEntityReflection = new \ReflectionClass($refNavInfo2['entityType']);
+                                            $refPkColumn = $this->getPrimaryKeyColumnName($refEntityReflection);
+                                            
+                                            // Get column name from reference entity for the filter column
+                                            $refColumnName = $this->getColumnNameFromProperty($refEntityReflection, $columnName);
+                                            
+                                            // Get FK in collection entity that points to the reference entity (Employee)
+                                            $collectionFkProperty = $navInfo['foreignKey'];
+                                            $collectionFkColumn = $this->getColumnNameFromProperty($collectionEntityReflection, $collectionFkProperty);
+                                            
+                                            // For CodeIgniter Query Builder (count() method), use table name instead of alias
+                                            if ($builder !== null) {
+                                                // In count() method, use table name as alias
+                                                $mainTableAlias = $this->context->getTableName($this->entityType);
+                                            } else {
+                                                // In buildEfCoreStyleQuery, use getTableAliasForParser
+                                                $mainTableAlias = $this->getTableAliasForParser();
+                                            }
+                                            
+                                            $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
+                                            $quotedMainTable = $provider->escapeIdentifier($mainTableAlias);
+                                            $quotedMainToRefFk = $provider->escapeIdentifier($mainToRefFkColumn);
+                                            $quotedCollectionTable = $provider->escapeIdentifier($collectionTableName);
+                                            $quotedCollectionFk = $provider->escapeIdentifier($collectionFkColumn);
+                                            $quotedRefTable = $provider->escapeIdentifier($refTableName);
+                                            $quotedRefFk = $provider->escapeIdentifier($refFkColumn);
+                                            $quotedRefPk = $provider->escapeIdentifier($refPkColumn);
+                                            $quotedRefColumn = $provider->escapeIdentifier($refColumnName);
+                                            
+                                            // Build EXISTS subquery: Card -> Employee -> EmployeeDepartments -> Department
+                                            // JOIN: collectionEntity.FK = referenceEntity.PK
+                                            if ($values !== '?') {
+                                                $sqlCondition = "EXISTS (SELECT 1 FROM {$quotedCollectionTable} AS [ed] INNER JOIN {$quotedRefTable} AS [d] ON [ed].{$quotedRefFk} = [d].{$quotedRefPk} WHERE [ed].{$quotedCollectionFk} = {$quotedMainTable}.{$quotedMainToRefFk} AND [d].{$quotedRefColumn} IN ({$values}))";
+                                            } else {
+                                                $sqlCondition = "EXISTS (SELECT 1 FROM {$quotedCollectionTable} AS [ed] INNER JOIN {$quotedRefTable} AS [d] ON [ed].{$quotedRefFk} = [d].{$quotedRefPk} WHERE [ed].{$quotedCollectionFk} = {$quotedMainTable}.{$quotedMainToRefFk} AND [d].{$quotedRefColumn} IN (?))";
+                                            }
+                                            
+                                            log_message('debug', "applySimpleWhereWithParser - generated nested EXISTS subquery: {$sqlCondition}");
+                                            $processed = true;
+                                        }
                                     }
+                                }
+                            }
+                            
+                            // Handle direct collection navigation (3 parts: collection.reference.column)
+                            // Only process if 4-part path wasn't processed
+                            if (!$processed && count($pathParts) === 3) {
+                                $collectionProperty = $pathParts[0]; // e.g., "EmployeeDepartments"
+                                $referenceProperty = $pathParts[1]; // e.g., "Department"
+                                $columnName = $pathParts[2]; // e.g., "DepartmentID"
+                                
+                                // Get navigation info for collection property
+                                $navInfo = $this->getNavigationInfo($collectionProperty);
+                                if ($navInfo && $navInfo['isCollection']) {
+                                    // Get navigation info for reference property within collection entity
+                                    $collectionEntityType = $navInfo['entityType'];
+                                    $refNavInfo = $this->getNavigationInfoForEntity($referenceProperty, $collectionEntityType);
                                     
-                                    $collectionTableName = $this->context->getTableName($collectionEntityType);
-                                    $refTableName = $this->context->getTableName($refNavInfo['entityType']);
-                                    
-                                    // Get primary key column of main entity
-                                    $mainEntityReflection = new \ReflectionClass($this->entityType);
-                                    $mainPkColumn = $this->getPrimaryKeyColumnName($mainEntityReflection);
-                                    
-                                    // Get foreign key column in collection entity
-                                    $collectionFkColumn = $navInfo['foreignKey'];
-                                    
-                                    // Get foreign key column in reference entity
-                                    $refFkColumn = $refNavInfo['foreignKey'];
-                                    
-                                    // Get column name from reference entity
-                                    $refEntityReflection = new \ReflectionClass($refNavInfo['entityType']);
-                                    $refColumnName = $this->getColumnNameFromProperty($refEntityReflection, $columnName);
-                                    
-                                    $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
-                                    $quotedMainTable = $provider->escapeIdentifier($mainTableAlias);
-                                    $quotedMainPk = $provider->escapeIdentifier($mainPkColumn);
-                                    $quotedCollectionTable = $provider->escapeIdentifier($collectionTableName);
-                                    $quotedCollectionFk = $provider->escapeIdentifier($collectionFkColumn);
-                                    $quotedRefTable = $provider->escapeIdentifier($refTableName);
-                                    $quotedRefFk = $provider->escapeIdentifier($refFkColumn);
-                                    $quotedRefColumn = $provider->escapeIdentifier($refColumnName);
-                                    
-                                    // Build EXISTS subquery
-                                    if ($values !== '?') {
-                                        $sqlCondition = "EXISTS (SELECT 1 FROM {$quotedCollectionTable} AS [ed] INNER JOIN {$quotedRefTable} AS [d] ON [ed].{$quotedRefFk} = [d].{$quotedRefFk} WHERE [ed].{$quotedCollectionFk} = {$quotedMainTable}.{$quotedMainPk} AND [d].{$quotedRefColumn} IN ({$values}))";
-                                    } else {
-                                        $sqlCondition = "EXISTS (SELECT 1 FROM {$quotedCollectionTable} AS [ed] INNER JOIN {$quotedRefTable} AS [d] ON [ed].{$quotedRefFk} = [d].{$quotedRefFk} WHERE [ed].{$quotedCollectionFk} = {$quotedMainTable}.{$quotedMainPk} AND [d].{$quotedRefColumn} IN (?))";
+                                    if ($refNavInfo && !$refNavInfo['isCollection']) {
+                                        // Build EXISTS subquery
+                                        // For CodeIgniter Query Builder (count() method), use table name instead of alias
+                                        if ($builder !== null) {
+                                            // In count() method, use table name as alias
+                                            $mainTableAlias = $this->context->getTableName($this->entityType);
+                                        } else {
+                                            // In buildEfCoreStyleQuery, use getTableAliasForParser
+                                            $mainTableAlias = $this->getTableAliasForParser();
+                                        }
+                                        
+                                        $collectionTableName = $this->context->getTableName($collectionEntityType);
+                                        $refTableName = $this->context->getTableName($refNavInfo['entityType']);
+                                        
+                                        // Get primary key column of main entity
+                                        $mainEntityReflection = new \ReflectionClass($this->entityType);
+                                        $mainPkColumn = $this->getPrimaryKeyColumnName($mainEntityReflection);
+                                        
+                                        // Get foreign key column in collection entity (points to main entity)
+                                        $collectionFkProperty = $navInfo['foreignKey'];
+                                        $collectionEntityReflection = new \ReflectionClass($collectionEntityType);
+                                        $collectionFkColumn = $this->getColumnNameFromProperty($collectionEntityReflection, $collectionFkProperty);
+                                        
+                                        // Get foreign key property name in collection entity (points to reference entity)
+                                        $refFkProperty = $refNavInfo['foreignKey'];
+                                        
+                                        // Get column name for FK in collection entity
+                                        $refFkColumn = $this->getColumnNameFromProperty($collectionEntityReflection, $refFkProperty);
+                                        
+                                        // Get primary key column of reference entity (for JOIN)
+                                        $refEntityReflection = new \ReflectionClass($refNavInfo['entityType']);
+                                        $refPkColumn = $this->getPrimaryKeyColumnName($refEntityReflection);
+                                        
+                                        // Get column name from reference entity for the filter column
+                                        $refColumnName = $this->getColumnNameFromProperty($refEntityReflection, $columnName);
+                                        
+                                        $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
+                                        $quotedMainTable = $provider->escapeIdentifier($mainTableAlias);
+                                        $quotedMainPk = $provider->escapeIdentifier($mainPkColumn);
+                                        $quotedCollectionTable = $provider->escapeIdentifier($collectionTableName);
+                                        $quotedCollectionFk = $provider->escapeIdentifier($collectionFkColumn);
+                                        $quotedRefTable = $provider->escapeIdentifier($refTableName);
+                                        $quotedRefFk = $provider->escapeIdentifier($refFkColumn);
+                                        $quotedRefPk = $provider->escapeIdentifier($refPkColumn);
+                                        $quotedRefColumn = $provider->escapeIdentifier($refColumnName);
+                                        
+                                        // Build EXISTS subquery
+                                        // JOIN: collectionEntity.FK = referenceEntity.PK
+                                        if ($values !== '?') {
+                                            $sqlCondition = "EXISTS (SELECT 1 FROM {$quotedCollectionTable} AS [ed] INNER JOIN {$quotedRefTable} AS [d] ON [ed].{$quotedRefFk} = [d].{$quotedRefPk} WHERE [ed].{$quotedCollectionFk} = {$quotedMainTable}.{$quotedMainPk} AND [d].{$quotedRefColumn} IN ({$values}))";
+                                        } else {
+                                            $sqlCondition = "EXISTS (SELECT 1 FROM {$quotedCollectionTable} AS [ed] INNER JOIN {$quotedRefTable} AS [d] ON [ed].{$quotedRefFk} = [d].{$quotedRefPk} WHERE [ed].{$quotedCollectionFk} = {$quotedMainTable}.{$quotedMainPk} AND [d].{$quotedRefColumn} IN (?))";
+                                        }
+                                        
+                                        log_message('debug', "applySimpleWhereWithParser - generated EXISTS subquery: {$sqlCondition}");
                                     }
-                                    
-                                    log_message('debug', "applySimpleWhereWithParser - generated EXISTS subquery: {$sqlCondition}");
                                 }
                             }
                         }
@@ -8369,7 +8466,93 @@ class AdvancedQueryBuilder
                             }
                         }
                         // Handle collection navigation property (e.g., "EmployeeDepartments.Department.DepartmentID")
+                        // OR nested path through reference navigation (e.g., "Employee.EmployeeDepartments.Department.DepartmentID")
                         elseif (count($pathParts) >= 3) {
+                            // Check if first part is a reference navigation (4+ parts: reference.collection.reference.column)
+                            if (count($pathParts) >= 4) {
+                                $referenceNavProperty = $pathParts[0]; // e.g., "Employee"
+                                $collectionProperty = $pathParts[1]; // e.g., "EmployeeDepartments"
+                                $referenceProperty = $pathParts[2]; // e.g., "Department"
+                                $columnName = $pathParts[3]; // e.g., "DepartmentID"
+                                
+                                // Get navigation info for reference navigation property
+                                $refNavInfo = $this->getNavigationInfo($referenceNavProperty);
+                                if ($refNavInfo && !$refNavInfo['isCollection']) {
+                                    // Get the entity type of the reference navigation
+                                    $refEntityType = $refNavInfo['entityType'];
+                                    
+                                    // Get navigation info for collection property from the reference entity
+                                    $navInfo = $this->getNavigationInfoForEntity($collectionProperty, $refEntityType);
+                                    if ($navInfo && $navInfo['isCollection']) {
+                                        // Get the main entity's FK that points to the reference entity
+                                        $mainEntityReflection = new \ReflectionClass($this->entityType);
+                                        $mainPkColumn = $this->getPrimaryKeyColumnName($mainEntityReflection);
+                                        
+                                        // Get the FK in main entity that points to reference entity
+                                        $mainToRefFkProperty = $refNavInfo['foreignKey'];
+                                        $mainToRefFkColumn = $this->getColumnNameFromProperty($mainEntityReflection, $mainToRefFkProperty);
+                                        
+                                        // Continue with collection navigation processing
+                                        $collectionEntityType = $navInfo['entityType'];
+                                        $refNavInfo2 = $this->getNavigationInfoForEntity($referenceProperty, $collectionEntityType);
+                                        
+                                        if ($refNavInfo2 && !$refNavInfo2['isCollection']) {
+                                            // Build EXISTS subquery with nested navigation
+                                            $collectionTableName = $this->context->getTableName($collectionEntityType);
+                                            $refTableName = $this->context->getTableName($refNavInfo2['entityType']);
+                                            
+                                            // Get FK in collection entity that points to reference entity
+                                            $refFkProperty = $refNavInfo2['foreignKey'];
+                                            $collectionEntityReflection = new \ReflectionClass($collectionEntityType);
+                                            $refFkColumn = $this->getColumnNameFromProperty($collectionEntityReflection, $refFkProperty);
+                                            
+                                            // Get primary key column of reference entity (for JOIN)
+                                            $refEntityReflection = new \ReflectionClass($refNavInfo2['entityType']);
+                                            $refPkColumn = $this->getPrimaryKeyColumnName($refEntityReflection);
+                                            
+                                            // Get column name from reference entity for the filter column
+                                            $refColumnName = $this->getColumnNameFromProperty($refEntityReflection, $columnName);
+                                            
+                                            // Get FK in collection entity that points to the reference entity (Employee)
+                                            $collectionFkProperty = $navInfo['foreignKey'];
+                                            $collectionFkColumn = $this->getColumnNameFromProperty($collectionEntityReflection, $collectionFkProperty);
+                                            
+                                            $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
+                                            $quotedMainTable = $provider->escapeIdentifier($alias);
+                                            $quotedMainPk = $provider->escapeIdentifier($mainPkColumn);
+                                            $quotedMainToRefFk = $provider->escapeIdentifier($mainToRefFkColumn);
+                                            $quotedCollectionTable = $provider->escapeIdentifier($collectionTableName);
+                                            $quotedCollectionFk = $provider->escapeIdentifier($collectionFkColumn);
+                                            $quotedRefTable = $provider->escapeIdentifier($refTableName);
+                                            $quotedRefFk = $provider->escapeIdentifier($refFkColumn);
+                                            $quotedRefPk = $provider->escapeIdentifier($refPkColumn);
+                                            $quotedRefColumn = $provider->escapeIdentifier($refColumnName);
+                                            
+                                            // Build EXISTS subquery: Card -> Employee -> EmployeeDepartments -> Department
+                                            // JOIN: collectionEntity.FK = referenceEntity.PK
+                                            if ($values !== '?') {
+                                                $valuesArray = explode(',', $values);
+                                                $filteredValues = $this->filterInvalidValuesForInClause($valuesArray, $refEntityReflection, $columnName);
+                                                
+                                                if (empty($filteredValues)) {
+                                                    log_message('debug', "convertSimpleWhereToSql - all values filtered out, returning false condition");
+                                                    return "1=0";
+                                                }
+                                                
+                                                $values = implode(',', $filteredValues);
+                                                $sqlCondition = "EXISTS (SELECT 1 FROM {$quotedCollectionTable} AS [ed] INNER JOIN {$quotedRefTable} AS [d] ON [ed].{$quotedRefFk} = [d].{$quotedRefPk} WHERE [ed].{$quotedCollectionFk} = {$quotedMainTable}.{$quotedMainToRefFk} AND [d].{$quotedRefColumn} IN ({$values}))";
+                                            } else {
+                                                $sqlCondition = "EXISTS (SELECT 1 FROM {$quotedCollectionTable} AS [ed] INNER JOIN {$quotedRefTable} AS [d] ON [ed].{$quotedRefFk} = [d].{$quotedRefPk} WHERE [ed].{$quotedCollectionFk} = {$quotedMainTable}.{$quotedMainToRefFk} AND [d].{$quotedRefColumn} IN (?))";
+                                            }
+                                            
+                                            log_message('debug', "convertSimpleWhereToSql - generated nested EXISTS subquery: {$sqlCondition}");
+                                            return $sqlCondition;
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            // Handle direct collection navigation (3 parts: collection.reference.column)
                             $collectionProperty = $pathParts[0]; // e.g., "EmployeeDepartments"
                             $referenceProperty = $pathParts[1]; // e.g., "Department"
                             $columnName = $pathParts[2]; // e.g., "DepartmentID"
@@ -8390,14 +8573,21 @@ class AdvancedQueryBuilder
                                     $mainEntityReflection = new \ReflectionClass($this->entityType);
                                     $mainPkColumn = $this->getPrimaryKeyColumnName($mainEntityReflection);
                                     
-                                    // Get foreign key column in collection entity
+                                    // Get foreign key column in collection entity (points to main entity)
                                     $collectionFkColumn = $navInfo['foreignKey'];
                                     
-                                    // Get foreign key column in reference entity
-                                    $refFkColumn = $refNavInfo['foreignKey'];
+                                    // Get foreign key property name in collection entity (points to reference entity)
+                                    $refFkProperty = $refNavInfo['foreignKey'];
                                     
-                                    // Get column name from reference entity
+                                    // Get column name for FK in collection entity
+                                    $collectionEntityReflection = new \ReflectionClass($collectionEntityType);
+                                    $refFkColumn = $this->getColumnNameFromProperty($collectionEntityReflection, $refFkProperty);
+                                    
+                                    // Get primary key column of reference entity (for JOIN)
                                     $refEntityReflection = new \ReflectionClass($refNavInfo['entityType']);
+                                    $refPkColumn = $this->getPrimaryKeyColumnName($refEntityReflection);
+                                    
+                                    // Get column name from reference entity for the filter column
                                     $refColumnName = $this->getColumnNameFromProperty($refEntityReflection, $columnName);
                                     
                                     $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
@@ -8407,9 +8597,11 @@ class AdvancedQueryBuilder
                                     $quotedCollectionFk = $provider->escapeIdentifier($collectionFkColumn);
                                     $quotedRefTable = $provider->escapeIdentifier($refTableName);
                                     $quotedRefFk = $provider->escapeIdentifier($refFkColumn);
+                                    $quotedRefPk = $provider->escapeIdentifier($refPkColumn);
                                     $quotedRefColumn = $provider->escapeIdentifier($refColumnName);
                                     
                                     // Build EXISTS subquery
+                                    // JOIN: collectionEntity.FK = referenceEntity.PK
                                     if ($values !== '?') {
                                         // Filter invalid values (like 'undefined' for integer types)
                                         $valuesArray = explode(',', $values);
@@ -8422,9 +8614,9 @@ class AdvancedQueryBuilder
                                         }
                                         
                                         $values = implode(',', $filteredValues);
-                                        $sqlCondition = "EXISTS (SELECT 1 FROM {$quotedCollectionTable} AS [ed] INNER JOIN {$quotedRefTable} AS [d] ON [ed].{$quotedRefFk} = [d].{$quotedRefFk} WHERE [ed].{$quotedCollectionFk} = {$quotedMainTable}.{$quotedMainPk} AND [d].{$quotedRefColumn} IN ({$values}))";
+                                        $sqlCondition = "EXISTS (SELECT 1 FROM {$quotedCollectionTable} AS [ed] INNER JOIN {$quotedRefTable} AS [d] ON [ed].{$quotedRefFk} = [d].{$quotedRefPk} WHERE [ed].{$quotedCollectionFk} = {$quotedMainTable}.{$quotedMainPk} AND [d].{$quotedRefColumn} IN ({$values}))";
                                     } else {
-                                        $sqlCondition = "EXISTS (SELECT 1 FROM {$quotedCollectionTable} AS [ed] INNER JOIN {$quotedRefTable} AS [d] ON [ed].{$quotedRefFk} = [d].{$quotedRefFk} WHERE [ed].{$quotedCollectionFk} = {$quotedMainTable}.{$quotedMainPk} AND [d].{$quotedRefColumn} IN (?))";
+                                        $sqlCondition = "EXISTS (SELECT 1 FROM {$quotedCollectionTable} AS [ed] INNER JOIN {$quotedRefTable} AS [d] ON [ed].{$quotedRefFk} = [d].{$quotedRefPk} WHERE [ed].{$quotedCollectionFk} = {$quotedMainTable}.{$quotedMainPk} AND [d].{$quotedRefColumn} IN (?))";
                                     }
                                     
                                     log_message('debug', "convertSimpleWhereToSql - generated EXISTS subquery: {$sqlCondition}");
