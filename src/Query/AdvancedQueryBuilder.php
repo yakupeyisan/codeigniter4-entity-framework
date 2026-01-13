@@ -1571,8 +1571,54 @@ class AdvancedQueryBuilder
                 log_message('debug', 'executeRawSql - Parameters: ' . json_encode($parameters));
             }
             
-            $query = $this->connection->query($sql, $parameters);
-            $results = $query->getResultArray();
+            // Handle multiple statements (e.g., "SET DATEFORMAT YMD; SELECT ...")
+            // Split by semicolon and execute SET statements separately
+            if (stripos($sql, 'SET DATEFORMAT') !== false) {
+                $statements = array_map('trim', explode(';', $sql));
+                $selectStatement = '';
+                $setStatements = [];
+                
+                foreach ($statements as $statement) {
+                    if (empty($statement)) {
+                        continue;
+                    }
+                    if (stripos($statement, 'SET DATEFORMAT') === 0) {
+                        $setStatements[] = $statement;
+                    } else {
+                        // This should be the SELECT statement
+                        $selectStatement = $statement;
+                    }
+                }
+                
+                // Execute SET statements first (they don't return results)
+                foreach ($setStatements as $setStmt) {
+                    $this->connection->query($setStmt);
+                }
+                
+                // Execute the SELECT statement
+                if (!empty($selectStatement)) {
+                    $query = $this->connection->query($selectStatement, $parameters);
+                    $results = $query->getResultArray();
+                } else {
+                    // Fallback: execute original SQL if we couldn't parse it
+                    $query = $this->connection->query($sql, $parameters);
+                    if (is_bool($query) && $query === true) {
+                        // If query returns true (no result set), return empty array
+                        $results = [];
+                    } else {
+                        $results = $query->getResultArray();
+                    }
+                }
+            } else {
+                // Single statement - execute normally
+                $query = $this->connection->query($sql, $parameters);
+                if (is_bool($query) && $query === true) {
+                    // If query returns true (no result set), return empty array
+                    $results = [];
+                } else {
+                    $results = $query->getResultArray();
+                }
+            }
         } catch (\Exception $e) {
             log_message('error', 'SQL Query Error: ' . $e->getMessage());
             log_message('error', 'Failed SQL Query: ' . ($sql ?? $this->rawSql));

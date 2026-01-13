@@ -212,7 +212,8 @@ class SqlServerProvider implements DatabaseProvider
         
         $params = !empty($paramList) ? implode(', ', $paramList) : '';
         
-        return "SELECT * FROM {$quotedSchema}.{$quotedFunctionName}({$params})";
+        // Set date format to YMD before executing the function
+        return "SET DATEFORMAT YMD; SELECT * FROM {$quotedSchema}.{$quotedFunctionName}({$params})";
     }
 }
 
