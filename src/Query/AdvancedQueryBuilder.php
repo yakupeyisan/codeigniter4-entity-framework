@@ -81,16 +81,36 @@ class AdvancedQueryBuilder
 
     /**
      * Add WHERE clause
+     * Accepts either a callable predicate or a raw SQL string
+     * 
+     * @param callable|string $predicate Callable predicate or raw SQL string
+     * @param bool $isOr Whether this is an OR condition
+     * @return self
      */
-    public function where(callable $predicate, bool $isOr = false): self
+    public function where(callable|string $predicate, bool $isOr = false): self
     {
-        log_message('debug', "AdvancedQueryBuilder::where() called with isOr=" . ($isOr ? 'true' : 'false'));
-        $this->wheres[] = [
-            'predicate' => $predicate, 
-            'isOr' => $isOr,
-            'groupStart' => false,
-            'groupEnd' => false
-        ];
+        log_message('debug', "AdvancedQueryBuilder::where() called with isOr=" . ($isOr ? 'true' : 'false') . ", type=" . (is_string($predicate) ? 'string' : 'callable'));
+        
+        // If it's a string, treat it as raw SQL
+        if (is_string($predicate)) {
+            $this->wheres[] = [
+                'predicate' => null,
+                'rawSql' => $predicate,
+                'isOr' => $isOr,
+                'groupStart' => false,
+                'groupEnd' => false
+            ];
+        } else {
+            // Callable predicate (existing behavior)
+            $this->wheres[] = [
+                'predicate' => $predicate, 
+                'rawSql' => null,
+                'isOr' => $isOr,
+                'groupStart' => false,
+                'groupEnd' => false
+            ];
+        }
+        
         log_message('debug', "wheres array count: " . count($this->wheres) . ", last isOr: " . ($isOr ? 'true' : 'false'));
         return $this;
     }
@@ -528,15 +548,27 @@ class AdvancedQueryBuilder
             }
             
             $where = is_array($whereItem) ? $whereItem['predicate'] : $whereItem;
+            $rawSql = is_array($whereItem) && isset($whereItem['rawSql']) ? $whereItem['rawSql'] : null;
             $isOr = is_array($whereItem) && isset($whereItem['isOr']) ? $whereItem['isOr'] : false;
-            log_message('debug', "count(): Processing where item #{$index}, isOr=" . ($isOr ? 'true' : 'false'));
-            $paths = $this->detectNavigationPaths($where);
-            if (!empty($paths)) {
-                // Navigation property filter - convert to SQL
-                $this->applyNavigationWhereToSql($builder, $where, $paths);
+            
+            // Use raw SQL if available, otherwise use predicate
+            $whereToApply = $rawSql !== null ? $rawSql : $where;
+            
+            log_message('debug', "count(): Processing where item #{$index}, isOr=" . ($isOr ? 'true' : 'false') . ", type=" . (is_string($whereToApply) ? 'raw SQL' : 'callable'));
+            
+            // If it's a string (raw SQL), apply directly
+            if (is_string($whereToApply)) {
+                $this->applyWhere($builder, $whereToApply, $isOr);
             } else {
-                // Simple property filter
-                $this->applyWhere($builder, $where, $isOr);
+                // Try to detect navigation property paths in predicate
+                $paths = $this->detectNavigationPaths($whereToApply);
+                if (!empty($paths)) {
+                    // Navigation property filter - convert to SQL
+                    $this->applyNavigationWhereToSql($builder, $whereToApply, $paths);
+                } else {
+                    // Simple property filter
+                    $this->applyWhere($builder, $whereToApply, $isOr);
+                }
             }
         }
         
@@ -693,8 +725,12 @@ class AdvancedQueryBuilder
             }
             
             $predicate = is_array($whereItem) ? $whereItem['predicate'] : $whereItem;
+            $rawSql = is_array($whereItem) && isset($whereItem['rawSql']) ? $whereItem['rawSql'] : null;
             $isOr = is_array($whereItem) && isset($whereItem['isOr']) ? $whereItem['isOr'] : false;
-            $this->applyWhere($builder, $predicate, $isOr);
+            
+            // Use raw SQL if available, otherwise use predicate
+            $whereToApply = $rawSql !== null ? $rawSql : $predicate;
+            $this->applyWhere($builder, $whereToApply, $isOr);
         }
         
         // Apply order by
@@ -950,9 +986,13 @@ class AdvancedQueryBuilder
             }
             
             $where = is_array($whereItem) ? $whereItem['predicate'] : $whereItem;
+            $rawSql = is_array($whereItem) && isset($whereItem['rawSql']) ? $whereItem['rawSql'] : null;
             $isOr = is_array($whereItem) && isset($whereItem['isOr']) ? $whereItem['isOr'] : false;
-            log_message('debug', "executeQuery: Processing where item #{$index}, isOr=" . ($isOr ? 'true' : 'false'));
-            $this->applyWhere($builder, $where, $isOr);
+            
+            // Use raw SQL if available, otherwise use predicate
+            $whereToApply = $rawSql !== null ? $rawSql : $where;
+            log_message('debug', "executeQuery: Processing where item #{$index}, isOr=" . ($isOr ? 'true' : 'false') . ", type=" . (is_string($whereToApply) ? 'raw SQL' : 'callable'));
+            $this->applyWhere($builder, $whereToApply, $isOr);
         }
         
         // Apply order by
@@ -1239,14 +1279,22 @@ class AdvancedQueryBuilder
         $whereConditions = [];
         foreach ($this->wheres as $whereItem) {
             $where = is_array($whereItem) ? $whereItem['predicate'] : $whereItem;
-            try {
-                $parser = new ExpressionParser($this->entityType, $mainAlias, $this->context);
-                $sqlCondition = $parser->parse($where);
-                if (!empty($sqlCondition)) {
-                    $whereConditions[] = $sqlCondition;
+            $rawSql = is_array($whereItem) && isset($whereItem['rawSql']) ? $whereItem['rawSql'] : null;
+            
+            // If raw SQL is provided, use it directly
+            if ($rawSql !== null && trim($rawSql) !== '') {
+                $whereConditions[] = $rawSql;
+            } elseif ($where !== null) {
+                // Process callable predicate
+                try {
+                    $parser = new ExpressionParser($this->entityType, $mainAlias, $this->context);
+                    $sqlCondition = $parser->parse($where);
+                    if (!empty($sqlCondition)) {
+                        $whereConditions[] = $sqlCondition;
+                    }
+                } catch (\Exception $e) {
+                    log_message('error', 'Error parsing WHERE clause: ' . $e->getMessage());
                 }
-            } catch (\Exception $e) {
-                log_message('error', 'Error parsing WHERE clause: ' . $e->getMessage());
             }
         }
         
@@ -1833,9 +1881,16 @@ class AdvancedQueryBuilder
      * Apply WHERE clause with navigation property support
      * Detects navigation property access and adds necessary JOINs
      * Uses ExpressionParser for advanced expression parsing
+     * Supports both callable predicates and raw SQL strings
      */
-    private function applyWhere($builder, callable $predicate, bool $isOr = false): void
+    private function applyWhere($builder, callable|string $predicate, bool $isOr = false): void
     {
+        // If it's a string, use it directly as raw SQL
+        if (is_string($predicate)) {
+            $this->applySimpleWhereWithParser($builder, $predicate, $isOr);
+            return;
+        }
+        
         // Try to detect navigation property paths in predicate
         $navigationPaths = $this->detectNavigationPaths($predicate);
         
@@ -1855,10 +1910,25 @@ class AdvancedQueryBuilder
 
     /**
      * Apply simple WHERE clause using ExpressionParser
+     * Supports both callable predicates and raw SQL strings
      */
-    private function applySimpleWhereWithParser($builder, callable $predicate, bool $isOr = false): void
+    private function applySimpleWhereWithParser($builder, callable|string $predicate, bool $isOr = false): void
     {
-        log_message('debug', "applySimpleWhereWithParser called with isOr=" . ($isOr ? 'true' : 'false'));
+        log_message('debug', "applySimpleWhereWithParser called with isOr=" . ($isOr ? 'true' : 'false') . ", type=" . (is_string($predicate) ? 'string' : 'callable'));
+        
+        // If it's a string, use it directly as raw SQL
+        if (is_string($predicate)) {
+            if ($builder !== null) {
+                if ($isOr) {
+                    $builder->orWhere($predicate, null, false);
+                } else {
+                    $builder->where($predicate, null, false);
+                }
+                log_message('debug', 'WHERE clause applied (raw SQL): ' . $predicate);
+            }
+            return;
+        }
+        
         try {
             $parser = new ExpressionParser($this->entityType, $this->getTableAliasForParser(), $this->context);
             
@@ -4310,21 +4380,27 @@ class AdvancedQueryBuilder
             }
             
             $where = is_array($whereItem) ? $whereItem['predicate'] : $whereItem;
+            $rawSql = is_array($whereItem) && isset($whereItem['rawSql']) ? $whereItem['rawSql'] : null;
             $isOr = is_array($whereItem) && isset($whereItem['isOr']) ? $whereItem['isOr'] : false;
             
-            if ($where === null) {
-                continue;
-            }
-            
-            $sqlWhere = null;
-            if (isset($navigationFilters[$index])) {
-                $paths = $this->detectNavigationPaths($where);
-                // Pass referenceNavAliases to use correct aliases in WHERE clause
-                $sqlWhere = $this->convertNavigationWhereToSql($where, $paths, $referenceNavAliases);
-                log_message('debug', "buildEfCoreStyleQuery - navigation filter #{$index}, sqlWhere: " . ($sqlWhere ?? 'NULL'));
+            // If raw SQL is provided, use it directly
+            if ($rawSql !== null && trim($rawSql) !== '') {
+                $sqlWhere = $rawSql;
+                log_message('debug', "buildEfCoreStyleQuery - raw SQL filter #{$index}, sqlWhere: " . $sqlWhere);
+            } elseif ($where !== null) {
+                // Process callable predicate
+                $sqlWhere = null;
+                if (isset($navigationFilters[$index])) {
+                    $paths = $this->detectNavigationPaths($where);
+                    // Pass referenceNavAliases to use correct aliases in WHERE clause
+                    $sqlWhere = $this->convertNavigationWhereToSql($where, $paths, $referenceNavAliases);
+                    log_message('debug', "buildEfCoreStyleQuery - navigation filter #{$index}, sqlWhere: " . ($sqlWhere ?? 'NULL'));
+                } else {
+                    $sqlWhere = $this->convertSimpleWhereToSql($where, $mainAlias, $referenceNavAliases);
+                    log_message('debug', "buildEfCoreStyleQuery - simple filter #{$index}, sqlWhere: " . ($sqlWhere ?? 'NULL'));
+                }
             } else {
-                $sqlWhere = $this->convertSimpleWhereToSql($where, $mainAlias, $referenceNavAliases);
-                log_message('debug', "buildEfCoreStyleQuery - simple filter #{$index}, sqlWhere: " . ($sqlWhere ?? 'NULL'));
+                continue;
             }
             
             if ($sqlWhere && trim($sqlWhere) !== '') {
@@ -4363,6 +4439,13 @@ class AdvancedQueryBuilder
             if (!empty($currentGroup)) {
                 $joinOperator = $currentGroupIsOr ? ' OR ' : ' AND ';
                 $whereConditions[] = ['condition' => '(' . implode($joinOperator, $currentGroup) . ')', 'isOr' => false];
+            }
+        }
+        
+        // Add raw SQL WHERE conditions
+        foreach ($this->whereRaw as $rawSql) {
+            if (!empty($rawSql) && trim($rawSql) !== '') {
+                $whereConditions[] = ['condition' => $rawSql, 'isOr' => false];
             }
         }
         

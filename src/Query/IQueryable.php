@@ -12,10 +12,10 @@ interface IQueryable
     
     /**
      * Filter entities (Where)
-     * @param callable $predicate Predicate function
+     * @param callable|string $predicate Predicate function or raw SQL string
      * @param bool $isOr Whether this is an OR condition (default: false)
      */
-    public function where(callable $predicate, bool $isOr = false): IQueryable;
+    public function where(callable|string $predicate, bool $isOr = false): IQueryable;
 
     /**
      * Start a WHERE clause group (opens parenthesis)

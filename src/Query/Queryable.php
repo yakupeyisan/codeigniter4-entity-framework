@@ -27,7 +27,15 @@ class Queryable implements IQueryable
         $this->queryBuilder = new AdvancedQueryBuilder($context, $entityType, $connection);
     }
 
-    public function where(callable $predicate, bool $isOr = false): IQueryable
+    /**
+     * Add WHERE clause
+     * Accepts either a callable predicate or a raw SQL string
+     * 
+     * @param callable|string $predicate Callable predicate or raw SQL string
+     * @param bool $isOr Whether this is an OR condition
+     * @return IQueryable
+     */
+    public function where(callable|string $predicate, bool $isOr = false): IQueryable
     {
         $this->queryBuilder->where($predicate, $isOr);
         return $this;
