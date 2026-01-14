@@ -4386,6 +4386,52 @@ class AdvancedQueryBuilder
             // If raw SQL is provided, use it directly
             if ($rawSql !== null && trim($rawSql) !== '') {
                 $sqlWhere = $rawSql;
+                // Replace table name with alias in raw SQL WHERE clauses
+                // This ensures compatibility with EF Core style queries that use alias 'u'
+                $sqlWhere = str_replace("{$tableName}.", "{$mainAlias}.", $sqlWhere);
+                // Also handle bracketed table names like [Employee].EmployeeID
+                $sqlWhere = str_replace("[{$tableName}].", "[{$mainAlias}].", $sqlWhere);
+                
+                // Replace navigation property names with their aliases from referenceNavAliases
+                // This handles cases like PaymentOfVirtualPos.EmployeeID -> p.EmployeeID
+                // Also handles Employee.EmployeeID -> e.EmployeeID
+                // Process in reverse order (longest paths first) to avoid partial replacements
+                $sortedNavPaths = array_keys($referenceNavAliases);
+                usort($sortedNavPaths, function($a, $b) {
+                    return strlen($b) - strlen($a); // Sort by length descending
+                });
+                
+                // First, replace full navigation paths (e.g., "PaymentOfVirtualPos.Employee.EmployeeID")
+                foreach ($sortedNavPaths as $navPath) {
+                    $refAlias = $referenceNavAliases[$navPath];
+                    // Check if the full navigation path matches (for nested navigations)
+                    if (strpos($sqlWhere, "{$navPath}.") !== false) {
+                        $sqlWhere = str_replace("{$navPath}.", "{$refAlias}.", $sqlWhere);
+                        $sqlWhere = str_replace("[{$navPath}].", "[{$refAlias}].", $sqlWhere);
+                    }
+                }
+                
+                // Then, replace navigation property names (first part of path)
+                // This handles simple cases like "Employee.EmployeeID" -> "e.EmployeeID"
+                foreach ($sortedNavPaths as $navPath) {
+                    $refAlias = $referenceNavAliases[$navPath];
+                    // Get navigation property name (first part of path, or full path if no dots)
+                    $navPropertyName = explode('.', $navPath)[0];
+                    // Get table name for this navigation property
+                    $navInfo = $this->getNavigationInfo($navPropertyName);
+                    if ($navInfo && isset($navInfo['entityType'])) {
+                        $navTableName = $this->context->getTableName($navInfo['entityType']);
+                        // Replace navigation property name or table name with alias
+                        // Handle both PaymentOfVirtualPos.EmployeeID and PaymentsOfVirtualPos.EmployeeID
+                        // Also handle Employee.EmployeeID -> e.EmployeeID
+                        // Use word boundaries to avoid partial replacements (e.g., "Employee" in "EmployeeID" should not match)
+                        $sqlWhere = preg_replace('/\b' . preg_quote($navPropertyName, '/') . '\./', "{$refAlias}.", $sqlWhere);
+                        $sqlWhere = preg_replace('/\b' . preg_quote($navTableName, '/') . '\./', "{$refAlias}.", $sqlWhere);
+                        $sqlWhere = preg_replace('/\[' . preg_quote($navPropertyName, '/') . '\]\./', "[{$refAlias}].", $sqlWhere);
+                        $sqlWhere = preg_replace('/\[' . preg_quote($navTableName, '/') . '\]\./', "[{$refAlias}].", $sqlWhere);
+                    }
+                }
+                
                 log_message('debug', "buildEfCoreStyleQuery - raw SQL filter #{$index}, sqlWhere: " . $sqlWhere);
             } elseif ($where !== null) {
                 // Process callable predicate
