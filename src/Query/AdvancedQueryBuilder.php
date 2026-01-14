@@ -4295,6 +4295,7 @@ class AdvancedQueryBuilder
                         foreach ($include['thenIncludes'] as $thenInclude) {
                             // Handle both string (backward compatibility) and array format
                             $thenIncludeNav = is_string($thenInclude) ? $thenInclude : ($thenInclude['navigation'] ?? $thenInclude);
+                            $thenIncludeWhereClause = is_string($thenInclude) ? null : ($thenInclude['whereClause'] ?? null);
                             
                             // Build full nested path
                             $thenIncludePath = $navPath . '.' . $thenIncludeNav;
@@ -4318,6 +4319,14 @@ class AdvancedQueryBuilder
                                     // Parent entity is the reference navigation (e.g., Employee), not main entity (Card)
                                     // This method correctly handles cases where FK is in parent entity or related entity
                                     $thenJoinCondition = $this->buildJoinCondition($refAlias, $thenRefAlias, $thenIncludePath, $thenNavInfo, $navInfo['entityType']);
+                                    
+                                    // Add WHERE clause to JOIN condition if provided
+                                    if ($thenIncludeWhereClause !== null && trim($thenIncludeWhereClause) !== '') {
+                                        // Replace {alias} placeholder with the actual table alias
+                                        $thenIncludeWhereClauseReplaced = str_replace('{alias}', $thenRefAlias, $thenIncludeWhereClause);
+                                        $thenJoinCondition = "({$thenJoinCondition}) AND ({$thenIncludeWhereClauseReplaced})";
+                                        log_message('debug', "buildEfCoreStyleQuery: Added WHERE clause to JOIN condition for '{$thenIncludePath}': {$thenIncludeWhereClauseReplaced}");
+                                    }
                                     
                                     // thenInclude uses LEFT JOIN to allow null values (similar to include behavior)
                                     $quotedThenRefTableName = $provider->escapeIdentifier($thenRefTableName);
@@ -7209,6 +7218,14 @@ class AdvancedQueryBuilder
                 $quotedThenRelatedPkColumn = $provider->escapeIdentifier($thenRelatedPkColumn);
                     $thenJoinCondition = "{$quotedRelatedAlias}.{$quotedThenFkColumn} = {$quotedThenRelatedAlias}.{$quotedThenRelatedPkColumn}";
                     log_message('debug', "buildCollectionSubquery: Using default foreign key join condition for '{$thenIncludeNav}': {$thenJoinCondition}");
+                }
+                
+                // Add WHERE clause to JOIN condition if provided
+                if ($thenIncludeWhereClause !== null && trim($thenIncludeWhereClause) !== '') {
+                    // Replace {alias} placeholder with the actual table alias
+                    $thenIncludeWhereClauseReplaced = str_replace('{alias}', $quotedThenRelatedAlias, $thenIncludeWhereClause);
+                    $thenJoinCondition = "({$thenJoinCondition}) AND ({$thenIncludeWhereClauseReplaced})";
+                    log_message('debug', "buildCollectionSubquery: Added WHERE clause to JOIN condition for '{$thenIncludeNav}': {$thenIncludeWhereClauseReplaced}");
                 }
                 
                 // Add JOIN to SQL (will be added after FROM clause)
