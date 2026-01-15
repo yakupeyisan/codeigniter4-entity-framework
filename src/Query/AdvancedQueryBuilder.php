@@ -45,6 +45,17 @@ class AdvancedQueryBuilder
     private array $referenceNavIndexes = []; // Store index for each navigation path (used in SQL building and parsing)
     private array $collectionNavIndexes = []; // Store index for each collection navigation path
     private $lastThenIncludeParent = null; // Reference to the parent of the last thenInclude (for andInclude)
+    
+    /**
+     * Reflection cache to avoid repeated ReflectionClass instantiation
+     * Cache key: class name => ReflectionClass instance
+     */
+    private static array $reflectionCache = [];
+    
+    /**
+     * Property cache: class name => [property name => ReflectionProperty]
+     */
+    private static array $propertyCache = [];
 
     public function __construct(DbContext $context, string $entityType, BaseConnection $connection)
     {
@@ -63,20 +74,169 @@ class AdvancedQueryBuilder
 
     /**
      * Add raw SELECT clause
+     * WARNING: Raw SQL should use parameter binding to prevent SQL injection
+     * 
+     * @param string $sql Raw SQL SELECT clause (use ? for parameters)
+     * @param array $bindings Optional parameter bindings
+     * @return self
      */
-    public function selectRaw(string $sql): self
+    public function selectRaw(string $sql, array $bindings = []): self
     {
+        if (!empty($bindings)) {
+            // Apply parameter binding
+            $sql = $this->bindParameters($sql, $bindings);
+        }
         $this->selectRaw[] = $sql;
         return $this;
     }
 
     /**
      * Add raw WHERE clause
+     * WARNING: Raw SQL should use parameter binding to prevent SQL injection
+     * 
+     * @param string $sql Raw SQL WHERE clause (use ? for parameters)
+     * @param array $bindings Optional parameter bindings
+     * @return self
      */
-    public function whereRaw(string $sql): self
+    public function whereRaw(string $sql, array $bindings = []): self
     {
+        if (!empty($bindings)) {
+            // Apply parameter binding
+            $sql = $this->bindParameters($sql, $bindings);
+        }
         $this->whereRaw[] = $sql;
         return $this;
+    }
+    
+    /**
+     * Conditional debug logging - only logs if debug mode is enabled
+     * Prevents excessive logging in production
+     * 
+     * @param string $message Log message
+     * @param string $level Log level (default: 'debug')
+     */
+    private function debugLog(string $message, string $level = 'debug'): void
+    {
+        // Only log if CI_DEBUG is true or log level allows it
+        if (defined('CI_DEBUG') && CI_DEBUG === true) {
+            log_message($level, $message);
+        } elseif ($level !== 'debug') {
+            // Always log non-debug messages
+            log_message($level, $message);
+        }
+    }
+
+    /**
+     * Get cached ReflectionClass instance
+     * Caches reflection instances to improve performance
+     * 
+     * @param string $className Class name
+     * @return ReflectionClass Cached reflection instance
+     */
+    private static function getCachedReflection(string $className): ReflectionClass
+    {
+        if (!isset(self::$reflectionCache[$className])) {
+            self::$reflectionCache[$className] = new ReflectionClass($className);
+        }
+        return self::$reflectionCache[$className];
+    }
+
+    /**
+     * Get cached ReflectionProperty instance
+     * 
+     * @param ReflectionClass $reflection Class reflection
+     * @param string $propertyName Property name
+     * @return ReflectionProperty|null Cached property reflection or null if not found
+     */
+    private static function getCachedProperty(ReflectionClass $reflection, string $propertyName): ?ReflectionProperty
+    {
+        $className = $reflection->getName();
+        $cacheKey = $className . '::' . $propertyName;
+        
+        if (!isset(self::$propertyCache[$cacheKey])) {
+            if ($reflection->hasProperty($propertyName)) {
+                $property = $reflection->getProperty($propertyName);
+                $property->setAccessible(true);
+                self::$propertyCache[$cacheKey] = $property;
+            } else {
+                return null;
+            }
+        }
+        
+        return self::$propertyCache[$cacheKey];
+    }
+
+    /**
+     * Bind parameters to SQL string (prevent SQL injection)
+     * 
+     * @param string $sql SQL string with ? placeholders
+     * @param array $bindings Parameter values
+     * @return string SQL with bound parameters
+     */
+    private function bindParameters(string $sql, array $bindings): string
+    {
+        $connection = $this->connection;
+        $escapedBindings = array_map(function($value) use ($connection) {
+            if (is_null($value)) {
+                return 'NULL';
+            } elseif (is_bool($value)) {
+                return $value ? '1' : '0';
+            } elseif (is_numeric($value)) {
+                return (string)$value;
+            } else {
+                // Escape string value
+                return "'" . str_replace("'", "''", (string)$value) . "'";
+            }
+        }, $bindings);
+        
+        // Replace ? placeholders with escaped values
+        $parts = explode('?', $sql);
+        $result = '';
+        for ($i = 0; $i < count($parts) - 1; $i++) {
+            $result .= $parts[$i] . ($escapedBindings[$i] ?? '?');
+        }
+        $result .= $parts[count($parts) - 1];
+        
+        return $result;
+    }
+
+    /**
+     * Validate group start/end balance
+     * Throws exception if groups are not balanced
+     */
+    private function validateGroupBalance(): void
+    {
+        $groupCount = 0;
+        foreach ($this->wheres as $whereItem) {
+            if (is_array($whereItem)) {
+                if (isset($whereItem['groupStart']) && $whereItem['groupStart']) {
+                    $groupCount++;
+                }
+                if (isset($whereItem['groupEnd']) && $whereItem['groupEnd']) {
+                    $groupCount--;
+                    if ($groupCount < 0) {
+                        $exceptionClass = class_exists('\Yakupeyisan\CodeIgniter4\EntityFramework\Exceptions\InvalidOperationException') 
+                            ? '\Yakupeyisan\CodeIgniter4\EntityFramework\Exceptions\InvalidOperationException'
+                            : \RuntimeException::class;
+                        throw new $exceptionClass('Invalid WHERE clause: endGroup() called without matching startGroup()');
+                    }
+                }
+            }
+        }
+        
+        if ($groupCount > 0) {
+            $exceptionClass = class_exists('\Yakupeyisan\CodeIgniter4\EntityFramework\Exceptions\InvalidOperationException') 
+                ? '\Yakupeyisan\CodeIgniter4\EntityFramework\Exceptions\InvalidOperationException'
+                : \RuntimeException::class;
+            throw new $exceptionClass('Invalid WHERE clause: startGroup() called without matching endGroup()');
+        }
+        
+        if ($this->inGroup) {
+            $exceptionClass = class_exists('\Yakupeyisan\CodeIgniter4\EntityFramework\Exceptions\InvalidOperationException') 
+                ? '\Yakupeyisan\CodeIgniter4\EntityFramework\Exceptions\InvalidOperationException'
+                : \RuntimeException::class;
+            throw new $exceptionClass('Invalid WHERE clause: Group is still open. Call endGroup() before executing query.');
+        }
     }
 
     /**
@@ -89,7 +249,7 @@ class AdvancedQueryBuilder
      */
     public function where(callable|string $predicate, bool $isOr = false): self
     {
-        log_message('debug', "AdvancedQueryBuilder::where() called with isOr=" . ($isOr ? 'true' : 'false') . ", type=" . (is_string($predicate) ? 'string' : 'callable'));
+        $this->debugLog("AdvancedQueryBuilder::where() called with isOr=" . ($isOr ? 'true' : 'false') . ", type=" . (is_string($predicate) ? 'string' : 'callable'));
         
         // If it's a string, treat it as raw SQL
         if (is_string($predicate)) {
@@ -111,7 +271,7 @@ class AdvancedQueryBuilder
             ];
         }
         
-        log_message('debug', "wheres array count: " . count($this->wheres) . ", last isOr: " . ($isOr ? 'true' : 'false'));
+        $this->debugLog("wheres array count: " . count($this->wheres) . ", last isOr: " . ($isOr ? 'true' : 'false'));
         return $this;
     }
 
@@ -121,7 +281,10 @@ class AdvancedQueryBuilder
     public function startGroup(): self
     {
         if ($this->inGroup) {
-            throw new \RuntimeException('Cannot start a new group while already in a group. Call endGroup() first.');
+            $exceptionClass = class_exists('\Yakupeyisan\CodeIgniter4\EntityFramework\Exceptions\InvalidOperationException') 
+                ? '\Yakupeyisan\CodeIgniter4\EntityFramework\Exceptions\InvalidOperationException'
+                : \RuntimeException::class;
+            throw new $exceptionClass('Cannot start a new group while already in a group. Call endGroup() first.');
         }
         $this->inGroup = true;
         $this->wheres[] = [
@@ -130,7 +293,7 @@ class AdvancedQueryBuilder
             'groupStart' => true,
             'groupEnd' => false
         ];
-        log_message('debug', "AdvancedQueryBuilder::startGroup() called");
+        $this->debugLog("AdvancedQueryBuilder::startGroup() called");
         return $this;
     }
 
@@ -140,7 +303,10 @@ class AdvancedQueryBuilder
     public function endGroup(): self
     {
         if (!$this->inGroup) {
-            throw new \RuntimeException('Cannot end a group that was not started. Call startGroup() first.');
+            $exceptionClass = class_exists('\Yakupeyisan\CodeIgniter4\EntityFramework\Exceptions\InvalidOperationException') 
+                ? '\Yakupeyisan\CodeIgniter4\EntityFramework\Exceptions\InvalidOperationException'
+                : \RuntimeException::class;
+            throw new $exceptionClass('Cannot end a group that was not started. Call startGroup() first.');
         }
         $this->inGroup = false;
         $this->wheres[] = [
@@ -149,7 +315,7 @@ class AdvancedQueryBuilder
             'groupStart' => false,
             'groupEnd' => true
         ];
-        log_message('debug', "AdvancedQueryBuilder::endGroup() called");
+        $this->debugLog("AdvancedQueryBuilder::endGroup() called");
         return $this;
     }
 
@@ -191,7 +357,10 @@ class AdvancedQueryBuilder
     public function thenInclude(string $navigationProperty, ?string $whereClause = null, string $joinType = 'LEFT', ?string $joinCondition = null): self
     {
         if (empty($this->includes)) {
-            throw new \RuntimeException('ThenInclude must be called after Include');
+            $exceptionClass = class_exists('\Yakupeyisan\CodeIgniter4\EntityFramework\Exceptions\InvalidOperationException') 
+                ? '\Yakupeyisan\CodeIgniter4\EntityFramework\Exceptions\InvalidOperationException'
+                : \RuntimeException::class;
+            throw new $exceptionClass('ThenInclude must be called after Include');
         }
         
         $lastInclude = &$this->includes[count($this->includes) - 1];
@@ -241,11 +410,17 @@ class AdvancedQueryBuilder
     public function andInclude(string $navigationProperty, ?string $whereClause = null, string $joinType = 'LEFT', ?string $joinCondition = null): self
     {
         if (empty($this->includes)) {
-            throw new \RuntimeException('AndInclude must be called after Include and ThenInclude');
+            $exceptionClass = class_exists('\Yakupeyisan\CodeIgniter4\EntityFramework\Exceptions\InvalidOperationException') 
+                ? '\Yakupeyisan\CodeIgniter4\EntityFramework\Exceptions\InvalidOperationException'
+                : \RuntimeException::class;
+            throw new $exceptionClass('AndInclude must be called after Include and ThenInclude');
         }
         
         if ($this->lastThenIncludeParent === null) {
-            throw new \RuntimeException('AndInclude must be called after ThenInclude');
+            $exceptionClass = class_exists('\Yakupeyisan\CodeIgniter4\EntityFramework\Exceptions\InvalidOperationException') 
+                ? '\Yakupeyisan\CodeIgniter4\EntityFramework\Exceptions\InvalidOperationException'
+                : \RuntimeException::class;
+            throw new $exceptionClass('AndInclude must be called after ThenInclude');
         }
         
         $thenIncludeData = ['navigation' => $navigationProperty];
@@ -378,7 +553,7 @@ class AdvancedQueryBuilder
         // Note: This might require custom handling in query execution
         $builder->join($joinClause, null, '', false);
         
-        log_message('debug', "Added RAW JOIN ({$joinType}): ({$rawSql}) AS {$alias} ON {$joinCondition}");
+        $this->debugLog("Added RAW JOIN ({$joinType}): ({$rawSql}) AS {$alias} ON {$joinCondition}");
     }
 
     /**
@@ -446,10 +621,16 @@ class AdvancedQueryBuilder
     {
         $results = $this->executeQuery();
         if (count($results) === 0) {
-            throw new \RuntimeException('Sequence contains no elements');
+            $exceptionClass = class_exists('\Yakupeyisan\CodeIgniter4\EntityFramework\Exceptions\InvalidOperationException') 
+                ? '\Yakupeyisan\CodeIgniter4\EntityFramework\Exceptions\InvalidOperationException'
+                : \RuntimeException::class;
+            throw new $exceptionClass('Sequence contains no elements');
         }
         if (count($results) > 1) {
-            throw new \RuntimeException('Sequence contains more than one element');
+            $exceptionClass = class_exists('\Yakupeyisan\CodeIgniter4\EntityFramework\Exceptions\InvalidOperationException') 
+                ? '\Yakupeyisan\CodeIgniter4\EntityFramework\Exceptions\InvalidOperationException'
+                : \RuntimeException::class;
+            throw new $exceptionClass('Sequence contains more than one element');
         }
         return $results[0];
     }
@@ -464,7 +645,10 @@ class AdvancedQueryBuilder
             return null;
         }
         if (count($results) > 1) {
-            throw new \RuntimeException('Sequence contains more than one element');
+            $exceptionClass = class_exists('\Yakupeyisan\CodeIgniter4\EntityFramework\Exceptions\InvalidOperationException') 
+                ? '\Yakupeyisan\CodeIgniter4\EntityFramework\Exceptions\InvalidOperationException'
+                : \RuntimeException::class;
+            throw new $exceptionClass('Sequence contains more than one element');
         }
         return $results[0];
     }
@@ -475,6 +659,66 @@ class AdvancedQueryBuilder
     public function toList(): array
     {
         return $this->executeQuery();
+    }
+
+    /**
+     * Execute query in chunks to prevent memory overflow
+     * Processes results in batches instead of loading all into memory
+     * 
+     * @param int $chunkSize Number of records per chunk (default: 1000)
+     * @param callable $callback Callback function that receives each chunk: function(array $chunk): void
+     * @return int Total number of records processed
+     */
+    public function chunk(int $chunkSize = 1000, callable $callback): int
+    {
+        if ($chunkSize <= 0) {
+            throw new \InvalidArgumentException('Chunk size must be greater than 0');
+        }
+
+        $totalProcessed = 0;
+        $offset = $this->skipCount ?? 0;
+        $originalSkip = $this->skipCount;
+        $originalTake = $this->takeCount;
+
+        try {
+            while (true) {
+                // Create a new query builder for this chunk
+                $chunkBuilder = clone $this;
+                $chunkBuilder->skipCount = $offset;
+                $chunkBuilder->takeCount = $chunkSize;
+                
+                // Execute query for this chunk
+                $chunk = $chunkBuilder->executeQuery();
+                
+                if (empty($chunk)) {
+                    break; // No more results
+                }
+                
+                // Call callback with chunk
+                $callback($chunk);
+                
+                $totalProcessed += count($chunk);
+                
+                // If we got fewer results than chunk size, we're done
+                if (count($chunk) < $chunkSize) {
+                    break;
+                }
+                
+                // Move to next chunk
+                $offset += $chunkSize;
+                
+                // If original query had a limit, check if we've reached it
+                if ($originalTake !== null && $totalProcessed >= $originalTake) {
+                    break;
+                }
+            }
+        } finally {
+            // Restore original skip/take values
+            $this->skipCount = $originalSkip;
+            $this->takeCount = $originalTake;
+        }
+        
+        return $totalProcessed;
     }
 
     /**
@@ -639,8 +883,13 @@ class AdvancedQueryBuilder
             return 0;
         }
         
+        $count = count($results);
+        if ($count === 0) {
+            return 0; // Defensive check to prevent division by zero
+        }
+        
         $sum = $this->sum($selector);
-        return $sum / count($results);
+        return $sum / $count;
     }
 
     /**
@@ -904,17 +1153,66 @@ class AdvancedQueryBuilder
 
     /**
      * Get current query state for cache key generation
+     * Note: Callables cannot be serialized, so we create a hash-based representation
      */
     private function getQueryState(): array
     {
+        // Convert callables to hash-based representation for cache key
+        $wheresHash = [];
+        foreach ($this->wheres as $where) {
+            if (is_array($where)) {
+                $whereHash = [
+                    'isOr' => $where['isOr'] ?? false,
+                    'groupStart' => $where['groupStart'] ?? false,
+                    'groupEnd' => $where['groupEnd'] ?? false,
+                    'hasPredicate' => isset($where['predicate']) && $where['predicate'] !== null,
+                    'hasRawSql' => isset($where['rawSql']) && $where['rawSql'] !== null,
+                    'rawSql' => $where['rawSql'] ?? null,
+                ];
+                // For callables, create a hash based on closure file and line numbers
+                if (isset($where['predicate']) && is_callable($where['predicate']) && !is_string($where['predicate'])) {
+                    try {
+                        $reflection = new \ReflectionFunction($where['predicate']);
+                        $whereHash['predicateHash'] = md5($reflection->getFileName() . ':' . $reflection->getStartLine() . '-' . $reflection->getEndLine());
+                    } catch (\Exception $e) {
+                        $whereHash['predicateHash'] = md5(serialize($where['predicate']));
+                    }
+                }
+                $wheresHash[] = $whereHash;
+            } else {
+                $wheresHash[] = is_callable($where) ? 'callable' : $where;
+            }
+        }
+        
+        // Convert orderBy callables to hash
+        $orderBysHash = [];
+        foreach ($this->orderBys as $orderBy) {
+            if (isset($orderBy['selector']) && is_callable($orderBy['selector']) && !is_string($orderBy['selector'])) {
+                try {
+                    $reflection = new \ReflectionFunction($orderBy['selector']);
+                    $orderBysHash[] = [
+                        'selectorHash' => md5($reflection->getFileName() . ':' . $reflection->getStartLine() . '-' . $reflection->getEndLine()),
+                        'direction' => $orderBy['direction'] ?? 'ASC'
+                    ];
+                } catch (\Exception $e) {
+                    $orderBysHash[] = [
+                        'selectorHash' => md5(serialize($orderBy['selector'])),
+                        'direction' => $orderBy['direction'] ?? 'ASC'
+                    ];
+                }
+            } else {
+                $orderBysHash[] = $orderBy;
+            }
+        }
+        
         return [
-            'wheres' => $this->wheres,
+            'wheres' => $wheresHash,
             'includes' => $this->includes,
-            'orderBys' => $this->orderBys,
+            'orderBys' => $orderBysHash,
             'skipCount' => $this->skipCount,
             'takeCount' => $this->takeCount,
-            'groupBy' => $this->groupBy,
-            'joins' => $this->joins,
+            'groupBy' => $this->groupBy !== null ? 'hasGroupBy' : null,
+            'joins' => count($this->joins),
             'isNoTracking' => $this->isNoTracking,
         ];
     }
@@ -924,6 +1222,9 @@ class AdvancedQueryBuilder
      */
     private function executeQuery(): array
     {
+        // Validate group start/end balance before execution
+        $this->validateGroupBalance();
+        
         if ($this->useRawSql) {
             return $this->executeRawSql();
         }
@@ -942,7 +1243,7 @@ class AdvancedQueryBuilder
         $tableName = $this->context->getTableName($this->entityType);
         
         // Check if we need masking (has sensitive columns and disableSensitive not called)
-        $entityReflection = new ReflectionClass($this->entityType);
+        $entityReflection = self::getCachedReflection($this->entityType);
         $columnsWithProperties = $this->getEntityColumnsWithProperties($entityReflection);
         $hasSensitiveColumns = false;
         
@@ -1026,7 +1327,12 @@ class AdvancedQueryBuilder
             $sql = $builder->getCompiledSelect(false);
             log_message('error', 'SQL Query Error: ' . $e->getMessage());
             log_message('error', 'Failed SQL Query: ' . $sql);
-            throw $e;
+            
+            // Throw more specific exception
+            $exceptionClass = class_exists('\Yakupeyisan\CodeIgniter4\EntityFramework\Exceptions\QueryException') 
+                ? '\Yakupeyisan\CodeIgniter4\EntityFramework\Exceptions\QueryException'
+                : \Exception::class;
+            throw new $exceptionClass('Query execution failed: ' . $e->getMessage(), $sql, [], $e->getCode(), $e);
         }
         $entities = $this->mapToEntities($results);
         
@@ -1238,7 +1544,7 @@ class AdvancedQueryBuilder
         $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
         
         // Get entity columns
-        $entityReflection = new ReflectionClass($this->entityType);
+        $entityReflection = self::getCachedReflection($this->entityType);
         $entityColumns = $this->getEntityColumns($entityReflection);
         
         // Build SELECT columns
@@ -1407,22 +1713,27 @@ class AdvancedQueryBuilder
             log_message('error', 'SQL Query Error: ' . $e->getMessage());
             log_message('error', 'SQL Query Error: ' . $e->getTraceAsString());
             log_message('error', 'Failed SQL Query: ' . $sql);
-            throw $e;
+            
+            // Throw more specific exception
+            $exceptionClass = class_exists('\Yakupeyisan\CodeIgniter4\EntityFramework\Exceptions\QueryException') 
+                ? '\Yakupeyisan\CodeIgniter4\EntityFramework\Exceptions\QueryException'
+                : \Exception::class;
+            throw new $exceptionClass('EF Core style query execution failed: ' . $e->getMessage(), $sql, [], $e->getCode(), $e);
         }
         // Log actual SQL executed
-        log_message('debug', 'EF Core Style SQL executed: ' . substr($sql, 0, 500) . '...');
+        $this->debugLog('EF Core Style SQL executed: ' . substr($sql, 0, 500) . '...');
         
         // Log first result row structure for debugging
         if (!empty($results)) {
             $firstRow = $results[0];
-            log_message('debug', 'First result row keys: ' . implode(', ', array_keys($firstRow)));
-            log_message('debug', 'First result row sample: ' . json_encode(array_slice($firstRow, 0, 10)));
+            $this->debugLog('First result row keys: ' . implode(', ', array_keys($firstRow)));
+            $this->debugLog('First result row sample: ' . json_encode(array_slice($firstRow, 0, 10)));
         }
         
         // Parse flat result set into hierarchical entities
         $entities = $this->parseEfCoreStyleResults($results);
         
-        log_message('debug', 'Parsed entities count: ' . count($entities));
+        $this->debugLog('Parsed entities count: ' . count($entities));
         
         // Apply change tracking and lazy loading proxies
         if ($this->isTracking && !$this->isNoTracking) {
@@ -1689,20 +2000,40 @@ class AdvancedQueryBuilder
     
     /**
      * Get closure source code for analysis
+     * Note: This may fail with opcache or in production environments
+     * Returns empty string if file cannot be read
      */
     private function getClosureCode(\ReflectionFunction $reflection): string
     {
-        $file = $reflection->getFileName();
-        $start = $reflection->getStartLine();
-        $end = $reflection->getEndLine();
-        
-        if (!$file || !$start || !$end || !file_exists($file)) {
+        try {
+            $file = $reflection->getFileName();
+            $start = $reflection->getStartLine();
+            $end = $reflection->getEndLine();
+            
+            if (!$file || !$start || !$end) {
+                return '';
+            }
+            
+            // Check if file exists and is readable
+            // In production with opcache, file might not exist or be readable
+            if (!file_exists($file) || !is_readable($file)) {
+                log_message('debug', "Cannot read closure file: {$file} (may be due to opcache)");
+                return '';
+            }
+            
+            // Try to read file
+            $lines = @file($file);
+            if ($lines === false) {
+                log_message('debug', "Failed to read closure file: {$file}");
+                return '';
+            }
+            
+            $code = implode('', array_slice($lines, max(0, $start - 1), $end - $start + 1));
+            return $code;
+        } catch (\Exception $e) {
+            log_message('debug', "Error reading closure code: " . $e->getMessage());
             return '';
         }
-        
-        $lines = file($file);
-        $code = implode('', array_slice($lines, max(0, $start - 1), $end - $start + 1));
-        return $code;
     }
 
     /**
@@ -1721,7 +2052,7 @@ class AdvancedQueryBuilder
     {
         $entities = [];
         $entityType = $entityType ?? $this->entityType;
-        $reflection = new ReflectionClass($entityType);
+        $reflection = self::getCachedReflection($entityType);
         
         foreach ($results as $row) {
             $entity = $reflection->newInstance();
@@ -1801,16 +2132,56 @@ class AdvancedQueryBuilder
         
         switch ($type) {
             case 'int':
-                return (int)$value;
+                // Validate integer conversion
+                if (is_numeric($value)) {
+                    return (int)$value;
+                } elseif (is_string($value) && trim($value) === '') {
+                    return 0; // Empty string -> 0
+                } else {
+                    log_message('warning', "Failed to convert value '{$value}' to int, using 0");
+                    return 0;
+                }
             case 'float':
             case 'double':
-                return (float)$value;
+                // Validate float conversion
+                if (is_numeric($value)) {
+                    return (float)$value;
+                } elseif (is_string($value) && trim($value) === '') {
+                    return 0.0; // Empty string -> 0.0
+                } else {
+                    log_message('warning', "Failed to convert value '{$value}' to float, using 0.0");
+                    return 0.0;
+                }
             case 'bool':
-                return (bool)$value;
+                // More explicit boolean conversion
+                if (is_bool($value)) {
+                    return $value;
+                } elseif (is_numeric($value)) {
+                    return (bool)(int)$value;
+                } elseif (is_string($value)) {
+                    $lower = strtolower(trim($value));
+                    return in_array($lower, ['1', 'true', 'yes', 'on'], true);
+                } else {
+                    return (bool)$value;
+                }
             case 'string':
+                if ($value === null) {
+                    return '';
+                }
                 return (string)$value;
             case 'array':
-                return is_string($value) ? json_decode($value, true) : $value;
+                if (is_string($value)) {
+                    $decoded = json_decode($value, true);
+                    if (json_last_error() === JSON_ERROR_NONE) {
+                        return $decoded;
+                    }
+                    // If JSON decode fails, try to parse as comma-separated values
+                    if (strpos($value, ',') !== false) {
+                        return array_map('trim', explode(',', $value));
+                    }
+                    return [$value]; // Single value as array
+                }
+                return is_array($value) ? $value : [$value];
             default:
                 return $value;
         }
@@ -1901,7 +2272,8 @@ class AdvancedQueryBuilder
             }
             
             // Apply WHERE conditions on joined tables using ExpressionParser
-            $this->applyNavigationWhereToSql($builder, $predicate, $navigationPaths);
+            // Pass isOr parameter to handle OR logic correctly
+            $this->applyNavigationWhereToSql($builder, $predicate, $navigationPaths, $isOr);
         } else {
             // Simple property filter - use ExpressionParser for advanced parsing
             $this->applySimpleWhereWithParser($builder, $predicate, $isOr);
@@ -2176,9 +2548,18 @@ class AdvancedQueryBuilder
                         
                         log_message('debug', "applySimpleWhereWithParser - navigation property path detected: {$navPath}, values: {$values}");
                         
-                        // Parse navigation property path
+                        // Parse navigation property path using recursive method
                         $pathParts = explode('.', $navPath);
                         
+                        // Try recursive method first (supports any depth)
+                        $recursiveCondition = $this->buildNavigationPathConditionRecursive($pathParts, $values, $builder);
+                        if ($recursiveCondition !== null) {
+                            $sqlCondition = $recursiveCondition;
+                            log_message('debug', "applySimpleWhereWithParser - used recursive method for path: {$navPath}");
+                            continue; // Skip to next where clause
+                        }
+                        
+                        // Fallback to old hardcoded logic for backward compatibility
                         // Handle reference navigation property (e.g., "Kadro.ID")
                         if (count($pathParts) === 2) {
                             $navigationProperty = $pathParts[0]; // e.g., "Kadro"
@@ -2745,7 +3126,7 @@ class AdvancedQueryBuilder
         
         log_message('debug', "addJoinForNavigationPath - adding JOIN for '{$navigationProperty}'");
         
-        $entityReflection = new ReflectionClass($this->entityType);
+        $entityReflection = self::getCachedReflection($this->entityType);
         
         if (!$entityReflection->hasProperty($navigationProperty)) {
             log_message('debug', "addJoinForNavigationPath - property '{$navigationProperty}' not found in entity");
@@ -2771,7 +3152,7 @@ class AdvancedQueryBuilder
         
         // Get column names
         $fkColumnName = $this->getColumnNameFromProperty($entityReflection, $foreignKey);
-        $relatedReflection = new ReflectionClass($relatedEntityType);
+        $relatedReflection = self::getCachedReflection($relatedEntityType);
         // Use getPrimaryKeyColumnName to get the correct primary key column name
         $relatedIdColumn = $this->getPrimaryKeyColumnName($relatedReflection);
         
@@ -2818,8 +3199,13 @@ class AdvancedQueryBuilder
     /**
      * Apply navigation WHERE clause to SQL
      * Converts predicate to SQL WHERE conditions
+     * 
+     * @param mixed $builder Query builder
+     * @param callable $predicate Predicate function
+     * @param array $navigationPaths Navigation paths detected
+     * @param bool $isOr Whether this is an OR condition
      */
-    private function applyNavigationWhereToSql($builder, callable $predicate, array $navigationPaths): void
+    private function applyNavigationWhereToSql($builder, callable $predicate, array $navigationPaths, bool $isOr = false): void
     {
         // Use ExpressionParser to parse navigation property where conditions
         // This handles variables, null, and other complex expressions
@@ -2958,10 +3344,16 @@ class AdvancedQueryBuilder
                     }
                 }
                 
-                // Apply the WHERE condition
+                // Apply the WHERE condition with OR logic support
                 // The SQL condition should now be in valid SQL format
                 if ($sqlCondition && strpos($sqlCondition, 'NAVIGATION:') === false) {
-                    $builder->where($sqlCondition, null, false);
+                    if ($isOr) {
+                        $builder->orWhere($sqlCondition, null, false);
+                        log_message('debug', 'applyNavigationWhereToSql - OR WHERE clause applied: ' . $sqlCondition);
+                    } else {
+                        $builder->where($sqlCondition, null, false);
+                        log_message('debug', 'applyNavigationWhereToSql - WHERE clause applied: ' . $sqlCondition);
+                    }
                 } else {
                     log_message('error', "applyNavigationWhereToSql - failed to convert NAVIGATION: prefix to SQL: {$sqlCondition}");
                 }
@@ -3052,7 +3444,7 @@ class AdvancedQueryBuilder
             return;
         }
 
-        $entityReflection = new ReflectionClass($this->entityType);
+        $entityReflection = self::getCachedReflection($this->entityType);
 
         foreach ($this->includes as $include) {
             $navigationProperty = $include['path'];
@@ -3134,7 +3526,7 @@ class AdvancedQueryBuilder
             // For collection navigation, foreign key is in the related entity
             // Convention: ParentEntityName + "Id" (e.g., UserId for User entity)
             if ($parentEntityType !== null) {
-                $parentClassName = (new ReflectionClass($parentEntityType))->getShortName();
+                $parentClassName = self::getCachedReflection($parentEntityType)->getShortName();
                 return $parentClassName . 'Id';
             }
             // Fallback: use current entity type
@@ -3165,7 +3557,7 @@ class AdvancedQueryBuilder
             // If not found in current entity, it's likely one-to-one where FK is in related entity
             // Convention: ParentEntityName + "Id" (e.g., UserId for User entity)
             if ($parentEntityType !== null) {
-                $parentClassName = (new ReflectionClass($parentEntityType))->getShortName();
+                $parentClassName = self::getCachedReflection($parentEntityType)->getShortName();
                 return $parentClassName . 'Id';
             }
             
@@ -3204,10 +3596,12 @@ class AdvancedQueryBuilder
             return;
         }
         
-            // Load related entities by their Id
+            // Load related entities by their primary key
         $relatedTableName = $this->context->getTableName($relatedEntityType);
+        $relatedEntityReflection = new ReflectionClass($relatedEntityType);
         $builder = $this->connection->table($relatedTableName);
-        $builder->whereIn('Id', array_unique($foreignKeyValues));
+        $primaryKeyName = $this->getPrimaryKeyColumnName($relatedEntityReflection);
+        $builder->whereIn($primaryKeyName, array_unique($foreignKeyValues));
         try {
             $query = $builder->get();
             $relatedResults = $query->getResultArray();
@@ -3265,7 +3659,7 @@ class AdvancedQueryBuilder
             
             // Load related entities where foreign key (in related entity) matches current entity IDs
             $relatedTableName = $this->context->getTableName($relatedEntityType);
-            $relatedReflection = new ReflectionClass($relatedEntityType);
+            $relatedReflection = self::getCachedReflection($relatedEntityType);
             
             // Check if foreign key exists in related entity
             if (!$relatedReflection->hasProperty($foreignKey)) {
@@ -3351,7 +3745,7 @@ class AdvancedQueryBuilder
 
         // Load related entities where foreign key matches entity IDs
         $relatedTableName = $this->context->getTableName($relatedEntityType);
-        $relatedReflection = new ReflectionClass($relatedEntityType);
+        $relatedReflection = self::getCachedReflection($relatedEntityType);
         $fkColumnName = $this->getColumnNameFromProperty($relatedReflection, $foreignKey);
         
         $builder = $this->connection->table($relatedTableName);
@@ -3415,7 +3809,7 @@ class AdvancedQueryBuilder
     {
         // Get all parent navigation property values
         $parentEntities = [];
-        $entityReflection = new ReflectionClass($this->entityType);
+        $entityReflection = self::getCachedReflection($this->entityType);
         $parentNavProperty = $entityReflection->getProperty($parentNavigation);
         $parentNavProperty->setAccessible(true);
 
@@ -3545,8 +3939,12 @@ class AdvancedQueryBuilder
         }
         
         $tableName = $this->context->getTableName($this->entityType);
-        $result = $this->connection->table($tableName)->whereIn('Id', $ids)->delete();
-        return $result ? count($ids) : 0;
+        $entityReflection = self::getCachedReflection($this->entityType);
+        $primaryKeyName = $this->getPrimaryKeyColumnName($entityReflection);
+        
+        // Use BulkOperations for better performance with large ID lists
+        $bulkOps = new \Yakupeyisan\CodeIgniter4\EntityFramework\Core\BulkOperations($this->connection);
+        return $bulkOps->batchDelete($tableName, $ids, $primaryKeyName);
     }
 
     /**
@@ -3760,7 +4158,7 @@ class AdvancedQueryBuilder
         log_message('debug', 'buildEfCoreStyleQuery: All navigation paths (includes + WHERE): ' . implode(', ', $allNavigationPaths));
         
         // Get all entity columns
-        $entityReflection = new ReflectionClass($this->entityType);
+        $entityReflection = self::getCachedReflection($this->entityType);
         $entityColumns = $this->getEntityColumns($entityReflection);
         $columnsWithProperties = $this->getEntityColumnsWithProperties($entityReflection);
         
@@ -5236,7 +5634,7 @@ class AdvancedQueryBuilder
             $joinEntityType = $subquery['joinEntityType'];
             if ($joinEntityType) {
                 // Has join entity - FK is in join entity (e.g., UserDepartment.UserId)
-                $entityReflection = new ReflectionClass($this->entityType);
+                $entityReflection = self::getCachedReflection($this->entityType);
                 $entityShortName = $entityReflection->getShortName();
                 $expectedFkName = $entityShortName . 'Id'; // e.g., UserId
                 
@@ -6441,7 +6839,7 @@ class AdvancedQueryBuilder
         }
         
         // Simple navigation property (no nesting)
-        $entityReflection = new ReflectionClass($this->entityType);
+        $entityReflection = self::getCachedReflection($this->entityType);
         if (!$entityReflection->hasProperty($navigationProperty)) {
             log_message('debug', "getNavigationInfo: Property '{$navigationProperty}' not found in entity {$this->entityType}");
             return null;
@@ -6619,7 +7017,7 @@ class AdvancedQueryBuilder
     {
         // For collection navigations, the join entity is typically the navigation property name
         // e.g., UserDepartments -> UserDepartment
-        $entityReflection = new ReflectionClass($this->entityType);
+        $entityReflection = self::getCachedReflection($this->entityType);
         $navProperty = $entityReflection->getProperty($navigationProperty);
         $docComment = $navProperty->getDocComment();
         
@@ -8150,7 +8548,7 @@ class AdvancedQueryBuilder
                     }
                 }
                 
-                $entityShortName = (new ReflectionClass($entityType))->getShortName();
+                $entityShortName = self::getCachedReflection($entityType)->getShortName();
                 
                 // Return if it's not the parent entity
                 if ($entityShortName !== $parentEntityShortName) {
@@ -9317,7 +9715,7 @@ class AdvancedQueryBuilder
         
         // Group results by main entity ID
         $entitiesMap = [];
-        $entityReflection = new ReflectionClass($this->entityType);
+        $entityReflection = self::getCachedReflection($this->entityType);
         $entityColumns = $this->getEntityColumns($entityReflection);
         
         // Get navigation info for reference navigations
@@ -9486,10 +9884,10 @@ class AdvancedQueryBuilder
         $entityColumnsCache = [];
         foreach ($collectionNavInfo as $navPath => $info) {
             if ($info['joinEntityType'] !== null) {
-                $reflectionCache[$info['joinEntityType']] = new ReflectionClass($info['joinEntityType']);
+                $reflectionCache[$info['joinEntityType']] = self::getCachedReflection($info['joinEntityType']);
                 $entityColumnsCache[$info['joinEntityType']] = $this->getEntityColumns($reflectionCache[$info['joinEntityType']]);
             }
-            $reflectionCache[$info['entityType']] = new ReflectionClass($info['entityType']);
+            $reflectionCache[$info['entityType']] = self::getCachedReflection($info['entityType']);
             $entityColumnsCache[$info['entityType']] = $this->getEntityColumns($reflectionCache[$info['entityType']]);
         }
         
@@ -10137,13 +10535,13 @@ class AdvancedQueryBuilder
                     if (!$exists) {
                         // Extract collection item data - use cached reflections and columns
                         if ($info['joinEntityType'] !== null) {
-                            $joinEntityReflection = $reflectionCache[$info['joinEntityType']] ?? new ReflectionClass($info['joinEntityType']);
+                            $joinEntityReflection = $reflectionCache[$info['joinEntityType']] ?? self::getCachedReflection($info['joinEntityType']);
                             $joinColumns = $entityColumnsCache[$info['joinEntityType']] ?? $this->getEntityColumns($joinEntityReflection);
                         } else {
                             $joinEntityReflection = null;
                             $joinColumns = [];
                         }
-                        $relatedEntityReflection = $reflectionCache[$info['entityType']] ?? new ReflectionClass($info['entityType']);
+                        $relatedEntityReflection = $reflectionCache[$info['entityType']] ?? self::getCachedReflection($info['entityType']);
                         $relatedColumns = $entityColumnsCache[$info['entityType']] ?? $this->getEntityColumns($relatedEntityReflection);
                         
                         // If there's no join entity, collection item is the entity itself (e.g., EmployeeDepartment)
@@ -10958,11 +11356,283 @@ class AdvancedQueryBuilder
                 }
                 
                 // Check if this is NOT the main entity
-                $entityShortName = (new ReflectionClass($entityType))->getShortName();
+                $entityShortName = self::getCachedReflection($entityType)->getShortName();
                 if ($entityShortName !== $mainEntityShortName) {
                     log_message('debug', "findRelatedEntityFromJoinEntity: Found related entity {$entityType} (not main entity {$mainEntityShortName})");
                     return $entityType;
                 }
+            }
+        }
+        
+        return null;
+    }
+
+    /**
+     * Recursive navigation path parser
+     * Supports any depth of navigation paths (not just 2, 3, or 4 parts)
+     * 
+     * @param array $pathParts Array of navigation property names (last element is column name)
+     * @param string $values SQL values string (e.g., "1,2,3" or "?")
+     * @param mixed $builder CodeIgniter query builder or null
+     * @return string|null SQL condition or null if path cannot be resolved
+     */
+    private function buildNavigationPathConditionRecursive(array $pathParts, string $values, $builder = null): ?string
+    {
+        if (count($pathParts) < 2) {
+            return null; // Need at least navigation.property or collection.reference.column
+        }
+        
+        // Last part is always the column name
+        $columnName = array_pop($pathParts);
+        
+        // If only one part remains, it's a simple reference navigation
+        if (count($pathParts) === 1) {
+            return $this->buildReferenceNavigationCondition($pathParts[0], $columnName, $values, $builder);
+        }
+        
+        // Multiple parts - need to resolve recursively
+        return $this->buildNavigationPathConditionRecursiveInternal($pathParts, $columnName, $values, $builder, $this->entityType, 0);
+    }
+    
+    /**
+     * Internal recursive method for building navigation path conditions
+     * 
+     * @param array $pathParts Remaining navigation property parts
+     * @param string $columnName Target column name
+     * @param string $values SQL values
+     * @param mixed $builder Query builder
+     * @param string $currentEntityType Current entity type in the path
+     * @param int $depth Current depth (for alias generation)
+     * @return string|null SQL condition
+     */
+    private function buildNavigationPathConditionRecursiveInternal(
+        array $pathParts, 
+        string $columnName, 
+        string $values, 
+        $builder, 
+        string $currentEntityType, 
+        int $depth
+    ): ?string {
+        if (empty($pathParts)) {
+            return null; // Should not happen
+        }
+        
+        $currentPart = array_shift($pathParts);
+        $navInfo = $this->getNavigationInfoForEntity($currentPart, $currentEntityType);
+        
+        if (!$navInfo) {
+            return null; // Navigation property not found
+        }
+        
+        // If this is a collection navigation
+        if ($navInfo['isCollection']) {
+            // Collection navigation requires EXISTS subquery
+            // If there are more parts, continue recursively
+            if (!empty($pathParts)) {
+                // Collection -> Reference -> ... -> Column
+                return $this->buildCollectionExistsWithRecursivePath(
+                    $navInfo,
+                    $pathParts,
+                    $columnName,
+                    $values,
+                    $builder,
+                    $currentEntityType,
+                    $depth
+                );
+            } else {
+                // Collection -> Column (should not happen, collections don't have direct columns)
+                return null;
+            }
+        } else {
+            // Reference navigation
+            // If there are more parts, continue recursively
+            if (!empty($pathParts)) {
+                // Reference -> ... -> Column
+                return $this->buildNavigationPathConditionRecursiveInternal(
+                    $pathParts,
+                    $columnName,
+                    $values,
+                    $builder,
+                    $navInfo['entityType'],
+                    $depth + 1
+                );
+            } else {
+                // Reference -> Column (simple case)
+                return $this->buildReferenceNavigationCondition($currentPart, $columnName, $values, $builder);
+            }
+        }
+    }
+    
+    /**
+     * Build reference navigation condition (simple case: Reference.Column)
+     */
+    private function buildReferenceNavigationCondition(string $navigationProperty, string $columnName, string $values, $builder): ?string
+    {
+        $navInfo = $this->getNavigationInfo($navigationProperty);
+        if (!$navInfo || $navInfo['isCollection']) {
+            return null;
+        }
+        
+        // Ensure JOIN is added
+        if ($builder !== null && !isset($this->requiredJoins[$navigationProperty])) {
+            $this->addJoinForNavigationPath($builder, $navigationProperty);
+        }
+        
+        // Get join alias
+        $joinAlias = null;
+        if (isset($this->requiredJoins[$navigationProperty])) {
+            $joinAlias = $this->requiredJoins[$navigationProperty]['alias'] ?? null;
+        }
+        
+        if ($joinAlias === null) {
+            $refTableName = $this->context->getTableName($navInfo['entityType']);
+            $joinAlias = $refTableName;
+        }
+        
+        // Get column name
+        $refEntityReflection = new \ReflectionClass($navInfo['entityType']);
+        $refColumnName = $this->getColumnNameFromProperty($refEntityReflection, $columnName);
+        
+        $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
+        $quotedJoinAlias = $provider->escapeIdentifier($joinAlias);
+        $quotedRefColumn = $provider->escapeIdentifier($refColumnName);
+        
+        // Build SQL condition
+        if ($values !== '?') {
+            return "{$quotedJoinAlias}.{$quotedRefColumn} IN ({$values})";
+        } else {
+            return "{$quotedJoinAlias}.{$quotedRefColumn} IN (?)";
+        }
+    }
+    
+    /**
+     * Build EXISTS subquery for collection navigation with recursive path
+     */
+    private function buildCollectionExistsWithRecursivePath(
+        array $navInfo,
+        array $remainingPathParts,
+        string $columnName,
+        string $values,
+        $builder,
+        string $currentEntityType,
+        int $depth
+    ): ?string {
+        $collectionEntityType = $navInfo['entityType'];
+        $collectionTableName = $this->context->getTableName($collectionEntityType);
+        
+        // Get main entity info
+        $mainEntityReflection = new \ReflectionClass($currentEntityType);
+        $mainPkColumn = $this->getPrimaryKeyColumnName($mainEntityReflection);
+        
+        // Get FK in collection entity pointing to main entity
+        $collectionFkProperty = $navInfo['foreignKey'];
+        $collectionEntityReflection = new \ReflectionClass($collectionEntityType);
+        $collectionFkColumn = $this->getColumnNameFromProperty($collectionEntityReflection, $collectionFkProperty);
+        
+        // Get main table alias
+        if ($builder !== null) {
+            $mainTableAlias = $this->context->getTableName($currentEntityType);
+        } else {
+            $mainTableAlias = $this->getTableAliasForParser();
+        }
+        
+        $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
+        $quotedMainTable = $provider->escapeIdentifier($mainTableAlias);
+        $quotedMainPk = $provider->escapeIdentifier($mainPkColumn);
+        $quotedCollectionTable = $provider->escapeIdentifier($collectionTableName);
+        $quotedCollectionFk = $provider->escapeIdentifier($collectionFkColumn);
+        
+        // Build JOIN chain for remaining path parts recursively
+        $joinChain = $this->buildJoinChainRecursive($remainingPathParts, $collectionEntityType, $columnName, $depth + 1);
+        
+        if ($joinChain === null) {
+            return null;
+        }
+        
+        // Build EXISTS subquery
+        $existsCondition = "EXISTS (SELECT 1 FROM {$quotedCollectionTable} AS [c{$depth}]";
+        
+        // Add JOIN chain
+        if (!empty($joinChain['joins'])) {
+            $existsCondition .= ' ' . implode(' ', $joinChain['joins']);
+        }
+        
+        // Add WHERE clause
+        $existsCondition .= " WHERE [c{$depth}].{$quotedCollectionFk} = {$quotedMainTable}.{$quotedMainPk}";
+        
+        // Add final column condition
+        if ($values !== '?') {
+            $existsCondition .= " AND {$joinChain['columnCondition']} IN ({$values})";
+        } else {
+            $existsCondition .= " AND {$joinChain['columnCondition']} IN (?)";
+        }
+        
+        $existsCondition .= ')';
+        
+        return $existsCondition;
+    }
+    
+    /**
+     * Build JOIN chain recursively for remaining path parts
+     */
+    private function buildJoinChainRecursive(array $pathParts, string $currentEntityType, string $columnName, int $depth): ?array
+    {
+        if (empty($pathParts)) {
+            return null;
+        }
+        
+        $currentPart = array_shift($pathParts);
+        $navInfo = $this->getNavigationInfoForEntity($currentPart, $currentEntityType);
+        
+        if (!$navInfo) {
+            return null;
+        }
+        
+        $joins = [];
+        $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
+        
+        if ($navInfo['isCollection']) {
+            // Collection navigation - need nested EXISTS (not supported in current implementation)
+            // For now, return null to fall back to old logic
+            return null;
+        } else {
+            // Reference navigation - add JOIN
+            $refTableName = $this->context->getTableName($navInfo['entityType']);
+            $refEntityReflection = new \ReflectionClass($navInfo['entityType']);
+            $refPkColumn = $this->getPrimaryKeyColumnName($refEntityReflection);
+            
+            // Get FK property
+            $refFkProperty = $navInfo['foreignKey'];
+            $currentEntityReflection = new \ReflectionClass($currentEntityType);
+            $refFkColumn = $this->getColumnNameFromProperty($currentEntityReflection, $refFkProperty);
+            
+            $quotedRefTable = $provider->escapeIdentifier($refTableName);
+            $quotedRefPk = $provider->escapeIdentifier($refPkColumn);
+            $quotedRefFk = $provider->escapeIdentifier($refFkColumn);
+            
+            $prevAlias = $depth > 0 ? "[c" . ($depth - 1) . "]" : "[c{$depth}]";
+            $currentAlias = "[c{$depth}]";
+            
+            $joins[] = "INNER JOIN {$quotedRefTable} AS {$currentAlias} ON {$prevAlias}.{$quotedRefFk} = {$currentAlias}.{$quotedRefPk}";
+            
+            // If there are more parts, continue recursively
+            if (!empty($pathParts)) {
+                $nextJoinChain = $this->buildJoinChainRecursive($pathParts, $navInfo['entityType'], $columnName, $depth + 1);
+                if ($nextJoinChain !== null) {
+                    $joins = array_merge($joins, $nextJoinChain['joins']);
+                    return [
+                        'joins' => $joins,
+                        'columnCondition' => $nextJoinChain['columnCondition']
+                    ];
+                }
+            } else {
+                // Last part - build column condition
+                $refColumnName = $this->getColumnNameFromProperty($refEntityReflection, $columnName);
+                $quotedRefColumn = $provider->escapeIdentifier($refColumnName);
+                return [
+                    'joins' => $joins,
+                    'columnCondition' => "{$currentAlias}.{$quotedRefColumn}"
+                ];
             }
         }
         

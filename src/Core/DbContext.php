@@ -23,6 +23,7 @@ abstract class DbContext
     protected array $changeTracker = [];
     protected bool $lazyLoadingEnabled = true;
     protected ?\Yakupeyisan\CodeIgniter4\EntityFramework\Core\TransactionManager $transactionManager = null;
+    protected array $pendingLazyLoads = []; // Batch lazy loading queue: ['entityType' => ['navigationProperty' => [Entity1, Entity2, ...]]]
 
     public function __construct(?BaseConnection $connection = null)
     {
@@ -233,12 +234,68 @@ abstract class DbContext
             $entity->markAsModified();
             log_message('debug', "Marked as modified");
             $entity->enableTracking();
-            if (!in_array($entity, $this->changeTracker, true)) {
+            
+            // Check if entity is already in change tracker by ID (not by reference)
+            $entityId = $this->getEntityId($entity);
+            $alreadyTracked = false;
+            
+            if ($entityId !== null) {
+                foreach ($this->changeTracker as $trackedEntity) {
+                    if ($trackedEntity instanceof Entity) {
+                        $trackedId = $this->getEntityId($trackedEntity);
+                        if ($trackedId !== null && $trackedId === $entityId && get_class($trackedEntity) === get_class($entity)) {
+                            // Same entity already tracked, update the reference
+                            $index = array_search($trackedEntity, $this->changeTracker, true);
+                            if ($index !== false) {
+                                $this->changeTracker[$index] = $entity;
+                            }
+                            $alreadyTracked = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            if (!$alreadyTracked && !in_array($entity, $this->changeTracker, true)) {
                 log_message('debug', "Adding to change tracker");
                 $this->changeTracker[] = $entity;
                 log_message('debug', "Added to change tracker");
             }
         }
+    }
+    
+    /**
+     * Get entity ID (primary key value)
+     */
+    private function getEntityId(Entity $entity): mixed
+    {
+        $entityType = get_class($entity);
+        $reflection = new \ReflectionClass($entityType);
+        
+        // Find primary key property
+        foreach ($reflection->getProperties() as $property) {
+            if ($this->isPrimaryKey($reflection, $property->getName())) {
+                $property->setAccessible(true);
+                if ($property->isInitialized($entity)) {
+                    return $property->getValue($entity);
+                }
+                return null;
+            }
+        }
+        
+        // Try common primary key names
+        $commonNames = ['Id', $reflection->getShortName() . 'Id'];
+        foreach ($commonNames as $name) {
+            if ($reflection->hasProperty($name)) {
+                $property = $reflection->getProperty($name);
+                $property->setAccessible(true);
+                if ($property->isInitialized($entity)) {
+                    return $property->getValue($entity);
+                }
+            }
+        }
+        
+        return null;
     }
 
     /**
@@ -439,14 +496,24 @@ abstract class DbContext
     /**
      * Batch delete entities directly from database (bypasses change tracker)
      */
-    public function batchDelete(string $entityType, array $ids): int
+    public function batchDelete(string $entityType, array $ids, ?int $batchSize = null): int
     {
         if (empty($ids)) {
             return 0;
         }
 
         $tableName = $this->getTableName($entityType);
-        $result = $this->connection->table($tableName)->whereIn('Id', $ids)->delete();
+        $primaryKeyName = $this->getPrimaryKeyName($entityType);
+        
+        // Use BulkOperations for chunking if batchSize is provided
+        if ($batchSize !== null && $batchSize > 0) {
+            $bulkOps = new \Yakupeyisan\CodeIgniter4\EntityFramework\Core\BulkOperations($this->connection);
+            $bulkOps->setBatchSize($batchSize);
+            return $bulkOps->batchDelete($tableName, $ids, $primaryKeyName);
+        }
+        
+        // Fallback to simple delete for small batches
+        $result = $this->connection->table($tableName)->whereIn($primaryKeyName, $ids)->delete();
         return $result ? count($ids) : 0;
     }
 
@@ -703,7 +770,8 @@ abstract class DbContext
             return 0;
         }
         
-        $result = $this->connection->table($tableName)->where('Id', $id)->update($data);
+        $primaryKeyName = $this->getPrimaryKeyName($entityType);
+        $result = $this->connection->table($tableName)->where($primaryKeyName, $id)->update($data);
         return $result ? 1 : 0;
     }
 
@@ -716,7 +784,21 @@ abstract class DbContext
         $tableName = $this->getTableName($entityType);
         
         $reflection = new ReflectionClass($entity);
-        $idProperty = $reflection->getProperty('Id');
+        $primaryKeyName = $this->getPrimaryKeyName($entityType);
+        
+        // Find primary key property dynamically
+        $idProperty = null;
+        foreach ($reflection->getProperties() as $property) {
+            if ($this->isPrimaryKey($reflection, $property->getName())) {
+                $idProperty = $property;
+                break;
+            }
+        }
+        
+        if ($idProperty === null) {
+            return 0; // No primary key found
+        }
+        
         $idProperty->setAccessible(true);
         $id = $idProperty->getValue($entity);
         
@@ -724,7 +806,7 @@ abstract class DbContext
             return 0;
         }
         
-        $result = $this->connection->table($tableName)->where('Id', $id)->delete();
+        $result = $this->connection->table($tableName)->where($primaryKeyName, $id)->delete();
         return $result ? 1 : 0;
     }
 
@@ -760,6 +842,32 @@ abstract class DbContext
             return !empty($attributes);
         }
         return false;
+    }
+
+    /**
+     * Get primary key name (column name) for entity type
+     */
+    public function getPrimaryKeyName(string $entityType): string
+    {
+        $reflection = new ReflectionClass($entityType);
+        
+        // Find primary key property
+        foreach ($reflection->getProperties() as $property) {
+            if ($this->isPrimaryKey($reflection, $property->getName())) {
+                return $this->propertyToColumnName($reflection, $property->getName());
+            }
+        }
+        
+        // Fallback: try common primary key names
+        $commonNames = ['Id', $reflection->getShortName() . 'Id'];
+        foreach ($commonNames as $name) {
+            if ($reflection->hasProperty($name)) {
+                return $this->propertyToColumnName($reflection, $name);
+            }
+        }
+        
+        // Last resort: return 'Id'
+        return 'Id';
     }
 
     /**
@@ -898,6 +1006,234 @@ abstract class DbContext
     public function isLazyLoadingEnabled(): bool
     {
         return $this->lazyLoadingEnabled;
+    }
+
+    /**
+     * Queue lazy load request for batch processing
+     * This helps prevent N+1 query problem by batching multiple lazy load requests
+     * 
+     * @param Entity $entity Entity that needs lazy loading
+     * @param string $navigationProperty Navigation property name
+     * @param string $relatedEntityType Related entity type
+     * @param string|null $foreignKey Foreign key property name
+     * @param bool $isCollection Whether this is a collection navigation
+     */
+    public function queueLazyLoad(Entity $entity, string $navigationProperty, string $relatedEntityType, ?string $foreignKey = null, bool $isCollection = false): void
+    {
+        if (!$this->lazyLoadingEnabled) {
+            return;
+        }
+
+        $entityType = get_class($entity);
+        if (!isset($this->pendingLazyLoads[$entityType])) {
+            $this->pendingLazyLoads[$entityType] = [];
+        }
+        if (!isset($this->pendingLazyLoads[$entityType][$navigationProperty])) {
+            $this->pendingLazyLoads[$entityType][$navigationProperty] = [
+                'entities' => [],
+                'relatedEntityType' => $relatedEntityType,
+                'foreignKey' => $foreignKey,
+                'isCollection' => $isCollection
+            ];
+        }
+        
+        $this->pendingLazyLoads[$entityType][$navigationProperty]['entities'][] = $entity;
+    }
+
+    /**
+     * Execute batch lazy loading for queued requests
+     * This processes all queued lazy load requests in batches to reduce database queries
+     */
+    public function executeBatchLazyLoads(): void
+    {
+        if (empty($this->pendingLazyLoads)) {
+            return;
+        }
+
+        foreach ($this->pendingLazyLoads as $entityType => $navigationProperties) {
+            foreach ($navigationProperties as $navigationProperty => $loadInfo) {
+                $entities = $loadInfo['entities'];
+                $relatedEntityType = $loadInfo['relatedEntityType'];
+                $foreignKey = $loadInfo['foreignKey'];
+                $isCollection = $loadInfo['isCollection'];
+
+                if ($isCollection) {
+                    $this->batchLoadCollection($entities, $navigationProperty, $relatedEntityType, $foreignKey);
+                } else {
+                    $this->batchLoadReference($entities, $navigationProperty, $relatedEntityType, $foreignKey);
+                }
+            }
+        }
+
+        // Clear queue after processing
+        $this->pendingLazyLoads = [];
+    }
+
+    /**
+     * Batch load reference navigation properties
+     */
+    private function batchLoadReference(array $entities, string $navigationProperty, string $relatedEntityType, ?string $foreignKey): void
+    {
+        if (empty($entities) || $foreignKey === null) {
+            return;
+        }
+
+        // Collect all foreign key values
+        $fkValues = [];
+        $entityMap = []; // Map FK value to entities that need it
+        
+        $reflection = new \ReflectionClass($entities[0]);
+        $fkProperty = $reflection->getProperty($foreignKey);
+        $fkProperty->setAccessible(true);
+
+        foreach ($entities as $entity) {
+            $fkValue = $fkProperty->getValue($entity);
+            if ($fkValue !== null) {
+                $fkValues[] = $fkValue;
+                if (!isset($entityMap[$fkValue])) {
+                    $entityMap[$fkValue] = [];
+                }
+                $entityMap[$fkValue][] = $entity;
+            }
+        }
+
+        if (empty($fkValues)) {
+            return;
+        }
+
+        // Load all related entities in one query
+        $primaryKeyName = $this->getPrimaryKeyName($relatedEntityType);
+        $query = $this->set($relatedEntityType);
+        // Build whereIn condition manually
+        $uniqueFkValues = array_unique($fkValues);
+        $placeholders = implode(',', array_fill(0, count($uniqueFkValues), '?'));
+        $relatedEntities = $query->where("{$primaryKeyName} IN ({$placeholders})", $uniqueFkValues)->toList();
+
+        // Map related entities to their primary keys
+        $relatedEntityMap = [];
+        $relatedReflection = new \ReflectionClass($relatedEntityType);
+        $relatedPkName = $this->getPrimaryKeyName($relatedEntityType);
+        $relatedPkProperty = $relatedReflection->getProperty($relatedPkName);
+        $relatedPkProperty->setAccessible(true);
+
+        foreach ($relatedEntities as $relatedEntity) {
+            $pkValue = $relatedPkProperty->getValue($relatedEntity);
+            $relatedEntityMap[$pkValue] = $relatedEntity;
+        }
+
+        // Set loaded values to entities
+        $navReflection = new \ReflectionClass($entities[0]);
+        $navProperty = $navReflection->getProperty($navigationProperty);
+        $navProperty->setAccessible(true);
+
+        foreach ($entityMap as $fkValue => $entityList) {
+            $relatedEntity = $relatedEntityMap[$fkValue] ?? null;
+            foreach ($entityList as $entity) {
+                $navProperty->setValue($entity, $relatedEntity);
+            }
+        }
+    }
+
+    /**
+     * Batch load collection navigation properties
+     */
+    private function batchLoadCollection(array $entities, string $navigationProperty, string $relatedEntityType, ?string $foreignKey): void
+    {
+        if (empty($entities)) {
+            return;
+        }
+
+        // Get entity type and primary key
+        $entityType = get_class($entities[0]);
+        $entityReflection = new \ReflectionClass($entityType);
+        $primaryKeyName = $this->getPrimaryKeyName($entityType);
+        
+        // Find primary key property
+        $pkProperty = null;
+        foreach ($entityReflection->getProperties() as $property) {
+            $columnName = $this->getColumnNameFromProperty($entityReflection, $property->getName());
+            if ($columnName === $primaryKeyName) {
+                $pkProperty = $property;
+                $pkProperty->setAccessible(true);
+                break;
+            }
+        }
+
+        if ($pkProperty === null) {
+            return;
+        }
+
+        // Collect all entity IDs
+        $entityIds = [];
+        $entityIdMap = []; // Map entity ID to entity instance
+        
+        foreach ($entities as $entity) {
+            $entityId = $pkProperty->getValue($entity);
+            if ($entityId !== null) {
+                $entityIds[] = $entityId;
+                $entityIdMap[$entityId] = $entity;
+            }
+        }
+
+        if (empty($entityIds)) {
+            return;
+        }
+
+        // Infer foreign key name if not provided
+        if ($foreignKey === null) {
+            $entityName = $entityReflection->getShortName();
+            $foreignKey = $entityName . 'Id';
+        }
+
+        // Load all related entities in one query
+        $uniqueEntityIds = array_unique($entityIds);
+        $placeholders = implode(',', array_fill(0, count($uniqueEntityIds), '?'));
+        $relatedEntities = $this->set($relatedEntityType)
+            ->where("{$foreignKey} IN ({$placeholders})", $uniqueEntityIds)
+            ->toList();
+
+        // Group related entities by foreign key
+        $relatedReflection = new \ReflectionClass($relatedEntityType);
+        $fkProperty = $relatedReflection->getProperty($foreignKey);
+        $fkProperty->setAccessible(true);
+        
+        $groupedEntities = [];
+        foreach ($relatedEntities as $relatedEntity) {
+            $fkValue = $fkProperty->getValue($relatedEntity);
+            if (!isset($groupedEntities[$fkValue])) {
+                $groupedEntities[$fkValue] = [];
+            }
+            $groupedEntities[$fkValue][] = $relatedEntity;
+        }
+
+        // Set loaded collections to entities
+        $navReflection = new \ReflectionClass($entities[0]);
+        $navProperty = $navReflection->getProperty($navigationProperty);
+        $navProperty->setAccessible(true);
+
+        foreach ($entityIdMap as $entityId => $entity) {
+            $navProperty->setValue($entity, $groupedEntities[$entityId] ?? []);
+        }
+    }
+
+    /**
+     * Helper to get column name from property (used in batch loading)
+     */
+    private function getColumnNameFromProperty(\ReflectionClass $reflection, string $propertyName): string
+    {
+        if ($reflection->hasProperty($propertyName)) {
+            $property = $reflection->getProperty($propertyName);
+            $attributes = $property->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\Column::class);
+            
+            if (!empty($attributes)) {
+                $columnAttr = $attributes[0]->newInstance();
+                if ($columnAttr->name !== null) {
+                    return $columnAttr->name;
+                }
+            }
+        }
+        
+        return $propertyName;
     }
 }
 

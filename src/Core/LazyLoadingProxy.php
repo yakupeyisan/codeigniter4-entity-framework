@@ -5,6 +5,7 @@ namespace Yakupeyisan\CodeIgniter4\EntityFramework\Core;
 use Yakupeyisan\CodeIgniter4\EntityFramework\Core\DbContext;
 use ReflectionClass;
 use ReflectionProperty;
+use ReflectionNamedType;
 
 /**
  * LazyLoadingProxy - Proxy class for lazy loading navigation properties
@@ -40,8 +41,9 @@ class LazyLoadingProxy
 
     /**
      * Load the navigation property value
+     * @return mixed Loaded navigation property value (Entity, array of Entities, or null)
      */
-    public function load()
+    public function load(): mixed
     {
         if ($this->isLoaded) {
             return $this->loadedValue;
@@ -63,8 +65,9 @@ class LazyLoadingProxy
 
     /**
      * Load reference navigation (many-to-one or one-to-one)
+     * @return Entity|null Loaded entity or null
      */
-    private function loadReference()
+    private function loadReference(): ?Entity
     {
         if ($this->foreignKey === null || $this->relatedEntityType === null) {
             return null;
@@ -85,9 +88,10 @@ class LazyLoadingProxy
             return null;
         }
 
-        // Load related entity
+        // Load related entity using primary key
+        $primaryKeyName = $this->context->getPrimaryKeyName($this->relatedEntityType);
         $relatedEntity = $this->context->set($this->relatedEntityType)
-            ->where(fn($e) => $e->Id === $fkValue)
+            ->where("{$primaryKeyName} = ?", [$fkValue])
             ->firstOrDefault();
 
         return $relatedEntity;
@@ -95,23 +99,63 @@ class LazyLoadingProxy
 
     /**
      * Load collection navigation (one-to-many)
+     * @return array Array of related entities
      */
-    private function loadCollection()
+    private function loadCollection(): array
     {
         if ($this->relatedEntityType === null) {
             return [];
         }
 
         $entityReflection = new ReflectionClass($this->entity);
+        $entityType = get_class($this->entity);
         
-        // Get entity ID
-        if (!$entityReflection->hasProperty('Id')) {
-            return [];
+        // Get entity ID dynamically using context's getPrimaryKeyName
+        $primaryKeyName = $this->context->getPrimaryKeyName($entityType);
+        $entityId = null;
+        
+        // Find primary key property by name
+        foreach ($entityReflection->getProperties() as $property) {
+            $propertyName = $property->getName();
+            // Check if this property matches the primary key name (considering Column attribute)
+            $columnName = $this->getColumnNameFromProperty($entityReflection, $propertyName);
+            if ($columnName === $primaryKeyName) {
+                $property->setAccessible(true);
+                if ($property->isInitialized($this->entity)) {
+                    $entityId = $property->getValue($this->entity);
+                    break;
+                }
+            }
         }
-
-        $idProperty = $entityReflection->getProperty('Id');
-        $idProperty->setAccessible(true);
-        $entityId = $idProperty->getValue($this->entity);
+        
+        // Fallback: try Key attribute
+        if ($entityId === null) {
+            foreach ($entityReflection->getProperties() as $property) {
+                $attributes = $property->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\Key::class);
+                if (!empty($attributes)) {
+                    $property->setAccessible(true);
+                    if ($property->isInitialized($this->entity)) {
+                        $entityId = $property->getValue($this->entity);
+                        break;
+                    }
+                }
+            }
+        }
+        
+        // Last fallback: try common names
+        if ($entityId === null) {
+            $commonNames = ['Id', $entityReflection->getShortName() . 'Id'];
+            foreach ($commonNames as $name) {
+                if ($entityReflection->hasProperty($name)) {
+                    $idProperty = $entityReflection->getProperty($name);
+                    $idProperty->setAccessible(true);
+                    if ($idProperty->isInitialized($this->entity)) {
+                        $entityId = $idProperty->getValue($this->entity);
+                        break;
+                    }
+                }
+            }
+        }
 
         if ($entityId === null) {
             return [];
@@ -131,6 +175,26 @@ class LazyLoadingProxy
             ->toList();
 
         return $relatedEntities;
+    }
+    
+    /**
+     * Get column name from property (helper method)
+     */
+    private function getColumnNameFromProperty(ReflectionClass $reflection, string $propertyName): string
+    {
+        if ($reflection->hasProperty($propertyName)) {
+            $property = $reflection->getProperty($propertyName);
+            $attributes = $property->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\Column::class);
+            
+            if (!empty($attributes)) {
+                $columnAttr = $attributes[0]->newInstance();
+                if ($columnAttr->name !== null) {
+                    return $columnAttr->name;
+                }
+            }
+        }
+        
+        return $propertyName;
     }
 
     /**
@@ -156,8 +220,9 @@ class LazyLoadingProxy
 
     /**
      * Get the loaded value
+     * @return mixed Loaded value
      */
-    public function getValue()
+    public function getValue(): mixed
     {
         if (!$this->isLoaded) {
             $this->load();

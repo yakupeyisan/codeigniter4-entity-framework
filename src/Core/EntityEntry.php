@@ -83,7 +83,98 @@ class EntityEntry
      */
     public function reload(): void
     {
-        // Implementation for reloading entity
+        if (!$this->entity instanceof Entity) {
+            return; // Can only reload Entity instances
+        }
+        
+        $entityType = get_class($this->entity);
+        $reflection = new \ReflectionClass($entityType);
+        
+        // Find primary key property
+        $primaryKeyProperty = null;
+        foreach ($reflection->getProperties() as $property) {
+            $attributes = $property->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\Key::class);
+            if (!empty($attributes)) {
+                $primaryKeyProperty = $property;
+                break;
+            }
+        }
+        
+        if ($primaryKeyProperty === null) {
+            // Try common primary key names
+            $commonNames = ['Id', $reflection->getShortName() . 'Id'];
+            foreach ($commonNames as $name) {
+                if ($reflection->hasProperty($name)) {
+                    $primaryKeyProperty = $reflection->getProperty($name);
+                    break;
+                }
+            }
+        }
+        
+        if ($primaryKeyProperty === null) {
+            $exceptionClass = class_exists('\Yakupeyisan\CodeIgniter4\EntityFramework\Exceptions\InvalidOperationException') 
+                ? '\Yakupeyisan\CodeIgniter4\EntityFramework\Exceptions\InvalidOperationException'
+                : \RuntimeException::class;
+            throw new $exceptionClass("Cannot reload entity: Primary key not found for {$entityType}");
+        }
+        
+        $primaryKeyProperty->setAccessible(true);
+        $id = $primaryKeyProperty->getValue($this->entity);
+        
+        if ($id === null) {
+            $exceptionClass = class_exists('\Yakupeyisan\CodeIgniter4\EntityFramework\Exceptions\InvalidOperationException') 
+                ? '\Yakupeyisan\CodeIgniter4\EntityFramework\Exceptions\InvalidOperationException'
+                : \RuntimeException::class;
+            throw new $exceptionClass("Cannot reload entity: Primary key value is null");
+        }
+        
+        // Get primary key column name
+        $primaryKeyName = $this->context->getPrimaryKeyName($entityType);
+        
+        // Reload from database using raw SQL for primary key
+        $reloadedEntity = $this->context->set($entityType)
+            ->where("{$primaryKeyName} = ?", [$id])
+            ->first();
+        
+        if ($reloadedEntity === null) {
+            $exceptionClass = class_exists('\Yakupeyisan\CodeIgniter4\EntityFramework\Exceptions\EntityNotFoundException') 
+                ? '\Yakupeyisan\CodeIgniter4\EntityFramework\Exceptions\EntityNotFoundException'
+                : \RuntimeException::class;
+            throw new $exceptionClass($entityType, $id);
+        }
+        
+        // Copy all property values from reloaded entity to current entity
+        foreach ($reflection->getProperties() as $property) {
+            if ($property->isStatic()) {
+                continue;
+            }
+            
+            $property->setAccessible(true);
+            
+            // Skip internal tracking properties
+            $excludedProperties = [
+                'entityState',
+                'originalValues',
+                'currentValues',
+                'navigationProperties',
+                'isTracking'
+            ];
+            
+            if (in_array($property->getName(), $excludedProperties)) {
+                continue;
+            }
+            
+            if ($property->isInitialized($reloadedEntity)) {
+                $value = $property->getValue($reloadedEntity);
+                $property->setValue($this->entity, $value);
+            }
+        }
+        
+        // Reset entity state
+        if ($this->entity instanceof Entity) {
+            $this->entity->markAsUnchanged();
+            $this->entity->enableTracking();
+        }
     }
 }
 

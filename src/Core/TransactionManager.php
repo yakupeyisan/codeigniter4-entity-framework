@@ -92,12 +92,27 @@ class TransactionManager
 
         if ($savepointName !== null) {
             // Rollback to specific savepoint
+            // First verify the savepoint exists
+            if (!in_array($savepointName, $this->savepoints)) {
+                $exceptionClass = class_exists('\Yakupeyisan\CodeIgniter4\EntityFramework\Exceptions\InvalidOperationException') 
+                    ? '\Yakupeyisan\CodeIgniter4\EntityFramework\Exceptions\InvalidOperationException'
+                    : \RuntimeException::class;
+                throw new $exceptionClass("Savepoint '{$savepointName}' not found. Available savepoints: " . implode(', ', $this->savepoints));
+            }
+            
             $this->rollbackToSavepoint($savepointName);
-            // Remove savepoints after this one
+            
+            // Remove savepoints after this one (including the one we rolled back to)
             $index = array_search($savepointName, $this->savepoints);
             if ($index !== false) {
+                // Keep savepoints before this one, remove this one and all after
                 $this->savepoints = array_slice($this->savepoints, 0, $index);
+                // Adjust transaction level: if we rolled back to savepoint at index N, we're now at level N+1
+                // But we need to account for the fact that we're rolling back, so level should be index + 1
                 $this->transactionLevel = $index + 1;
+            } else {
+                // Savepoint not found in array (should not happen due to check above, but defensive)
+                $this->transactionLevel = max(1, $this->transactionLevel - 1);
             }
             return true;
         }

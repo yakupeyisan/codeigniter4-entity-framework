@@ -171,6 +171,16 @@ interface IQueryable
     public function toList(): array;
 
     /**
+     * Execute query in chunks to prevent memory overflow
+     * Processes results in batches instead of loading all into memory
+     * 
+     * @param int $chunkSize Number of records per chunk (default: 1000)
+     * @param callable $callback Callback function that receives each chunk: function(array $chunk): void
+     * @return int Total number of records processed
+     */
+    public function chunk(int $chunkSize = 1000, callable $callback): int;
+
+    /**
      * Execute query and get all results as arrays
      * Converts entities to clean arrays (excludes internal properties)
      * 

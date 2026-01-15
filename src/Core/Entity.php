@@ -22,6 +22,7 @@ abstract class Entity implements \JsonSerializable
     protected array $currentValues = [];
     protected array $navigationProperties = [];
     protected bool $isTracking = false;
+    protected array $loadingProperties = []; // Track properties currently being loaded to prevent infinite loops
 
     /**
      * Get entity state
@@ -212,13 +213,30 @@ abstract class Entity implements \JsonSerializable
      */
     public function __get(string $name)
     {
+        // Prevent infinite loop: if this property is already being loaded, return null
+        if (isset($this->loadingProperties[$name])) {
+            log_message('warning', "Circular reference detected for property '{$name}'. Returning null to prevent infinite loop.");
+            return null;
+        }
+        
         // Check if there's a lazy loading proxy for this property
         $proxyKey = '_proxy_' . $name;
         if (isset($this->navigationProperties[$proxyKey])) {
             $proxy = $this->navigationProperties[$proxyKey];
             if ($proxy instanceof \Yakupeyisan\CodeIgniter4\EntityFramework\Core\LazyLoadingProxy) {
-                // Load the navigation property
-                return $proxy->load();
+                // Mark property as loading to prevent infinite loops
+                $this->loadingProperties[$name] = true;
+                try {
+                    // Load the navigation property
+                    $result = $proxy->load();
+                    // Clear loading flag after successful load
+                    unset($this->loadingProperties[$name]);
+                    return $result;
+                } catch (\Exception $e) {
+                    // Clear loading flag on error
+                    unset($this->loadingProperties[$name]);
+                    throw $e;
+                }
             }
         }
 
