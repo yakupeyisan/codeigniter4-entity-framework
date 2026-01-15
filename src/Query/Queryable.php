@@ -180,9 +180,9 @@ class Queryable implements IQueryable
         return $this->queryBuilder->toList();
     }
 
-    public function chunk(int $chunkSize = 1000, callable $callback): int
+    public function chunk(callable $callback, int $chunkSize = 1000): int
     {
-        return $this->queryBuilder->chunk($chunkSize, $callback);
+        return $this->queryBuilder->chunk($callback, $chunkSize);
     }    
     public function cleanEntityState($data) {
         if (is_array($data)) {

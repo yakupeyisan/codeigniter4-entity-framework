@@ -174,11 +174,11 @@ interface IQueryable
      * Execute query in chunks to prevent memory overflow
      * Processes results in batches instead of loading all into memory
      * 
-     * @param int $chunkSize Number of records per chunk (default: 1000)
      * @param callable $callback Callback function that receives each chunk: function(array $chunk): void
+     * @param int $chunkSize Number of records per chunk (default: 1000)
      * @return int Total number of records processed
      */
-    public function chunk(int $chunkSize = 1000, callable $callback): int;
+    public function chunk(callable $callback, int $chunkSize = 1000): int;
 
     /**
      * Execute query and get all results as arrays

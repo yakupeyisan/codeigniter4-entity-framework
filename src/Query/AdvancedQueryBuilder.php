@@ -56,6 +56,46 @@ class AdvancedQueryBuilder
      * Property cache: class name => [property name => ReflectionProperty]
      */
     private static array $propertyCache = [];
+    
+    /**
+     * Performance tracking
+     */
+    private static array $queryStats = []; // Global query statistics
+    private static float $slowQueryThreshold = 1.0; // Seconds - queries slower than this will be logged
+    private array $currentQueryStats = []; // Current query statistics
+    
+    /**
+     * Set slow query threshold (in seconds)
+     * Queries taking longer than this will be logged as warnings
+     */
+    public static function setSlowQueryThreshold(float $seconds): void
+    {
+        self::$slowQueryThreshold = $seconds;
+    }
+    
+    /**
+     * Get slow query threshold
+     */
+    public static function getSlowQueryThreshold(): float
+    {
+        return self::$slowQueryThreshold;
+    }
+    
+    /**
+     * Get query statistics
+     */
+    public static function getQueryStats(): array
+    {
+        return self::$queryStats;
+    }
+    
+    /**
+     * Clear query statistics
+     */
+    public static function clearQueryStats(): void
+    {
+        self::$queryStats = [];
+    }
 
     public function __construct(DbContext $context, string $entityType, BaseConnection $connection)
     {
@@ -665,11 +705,11 @@ class AdvancedQueryBuilder
      * Execute query in chunks to prevent memory overflow
      * Processes results in batches instead of loading all into memory
      * 
-     * @param int $chunkSize Number of records per chunk (default: 1000)
      * @param callable $callback Callback function that receives each chunk: function(array $chunk): void
+     * @param int $chunkSize Number of records per chunk (default: 1000)
      * @return int Total number of records processed
      */
-    public function chunk(int $chunkSize = 1000, callable $callback): int
+    public function chunk(callable $callback, int $chunkSize = 1000): int
     {
         if ($chunkSize <= 0) {
             throw new \InvalidArgumentException('Chunk size must be greater than 0');
@@ -1146,9 +1186,156 @@ class AdvancedQueryBuilder
      */
     public function getStats(): array
     {
-        $sql = $this->toSql();
-        $analyzer = new QueryPlanAnalyzer($this->connection);
-        return $analyzer->getQueryStats($sql);
+        // Return current query stats if available
+        if (!empty($this->currentQueryStats)) {
+            return $this->currentQueryStats;
+        }
+        
+        // Fallback to query plan analyzer
+        try {
+            $sql = $this->toSql();
+            $analyzer = new QueryPlanAnalyzer($this->connection);
+            return $analyzer->getQueryStats($sql);
+        } catch (\Exception $e) {
+            return [
+                'error' => 'Could not get query stats: ' . $e->getMessage()
+            ];
+        }
+    }
+
+    /**
+     * Finalize query statistics and log slow queries
+     */
+    private function finalizeQueryStats(): void
+    {
+        if (empty($this->currentQueryStats)) {
+            return;
+        }
+
+        // Calculate total execution time
+        $endTime = microtime(true);
+        $startTime = $this->currentQueryStats['startTime'] ?? $endTime;
+        $totalTime = $endTime - $startTime;
+        
+        $this->currentQueryStats['totalTime'] = $totalTime;
+        $this->currentQueryStats['endTime'] = $endTime;
+        
+        // Calculate time breakdown percentages
+        $sqlTime = $this->currentQueryStats['sqlExecutionTime'] ?? 0;
+        $mappingTime = $this->currentQueryStats['mappingTime'] ?? 0;
+        $parsingTime = $this->currentQueryStats['parsingTime'] ?? 0;
+        $trackingTime = $this->currentQueryStats['trackingTime'] ?? 0;
+        $lazyLoadingTime = $this->currentQueryStats['lazyLoadingTime'] ?? 0;
+        
+        if ($totalTime > 0) {
+            $this->currentQueryStats['timeBreakdown'] = [
+                'sqlExecution' => [
+                    'time' => $sqlTime,
+                    'percentage' => ($sqlTime / $totalTime) * 100
+                ],
+                'mapping' => [
+                    'time' => $mappingTime,
+                    'percentage' => ($mappingTime / $totalTime) * 100
+                ],
+                'parsing' => [
+                    'time' => $parsingTime,
+                    'percentage' => ($parsingTime / $totalTime) * 100
+                ],
+                'tracking' => [
+                    'time' => $trackingTime,
+                    'percentage' => ($trackingTime / $totalTime) * 100
+                ],
+                'lazyLoading' => [
+                    'time' => $lazyLoadingTime,
+                    'percentage' => ($lazyLoadingTime / $totalTime) * 100
+                ],
+            ];
+        }
+        
+        // Add to global statistics
+        $statsKey = md5($this->currentQueryStats['sql'] ?? '') . '_' . $this->currentQueryStats['entityType'];
+        if (!isset(self::$queryStats[$statsKey])) {
+            self::$queryStats[$statsKey] = [
+                'query' => $this->currentQueryStats['sql'] ?? '',
+                'entityType' => $this->currentQueryStats['entityType'] ?? '',
+                'queryType' => $this->currentQueryStats['queryType'] ?? 'UNKNOWN',
+                'executionCount' => 0,
+                'totalTime' => 0,
+                'avgTime' => 0,
+                'minTime' => PHP_FLOAT_MAX,
+                'maxTime' => 0,
+                'totalRows' => 0,
+                'avgRows' => 0,
+            ];
+        }
+        
+        $globalStats = &self::$queryStats[$statsKey];
+        $globalStats['executionCount']++;
+        $globalStats['totalTime'] += $totalTime;
+        $globalStats['avgTime'] = $globalStats['totalTime'] / $globalStats['executionCount'];
+        $globalStats['minTime'] = min($globalStats['minTime'], $totalTime);
+        $globalStats['maxTime'] = max($globalStats['maxTime'], $totalTime);
+        $globalStats['totalRows'] += ($this->currentQueryStats['rowCount'] ?? 0);
+        $globalStats['avgRows'] = $globalStats['totalRows'] / $globalStats['executionCount'];
+        
+        // Check for slow query
+        if ($totalTime >= self::$slowQueryThreshold) {
+            $this->logSlowQuery($totalTime);
+        }
+        
+        // Log performance info if debug mode
+        if (defined('CI_DEBUG') && CI_DEBUG === true) {
+            $this->debugLog(sprintf(
+                'Query Performance - Entity: %s, Type: %s, Total: %.2fms, SQL: %.2fms, Mapping: %.2fms, Parsing: %.2fms, Rows: %d',
+                $this->currentQueryStats['entityType'] ?? 'Unknown',
+                $this->currentQueryStats['queryType'] ?? 'Unknown',
+                $totalTime * 1000,
+                $sqlTime * 1000,
+                $mappingTime * 1000,
+                ($parsingTime ?? 0) * 1000,
+                $this->currentQueryStats['rowCount'] ?? 0
+            ));
+        }
+    }
+
+    /**
+     * Log slow query warning
+     */
+    private function logSlowQuery(float $executionTime): void
+    {
+        $sql = $this->currentQueryStats['sql'] ?? 'N/A';
+        $entityType = $this->currentQueryStats['entityType'] ?? 'Unknown';
+        $queryType = $this->currentQueryStats['queryType'] ?? 'Unknown';
+        $rowCount = $this->currentQueryStats['rowCount'] ?? 0;
+        
+        $message = sprintf(
+            "SLOW QUERY DETECTED - Entity: %s, Type: %s, Time: %.2fms (Threshold: %.2fms), Rows: %d, SQL: %s",
+            $entityType,
+            $queryType,
+            $executionTime * 1000,
+            self::$slowQueryThreshold * 1000,
+            $rowCount,
+            substr($sql, 0, 200)
+        );
+        
+        log_message('warning', $message);
+        
+        // Add detailed breakdown if available
+        if (isset($this->currentQueryStats['timeBreakdown'])) {
+            $breakdown = $this->currentQueryStats['timeBreakdown'];
+            $breakdownMsg = sprintf(
+                "Time Breakdown - SQL: %.2fms (%.1f%%), Mapping: %.2fms (%.1f%%), Parsing: %.2fms (%.1f%%), Tracking: %.2fms (%.1f%%)",
+                $breakdown['sqlExecution']['time'] * 1000,
+                $breakdown['sqlExecution']['percentage'],
+                $breakdown['mapping']['time'] * 1000,
+                $breakdown['mapping']['percentage'],
+                ($breakdown['parsing']['time'] ?? 0) * 1000,
+                ($breakdown['parsing']['percentage'] ?? 0),
+                $breakdown['tracking']['time'] * 1000,
+                $breakdown['tracking']['percentage']
+            );
+            log_message('warning', $breakdownMsg);
+        }
     }
 
     /**
@@ -1222,21 +1409,39 @@ class AdvancedQueryBuilder
      */
     private function executeQuery(): array
     {
+        // Initialize performance tracking
+        $this->currentQueryStats = [
+            'entityType' => $this->entityType,
+            'startTime' => microtime(true),
+            'includes' => count($this->includes),
+            'whereCount' => count($this->wheres),
+            'orderByCount' => count($this->orderBys),
+            'queryType' => 'STANDARD',
+        ];
+        
         // Validate group start/end balance before execution
         $this->validateGroupBalance();
         
         if ($this->useRawSql) {
-            return $this->executeRawSql();
+            $result = $this->executeRawSql();
+            $this->finalizeQueryStats();
+            return $result;
         }
 
         // Use EF Core style query builder if we have includes or navigation filters
         if (!empty($this->includes) || $this->hasNavigationFilters()) {
-            return $this->executeEfCoreStyleQuery();
+            $this->currentQueryStats['queryType'] = 'EF_CORE_STYLE';
+            $result = $this->executeEfCoreStyleQuery();
+            $this->finalizeQueryStats();
+            return $result;
         }
 
         // Check if we have raw joins - if so, build SQL manually
         if (!empty($this->rawJoins)) {
-            return $this->executeQueryWithRawJoins();
+            $this->currentQueryStats['queryType'] = 'RAW_JOINS';
+            $result = $this->executeQueryWithRawJoins();
+            $this->finalizeQueryStats();
+            return $result;
         }
         
         // Fallback to simple query builder for basic queries
@@ -1263,13 +1468,17 @@ class AdvancedQueryBuilder
         
         // If has sensitive columns, build SQL manually with masking
         if ($hasSensitiveColumns) {
-            return $this->executeQueryWithMasking($columnsWithProperties, $entityReflection);
+            $this->currentQueryStats['queryType'] = 'MASKING';
+            $result = $this->executeQueryWithMasking($columnsWithProperties, $entityReflection);
+            $this->finalizeQueryStats();
+            return $result;
         }
         
         // Otherwise use standard query builder
         $builder = $this->connection->table($tableName);
         
-        // Apply WHERE clauses
+        // Apply WHERE clauses with performance tracking
+        $parsingStartTime = microtime(true);
         foreach ($this->wheres as $index => $whereItem) {
             $groupStart = is_array($whereItem) && isset($whereItem['groupStart']) ? $whereItem['groupStart'] : false;
             $groupEnd = is_array($whereItem) && isset($whereItem['groupEnd']) ? $whereItem['groupEnd'] : false;
@@ -1295,6 +1504,8 @@ class AdvancedQueryBuilder
             log_message('debug', "executeQuery: Processing where item #{$index}, isOr=" . ($isOr ? 'true' : 'false') . ", type=" . (is_string($whereToApply) ? 'raw SQL' : 'callable'));
             $this->applyWhere($builder, $whereToApply, $isOr);
         }
+        $parsingEndTime = microtime(true);
+        $this->currentQueryStats['parsingTime'] = ($parsingEndTime - $parsingStartTime);
         
         // Apply order by
         foreach ($this->orderBys as $orderBy) {
@@ -1320,23 +1531,45 @@ class AdvancedQueryBuilder
             }
         }
         
+        // Execute query with performance tracking
+        $queryStartTime = microtime(true);
         try {
             $query = $builder->get();
             $results = $query->getResultArray();
-        } catch (\Exception $e) {
+            $queryEndTime = microtime(true);
+            $queryExecutionTime = $queryEndTime - $queryStartTime;
+            
+            // Track SQL execution time
             $sql = $builder->getCompiledSelect(false);
+            $this->currentQueryStats['sqlExecutionTime'] = $queryExecutionTime;
+            $this->currentQueryStats['sql'] = substr($sql, 0, 500);
+            $this->currentQueryStats['rowCount'] = count($results);
+        } catch (\Exception $e) {
+            $queryEndTime = microtime(true);
+            $queryExecutionTime = $queryEndTime - $queryStartTime;
+            $sql = $builder->getCompiledSelect(false);
+            $this->currentQueryStats['sqlExecutionTime'] = $queryExecutionTime;
+            $this->currentQueryStats['sql'] = substr($sql, 0, 500);
             log_message('error', 'SQL Query Error: ' . $e->getMessage());
             log_message('error', 'Failed SQL Query: ' . $sql);
+            log_message('error', 'Query execution time: ' . number_format($queryExecutionTime * 1000, 2) . 'ms');
             
             // Throw more specific exception
             $exceptionClass = class_exists('\Yakupeyisan\CodeIgniter4\EntityFramework\Exceptions\QueryException') 
                 ? '\Yakupeyisan\CodeIgniter4\EntityFramework\Exceptions\QueryException'
                 : \Exception::class;
+            $this->finalizeQueryStats();
             throw new $exceptionClass('Query execution failed: ' . $e->getMessage(), $sql, [], $e->getCode(), $e);
         }
+        
+        // Map to entities with performance tracking
+        $mappingStartTime = microtime(true);
         $entities = $this->mapToEntities($results);
+        $mappingEndTime = microtime(true);
+        $this->currentQueryStats['mappingTime'] = $mappingEndTime - $mappingStartTime;
         
         // Apply change tracking
+        $trackingStartTime = microtime(true);
         if ($this->isTracking && !$this->isNoTracking) {
             foreach ($entities as $entity) {
                 if ($entity instanceof Entity) {
@@ -1345,7 +1578,10 @@ class AdvancedQueryBuilder
                 }
             }
         }
+        $trackingEndTime = microtime(true);
+        $this->currentQueryStats['trackingTime'] = $trackingEndTime - $trackingStartTime;
         
+        $this->finalizeQueryStats();
         return $entities;
     }
 
@@ -1401,7 +1637,8 @@ class AdvancedQueryBuilder
         // Debug log
         log_message('debug', 'SensitiveValue masking SQL: ' . substr($sql, 0, 500));
         
-        // Build WHERE clauses
+        // Build WHERE clauses with performance tracking
+        $parsingStartTime = microtime(true);
         $whereConditions = [];
         $whereParams = [];
         $currentGroup = [];
@@ -1479,6 +1716,8 @@ class AdvancedQueryBuilder
                 log_message('error', 'Exception trace: ' . $e->getTraceAsString());
             }
         }
+        $parsingEndTime = microtime(true);
+        $this->currentQueryStats['parsingTime'] = ($parsingEndTime - $parsingStartTime);
         
         // Handle any remaining group
         if ($inGroup && !empty($currentGroup)) {
@@ -1505,21 +1744,40 @@ class AdvancedQueryBuilder
             $sql .= "\n" . $limitClause;
         }
         
-        // Execute query
+        // Execute query with performance tracking
+        $queryStartTime = microtime(true);
         try {
             $query = $this->connection->query($sql);
             $results = $query->getResultArray();
+            $queryEndTime = microtime(true);
+            $queryExecutionTime = $queryEndTime - $queryStartTime;
+            
+            // Track SQL execution time
+            $this->currentQueryStats['sqlExecutionTime'] = $queryExecutionTime;
+            $this->currentQueryStats['sql'] = substr($sql, 0, 500);
+            $this->currentQueryStats['rowCount'] = count($results);
         } catch (\Exception $e) {
+            $queryEndTime = microtime(true);
+            $queryExecutionTime = $queryEndTime - $queryStartTime;
+            $this->currentQueryStats['sqlExecutionTime'] = $queryExecutionTime;
+            $this->currentQueryStats['sql'] = substr($sql, 0, 500);
+            
             log_message('error', 'SQL Query Error: ' . $e->getMessage());
             log_message('error', 'Exception trace: ' . $e->getTraceAsString());
             log_message('error', 'Failed SQL Query: ' . $sql);
+            log_message('error', 'Query execution time: ' . number_format($queryExecutionTime * 1000, 2) . 'ms');
+            $this->finalizeQueryStats();
             throw $e;
         }
         
-        // Map to entities
+        // Map to entities with performance tracking
+        $mappingStartTime = microtime(true);
         $entities = $this->mapToEntities($results);
+        $mappingEndTime = microtime(true);
+        $this->currentQueryStats['mappingTime'] = $mappingEndTime - $mappingStartTime;
         
         // Apply change tracking
+        $trackingStartTime = microtime(true);
         if ($this->isTracking && !$this->isNoTracking) {
             foreach ($entities as $entity) {
                 if ($entity instanceof Entity) {
@@ -1528,7 +1786,10 @@ class AdvancedQueryBuilder
                 }
             }
         }
+        $trackingEndTime = microtime(true);
+        $this->currentQueryStats['trackingTime'] = $trackingEndTime - $trackingStartTime;
         
+        $this->finalizeQueryStats();
         return $entities;
     }
 
@@ -1581,7 +1842,8 @@ class AdvancedQueryBuilder
             $sql .= "\n{$joinType} JOIN ({$rawSql}) AS {$quotedRawAlias} ON {$joinCondition}";
         }
         
-        // Build WHERE clauses (simple ones)
+        // Build WHERE clauses (simple ones) with performance tracking
+        $parsingStartTime = microtime(true);
         $whereConditions = [];
         foreach ($this->wheres as $whereItem) {
             $where = is_array($whereItem) ? $whereItem['predicate'] : $whereItem;
@@ -1603,6 +1865,8 @@ class AdvancedQueryBuilder
                 }
             }
         }
+        $parsingEndTime = microtime(true);
+        $this->currentQueryStats['parsingTime'] = ($parsingEndTime - $parsingStartTime);
         
         if (!empty($whereConditions)) {
             $sql .= "\nWHERE " . implode(' AND ', $whereConditions);
@@ -1623,20 +1887,38 @@ class AdvancedQueryBuilder
             $sql .= "\nOFFSET " . (int)$this->skipCount;
         }
         
-        // Execute query
+        // Execute query with performance tracking
+        $queryStartTime = microtime(true);
         try {
             $query = $this->connection->query($sql);
             $results = $query->getResultArray();
+            $queryEndTime = microtime(true);
+            $queryExecutionTime = $queryEndTime - $queryStartTime;
+            
+            // Track SQL execution time
+            $this->currentQueryStats['sqlExecutionTime'] = $queryExecutionTime;
+            $this->currentQueryStats['sql'] = substr($sql, 0, 500);
+            $this->currentQueryStats['rowCount'] = count($results);
         } catch (\Exception $e) {
+            $queryEndTime = microtime(true);
+            $queryExecutionTime = $queryEndTime - $queryStartTime;
+            $this->currentQueryStats['sqlExecutionTime'] = $queryExecutionTime;
+            $this->currentQueryStats['sql'] = substr($sql, 0, 500);
             log_message('error', 'SQL Query Error: ' . $e->getMessage());
             log_message('error', 'Failed SQL Query: ' . $sql);
+            log_message('error', 'Query execution time: ' . number_format($queryExecutionTime * 1000, 2) . 'ms');
+            $this->finalizeQueryStats();
             throw $e;
         }
         
-        // Map to entities (simplified - may need adjustment)
+        // Map to entities with performance tracking
+        $mappingStartTime = microtime(true);
         $entities = $this->mapToEntities($results);
+        $mappingEndTime = microtime(true);
+        $this->currentQueryStats['mappingTime'] = $mappingEndTime - $mappingStartTime;
         
         // Apply change tracking
+        $trackingStartTime = microtime(true);
         if ($this->isTracking && !$this->isNoTracking) {
             foreach ($entities as $entity) {
                 if ($entity instanceof Entity) {
@@ -1645,7 +1927,10 @@ class AdvancedQueryBuilder
                 }
             }
         }
+        $trackingEndTime = microtime(true);
+        $this->currentQueryStats['trackingTime'] = $trackingEndTime - $trackingStartTime;
         
+        $this->finalizeQueryStats();
         return $entities;
     }
 
@@ -1699,17 +1984,30 @@ class AdvancedQueryBuilder
             }
         }
         
-        // Execute raw SQL
+        // Execute raw SQL with performance tracking
+        $queryStartTime = microtime(true);
         try {
             // Log SQL query before execution for debugging
-            log_message('debug', 'Executing SQL Query: ' . substr($sql, 0, 1000));
+            $this->debugLog('Executing SQL Query: ' . substr($sql, 0, 1000));
             if (strlen($sql) > 1000) {
-                log_message('debug', 'SQL Query (continued): ' . substr($sql, 1000, 1000));
+                $this->debugLog('SQL Query (continued): ' . substr($sql, 1000, 1000));
             }
             
             $query = $this->connection->query($sql);
             $results = $query->getResultArray();
+            $queryEndTime = microtime(true);
+            $queryExecutionTime = $queryEndTime - $queryStartTime;
+            
+            // Track SQL execution time
+            $this->currentQueryStats['sqlExecutionTime'] = $queryExecutionTime;
+            $this->currentQueryStats['sql'] = substr($sql, 0, 500);
+            $this->currentQueryStats['rowCount'] = count($results);
+            $this->currentQueryStats['queryType'] = 'EF_CORE_STYLE';
         } catch (\Exception $e) {
+            $queryEndTime = microtime(true);
+            $queryExecutionTime = $queryEndTime - $queryStartTime;
+            $this->currentQueryStats['sqlExecutionTime'] = $queryExecutionTime;
+            $this->currentQueryStats['sql'] = substr($sql, 0, 500);
             log_message('error', 'SQL Query Error: ' . $e->getMessage());
             log_message('error', 'SQL Query Error: ' . $e->getTraceAsString());
             log_message('error', 'Failed SQL Query: ' . $sql);
@@ -1730,12 +2028,16 @@ class AdvancedQueryBuilder
             $this->debugLog('First result row sample: ' . json_encode(array_slice($firstRow, 0, 10)));
         }
         
-        // Parse flat result set into hierarchical entities
+        // Parse flat result set into hierarchical entities with performance tracking
+        $parsingStartTime = microtime(true);
         $entities = $this->parseEfCoreStyleResults($results);
+        $parsingEndTime = microtime(true);
+        $this->currentQueryStats['parsingTime'] = $parsingEndTime - $parsingStartTime;
         
         $this->debugLog('Parsed entities count: ' . count($entities));
         
         // Apply change tracking and lazy loading proxies
+        $trackingStartTime = microtime(true);
         if ($this->isTracking && !$this->isNoTracking) {
             foreach ($entities as $entity) {
                 if ($entity instanceof Entity) {
@@ -1749,7 +2051,10 @@ class AdvancedQueryBuilder
                 }
             }
         }
+        $trackingEndTime = microtime(true);
+        $this->currentQueryStats['trackingTime'] = $trackingEndTime - $trackingStartTime;
         
+        $this->finalizeQueryStats();
         return $entities;
     }
 
@@ -1758,6 +2063,7 @@ class AdvancedQueryBuilder
      */
     private function executeRawSql(): array
     {
+        $queryStartTime = microtime(true);
         try {
             $sql = $this->rawSql;
             $parameters = $this->rawSqlParameters;
@@ -1978,15 +2284,35 @@ class AdvancedQueryBuilder
                     $results = $query->getResultArray();
                 }
             }
+            $queryEndTime = microtime(true);
+            $queryExecutionTime = $queryEndTime - $queryStartTime;
+            
+            // Track SQL execution time
+            $this->currentQueryStats['sqlExecutionTime'] = $queryExecutionTime;
+            $this->currentQueryStats['sql'] = substr($sql ?? $this->rawSql, 0, 500);
+            $this->currentQueryStats['rowCount'] = count($results);
+            $this->currentQueryStats['queryType'] = 'RAW_SQL';
         } catch (\Exception $e) {
+            $queryEndTime = microtime(true);
+            $queryExecutionTime = $queryEndTime - $queryStartTime;
+            $this->currentQueryStats['sqlExecutionTime'] = $queryExecutionTime;
+            $this->currentQueryStats['sql'] = substr($sql ?? $this->rawSql, 0, 500);
             log_message('error', 'SQL Query Error: ' . $e->getMessage());
             log_message('error', 'Failed SQL Query: ' . ($sql ?? $this->rawSql));
             log_message('error', 'SQL Parameters: ' . json_encode($parameters ?? $this->rawSqlParameters));
+            log_message('error', 'Query execution time: ' . number_format($queryExecutionTime * 1000, 2) . 'ms');
+            $this->finalizeQueryStats();
             throw $e;
         }
+        
+        // Map to entities with performance tracking
+        $mappingStartTime = microtime(true);
         $entities = $this->mapToEntities($results);
+        $mappingEndTime = microtime(true);
+        $this->currentQueryStats['mappingTime'] = $mappingEndTime - $mappingStartTime;
         
         // Enable lazy loading for navigation properties
+        $lazyLoadingStartTime = microtime(true);
         if ($this->context->isLazyLoadingEnabled()) {
             foreach ($entities as $entity) {
                 if ($entity instanceof Entity) {
@@ -1994,7 +2320,10 @@ class AdvancedQueryBuilder
                 }
             }
         }
+        $lazyLoadingEndTime = microtime(true);
+        $this->currentQueryStats['lazyLoadingTime'] = $lazyLoadingEndTime - $lazyLoadingStartTime;
         
+        $this->finalizeQueryStats();
         return $entities;
     }
     
@@ -2556,7 +2885,15 @@ class AdvancedQueryBuilder
                         if ($recursiveCondition !== null) {
                             $sqlCondition = $recursiveCondition;
                             log_message('debug', "applySimpleWhereWithParser - used recursive method for path: {$navPath}");
-                            continue; // Skip to next where clause
+                            // Apply the condition and return early since we've handled it
+                            if (!empty($sqlCondition) && $builder !== null) {
+                                if ($isOr) {
+                                    $builder->orWhere($sqlCondition, null, false);
+                                } else {
+                                    $builder->where($sqlCondition, null, false);
+                                }
+                            }
+                            return; // Skip rest of processing for this where clause
                         }
                         
                         // Fallback to old hardcoded logic for backward compatibility
