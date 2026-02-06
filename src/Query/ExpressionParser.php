@@ -652,18 +652,17 @@ class ExpressionParser
         }
         
         // Match: $x->Property === value, $x->Property == value, etc.
-        // IMPORTANT: Make sure we don't match property access like $x->Property
-        // The pattern should only match if there's a comparison operator that's NOT part of ->
+        // IMPORTANT: !== and != must be checked BEFORE == and ===, otherwise "!=="
+        // is matched by "==" (the two equals in "!==") and the operator becomes = incorrectly.
         $patterns = [
-            '/^(.+?)\s*===\s*(.+)$/' => '=',
-            '/^(.+?)\s*==\s*(.+)$/' => '=',
             '/^(.+?)\s*!==\s*(.+)$/' => '!=',
             '/^(.+?)\s*!=\s*(.+)$/' => '!=',
+            '/^(.+?)\s*===\s*(.+)$/' => '=',
+            '/^(.+?)\s*==\s*(.+)$/' => '=',
             '/^(.+?)\s*<=\s*(.+)$/' => '<=',
             '/^(.+?)\s*>=\s*(.+)$/' => '>=',
             '/^(.+?)\s*<\s*(.+)$/' => '<',
             // For > operator, check that it's not part of -> (property access)
-            // Use a pattern that ensures > is not immediately after ->
             '/^(.+?)(?<!->)\s*>\s*(.+)$/' => '>',
         ];
         
@@ -1357,6 +1356,15 @@ class ExpressionParser
             $parts = explode(' ', $expression);
             $expression = end($parts);
             log_message('debug', "parsePropertyAccess - after extracting last word: {$expression}");
+            // If that produced empty (e.g. expression was single space "$x-> "), extract from original
+            if ($expression === '' || preg_match('/^[\s\-\.]+$/', $expression)) {
+                if (preg_match('/->\s*([A-Za-z_][A-Za-z0-9_]*)/', $originalExpression, $propMatches)) {
+                    $expression = $propMatches[1];
+                    log_message('debug', "parsePropertyAccess - extracted property after space split: {$expression}");
+                } else {
+                    return "{$this->tableAlias}.Id";
+                }
+            }
         }
         
         // Check if expression contains navigation property path (e.g., "EmployeeDepartments.Department.DepartmentID")
@@ -1371,6 +1379,17 @@ class ExpressionParser
         // Remove any remaining invalid characters (dots, dashes, etc. that shouldn't be in property name)
         // But keep curly braces for dynamic properties
         $expression = preg_replace('/[^A-Za-z0-9_]/', '', $expression);
+        
+        // If expression became empty (e.g. "$x-> " with space after ->), extract from original
+        if ($expression === '') {
+            log_message('debug', "parsePropertyAccess - expression empty after cleanup, extracting from: {$originalExpression}");
+            if (preg_match('/->\s*([A-Za-z_][A-Za-z0-9_]*)/', $originalExpression, $propMatches)) {
+                $expression = $propMatches[1];
+                log_message('debug', "parsePropertyAccess - extracted property: {$expression}");
+            } else {
+                return "{$this->tableAlias}.Id";
+            }
+        }
         
         // Filter out invalid property names (method names that might have been captured)
         $invalidPropertyNames = ['getQueryable', 'toList', 'toArray', 'count', 'first', 'single', 'skip', 'take', 'include', 'thenInclude', 'orderBy', 'orderByDescending', 'where', 'and', 'or', 'not'];

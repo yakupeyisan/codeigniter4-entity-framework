@@ -410,6 +410,15 @@ class AdvancedQueryBuilder
         $this->isSensitive = true;
         return $this;
     }
+    /**
+     * EnableSensitive - Enable sensitive value masking
+     * Returns masked sensitive values (applies SensitiveValue attribute)
+     */
+    public function enableSensitive(): self
+    {
+        $this->isSensitive = false;
+        return $this;
+    }
 
     /**
      * Set raw SQL
@@ -8611,6 +8620,38 @@ class AdvancedQueryBuilder
                                 return $sqlCondition;
                             }
                         }
+                        // Handle reference.reference.column (e.g., "Employee.Company.PdksCompanyID") - 3 parts
+                        elseif (count($pathParts) === 3) {
+                            $navPathToRef = $pathParts[0] . '.' . $pathParts[1]; // e.g., "Employee.Company"
+                            $columnName = $pathParts[2]; // e.g., "PdksCompanyID"
+                            $joinAlias = $referenceNavAliases[$navPathToRef] ?? null;
+                            if ($joinAlias !== null) {
+                                $firstNavInfo = $this->getNavigationInfo($pathParts[0]);
+                                $refEntityType = $firstNavInfo['entityType'] ?? null;
+                                $navInfo = $refEntityType ? $this->getNavigationInfoForEntity($pathParts[1], $refEntityType) : null;
+                                if ($navInfo && !$navInfo['isCollection']) {
+                                    $refEntityReflection = new \ReflectionClass($navInfo['entityType']);
+                                    $refColumnName = $this->getColumnNameFromProperty($refEntityReflection, $columnName);
+                                    $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
+                                    $quotedJoinAlias = $provider->escapeIdentifier($joinAlias);
+                                    $quotedRefColumn = $provider->escapeIdentifier($refColumnName);
+                                    if ($values !== '?') {
+                                        $valuesArray = explode(',', $values);
+                                        $filteredValues = $this->filterInvalidValuesForInClause($valuesArray, $refEntityReflection, $columnName);
+                                        if (empty($filteredValues)) {
+                                            log_message('debug', "convertSimpleWhereToSql - all values filtered out (3-part ref.ref.col), returning false condition");
+                                            return "1=0";
+                                        }
+                                        $values = implode(',', $filteredValues);
+                                        $sqlCondition = "{$quotedJoinAlias}.{$quotedRefColumn} IN ({$values})";
+                                    } else {
+                                        $sqlCondition = "{$quotedJoinAlias}.{$quotedRefColumn} IN (?)";
+                                    }
+                                    log_message('debug', "convertSimpleWhereToSql - generated 3-part reference navigation IN clause: {$sqlCondition}");
+                                    return $sqlCondition;
+                                }
+                            }
+                        }
                         // Handle collection navigation property (e.g., "EmployeeDepartments.Department.DepartmentID")
                         // OR nested path through reference navigation (e.g., "Employee.EmployeeDepartments.Department.DepartmentID")
                         elseif (count($pathParts) >= 3) {
@@ -8693,6 +8734,84 @@ class AdvancedQueryBuilder
                                             
                                             log_message('debug', "convertSimpleWhereToSql - generated nested EXISTS subquery: {$sqlCondition}");
                                             return $sqlCondition;
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            // Handle 5-part path: collection.reference.collection.reference.column
+                            // e.g. EmployeeAccessGroups.AccessGroup.AccessGroupReaders.Terminal.ReaderName
+                            if (count($pathParts) === 5) {
+                                $collectionProperty1 = $pathParts[0];   // EmployeeAccessGroups
+                                $referenceProperty1 = $pathParts[1];   // AccessGroup
+                                $collectionProperty2 = $pathParts[2];   // AccessGroupReaders
+                                $referenceProperty2 = $pathParts[3];   // Terminal
+                                $columnName = $pathParts[4];            // ReaderName
+                                
+                                $navInfo1 = $this->getNavigationInfo($collectionProperty1);
+                                if ($navInfo1 && $navInfo1['isCollection']) {
+                                    $refNavInfo1 = $this->getNavigationInfoForEntity($referenceProperty1, $navInfo1['entityType']);
+                                    if ($refNavInfo1 && !$refNavInfo1['isCollection']) {
+                                        $navInfo2 = $this->getNavigationInfoForEntity($collectionProperty2, $refNavInfo1['entityType']);
+                                        if ($navInfo2 && $navInfo2['isCollection']) {
+                                            $refNavInfo2 = $this->getNavigationInfoForEntity($referenceProperty2, $navInfo2['entityType']);
+                                            if ($refNavInfo2 && !$refNavInfo2['isCollection']) {
+                                                $mainEntityReflection = new \ReflectionClass($this->entityType);
+                                                $mainPkColumn = $this->getPrimaryKeyColumnName($mainEntityReflection);
+                                                $coll1EntityRefl = new \ReflectionClass($navInfo1['entityType']);
+                                                $coll1FkColumn = $this->getColumnNameFromProperty($coll1EntityRefl, $navInfo1['foreignKey']);
+                                                $ref1FkColumn = $this->getColumnNameFromProperty($coll1EntityRefl, $refNavInfo1['foreignKey']);
+                                                $coll2EntityRefl = new \ReflectionClass($navInfo2['entityType']);
+                                                $coll2FkColumn = $this->getColumnNameFromProperty($coll2EntityRefl, $navInfo2['foreignKey']);
+                                                $ref2FkColumn = $this->getColumnNameFromProperty($coll2EntityRefl, $refNavInfo2['foreignKey']);
+                                                $ref2EntityRefl = new \ReflectionClass($refNavInfo2['entityType']);
+                                                $ref2PkColumn = $this->getPrimaryKeyColumnName($ref2EntityRefl);
+                                                $filterColumnName = $this->getColumnNameFromProperty($ref2EntityRefl, $columnName);
+                                                
+                                                $tbl1 = $this->context->getTableName($navInfo1['entityType']);
+                                                $tblRef1 = $this->context->getTableName($refNavInfo1['entityType']);
+                                                $tbl2 = $this->context->getTableName($navInfo2['entityType']);
+                                                $tblRef2 = $this->context->getTableName($refNavInfo2['entityType']);
+                                                
+                                                $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
+                                                $quotedMainTable = $provider->escapeIdentifier($alias);
+                                                $quotedMainPk = $provider->escapeIdentifier($mainPkColumn);
+                                                $qT1 = $provider->escapeIdentifier($tbl1);
+                                                $qR1 = $provider->escapeIdentifier($tblRef1);
+                                                $qT2 = $provider->escapeIdentifier($tbl2);
+                                                $qR2 = $provider->escapeIdentifier($tblRef2);
+                                                $qColl1Fk = $provider->escapeIdentifier($coll1FkColumn);
+                                                $qRef1Fk = $provider->escapeIdentifier($ref1FkColumn);
+                                                $qRef1Pk = $provider->escapeIdentifier($this->getPrimaryKeyColumnName(new \ReflectionClass($refNavInfo1['entityType'])));
+                                                $qColl2Fk = $provider->escapeIdentifier($coll2FkColumn);
+                                                $qRef2Fk = $provider->escapeIdentifier($ref2FkColumn);
+                                                $qRef2Pk = $provider->escapeIdentifier($ref2PkColumn);
+                                                $qFilterCol = $provider->escapeIdentifier($filterColumnName);
+                                                
+                                                $alias1 = 'ed';
+                                                $aliasR1 = 'd';
+                                                $alias2 = 'ar';
+                                                $aliasR2 = 't';
+                                                $qA1 = $provider->escapeIdentifier($alias1);
+                                                $qAR1 = $provider->escapeIdentifier($aliasR1);
+                                                $qA2 = $provider->escapeIdentifier($alias2);
+                                                $qAR2 = $provider->escapeIdentifier($aliasR2);
+                                                
+                                                if ($values !== '?') {
+                                                    $valuesArray = explode(',', $values);
+                                                    $filteredValues = $this->filterInvalidValuesForInClause($valuesArray, $ref2EntityRefl, $columnName);
+                                                    if (empty($filteredValues)) {
+                                                        log_message('debug', "convertSimpleWhereToSql - all values filtered out, returning false condition");
+                                                        return "1=0";
+                                                    }
+                                                    $values = implode(',', $filteredValues);
+                                                    $sqlCondition = "EXISTS (SELECT 1 FROM {$qT1} AS {$qA1} INNER JOIN {$qR1} AS {$qAR1} ON {$qA1}.{$qRef1Fk} = {$qAR1}.{$qRef1Pk} INNER JOIN {$qT2} AS {$qA2} ON {$qAR1}.{$qRef1Pk} = {$qA2}.{$qColl2Fk} INNER JOIN {$qR2} AS {$qAR2} ON {$qA2}.{$qRef2Fk} = {$qAR2}.{$qRef2Pk} WHERE {$qA1}.{$qColl1Fk} = {$quotedMainTable}.{$quotedMainPk} AND {$qAR2}.{$qFilterCol} IN ({$values}))";
+                                                } else {
+                                                    $sqlCondition = "EXISTS (SELECT 1 FROM {$qT1} AS {$qA1} INNER JOIN {$qR1} AS {$qAR1} ON {$qA1}.{$qRef1Fk} = {$qAR1}.{$qRef1Pk} INNER JOIN {$qT2} AS {$qA2} ON {$qAR1}.{$qRef1Pk} = {$qA2}.{$qColl2Fk} INNER JOIN {$qR2} AS {$qAR2} ON {$qA2}.{$qRef2Fk} = {$qAR2}.{$qRef2Pk} WHERE {$qA1}.{$qColl1Fk} = {$quotedMainTable}.{$quotedMainPk} AND {$qAR2}.{$qFilterCol} IN (?))";
+                                                }
+                                                log_message('debug', "convertSimpleWhereToSql - generated 5-part EXISTS subquery: {$sqlCondition}");
+                                                return $sqlCondition;
+                                            }
                                         }
                                     }
                                 }
