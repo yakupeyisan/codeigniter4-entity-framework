@@ -2773,45 +2773,57 @@ class AdvancedQueryBuilder
         
         log_message('debug', "addJoinForNavigationPath - relatedEntityType: {$relatedEntityType}, isCollection: " . ($isCollection ? 'true' : 'false'));
         
-        // Get foreign key
-        $foreignKey = $this->getForeignKeyForNavigation($entityReflection, $navigationProperty, $isCollection, $this->entityType);
         $relatedTableName = $this->context->getTableName($relatedEntityType);
         $mainTableName = $this->context->getTableName($this->entityType);
         
-        // Get column names
-        $fkColumnName = $this->getColumnNameFromProperty($entityReflection, $foreignKey);
-        $relatedReflection = new ReflectionClass($relatedEntityType);
-        // Use getPrimaryKeyColumnName to get the correct primary key column name
-        $relatedIdColumn = $this->getPrimaryKeyColumnName($relatedReflection);
+        // Check for custom join condition from includes (e.g., AccessEvent->Terminal via DeviceSerial=SerialNumber)
+        $customJoinCondition = null;
+        foreach ($this->includes as $include) {
+            $includePath = $include['path'] ?? $include['navigation'] ?? null;
+            if ($includePath === $navigationProperty && isset($include['joinCondition'])) {
+                $customJoinCondition = $include['joinCondition'];
+                break;
+            }
+        }
         
-        // Get main entity primary key column name
-        $mainIdColumn = $this->getPrimaryKeyColumnName($entityReflection);
-        
-        // For SQL Server, table names might need to be quoted
-        // CodeIgniter should handle this automatically, but let's ensure proper quoting
         $quotedRelatedTable = $this->connection->escapeIdentifiers($relatedTableName);
         $quotedMainTable = $this->connection->escapeIdentifiers($mainTableName);
-        $quotedFkColumn = $this->connection->escapeIdentifiers($fkColumnName);
-        $quotedRelatedIdColumn = $this->connection->escapeIdentifiers($relatedIdColumn);
-        $quotedMainIdColumn = $this->connection->escapeIdentifiers($mainIdColumn);
         
-        if ($isCollection) {
-            // One-to-many: Join on related table's foreign key
-            $joinCondition = "{$quotedRelatedTable}.{$quotedFkColumn} = {$quotedMainTable}.{$quotedMainIdColumn}";
+        if ($customJoinCondition !== null) {
+            // Use raw table names so CodeIgniter's protectIdentifiers handles schema/prefix correctly
+            $joinCondition = str_replace('{alias}', $mainTableName, $customJoinCondition);
+            $joinCondition = str_replace('{relatedAlias}', $relatedTableName, $joinCondition);
             $builder->join($relatedTableName, $joinCondition, 'LEFT');
-            log_message('debug', "Added JOIN (collection): {$relatedTableName} ON {$joinCondition}");
+            log_message('debug', "Added JOIN (custom): {$relatedTableName} ON {$joinCondition}");
         } else {
-            // Check if FK is in main entity or related entity
-            if ($entityReflection->hasProperty($foreignKey)) {
-                // Many-to-one: FK in main entity
-                $joinCondition = "{$quotedMainTable}.{$quotedFkColumn} = {$quotedRelatedTable}.{$quotedRelatedIdColumn}";
-                $builder->join($relatedTableName, $joinCondition, 'LEFT');
-                log_message('debug', "Added JOIN (many-to-one): {$relatedTableName} ON {$joinCondition}");
-            } else {
-                // One-to-one: FK in related entity
+            // Convention-based join
+            $foreignKey = $this->getForeignKeyForNavigation($entityReflection, $navigationProperty, $isCollection, $this->entityType);
+            $fkColumnName = $this->getColumnNameFromProperty($entityReflection, $foreignKey);
+            $relatedReflection = new ReflectionClass($relatedEntityType);
+            $relatedIdColumn = $this->getPrimaryKeyColumnName($relatedReflection);
+            $mainIdColumn = $this->getPrimaryKeyColumnName($entityReflection);
+            $quotedFkColumn = $this->connection->escapeIdentifiers($fkColumnName);
+            $quotedRelatedIdColumn = $this->connection->escapeIdentifiers($relatedIdColumn);
+            $quotedMainIdColumn = $this->connection->escapeIdentifiers($mainIdColumn);
+            
+            if ($isCollection) {
+                // One-to-many: Join on related table's foreign key
                 $joinCondition = "{$quotedRelatedTable}.{$quotedFkColumn} = {$quotedMainTable}.{$quotedMainIdColumn}";
                 $builder->join($relatedTableName, $joinCondition, 'LEFT');
-                log_message('debug', "Added JOIN (one-to-one): {$relatedTableName} ON {$joinCondition}");
+                log_message('debug', "Added JOIN (collection): {$relatedTableName} ON {$joinCondition}");
+            } else {
+                // Check if FK is in main entity or related entity
+                if ($entityReflection->hasProperty($foreignKey)) {
+                    // Many-to-one: FK in main entity
+                    $joinCondition = "{$quotedMainTable}.{$quotedFkColumn} = {$quotedRelatedTable}.{$quotedRelatedIdColumn}";
+                    $builder->join($relatedTableName, $joinCondition, 'LEFT');
+                    log_message('debug', "Added JOIN (many-to-one): {$relatedTableName} ON {$joinCondition}");
+                } else {
+                    // One-to-one: FK in related entity
+                    $joinCondition = "{$quotedRelatedTable}.{$quotedFkColumn} = {$quotedMainTable}.{$quotedMainIdColumn}";
+                    $builder->join($relatedTableName, $joinCondition, 'LEFT');
+                    log_message('debug', "Added JOIN (one-to-one): {$relatedTableName} ON {$joinCondition}");
+                }
             }
         }
         
