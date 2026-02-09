@@ -508,7 +508,7 @@ class AdvancedQueryBuilder
         $tableName = $this->context->getTableName($this->entityType);
         $builder = $this->connection->table($tableName);
         
-        // First pass: Detect all navigation property paths
+        // First pass: Detect all navigation property paths (from callable predicates and from raw SQL)
         $allNavigationPaths = [];
         foreach ($this->wheres as $whereItem) {
             $groupStart = is_array($whereItem) && isset($whereItem['groupStart']) ? $whereItem['groupStart'] : false;
@@ -520,8 +520,19 @@ class AdvancedQueryBuilder
             }
             
             $where = is_array($whereItem) ? $whereItem['predicate'] : $whereItem;
+            $rawSql = is_array($whereItem) && isset($whereItem['rawSql']) ? $whereItem['rawSql'] : null;
+
+            if ($rawSql !== null && trim($rawSql) !== '') {
+                // Raw SQL: detect table names (e.g. Employee.EmployeeID) and resolve to navigation paths
+                $paths = $this->detectNavigationPathsFromRawSql($rawSql);
+                foreach ($paths as $path) {
+                    if (!in_array($path, $allNavigationPaths)) {
+                        $allNavigationPaths[] = $path;
+                    }
+                }
+            }
             
-            // Skip if predicate is null
+            // Skip if predicate is null (already handled raw SQL above)
             if ($where === null) {
                 continue;
             }
@@ -2235,6 +2246,30 @@ class AdvancedQueryBuilder
                                 log_message('debug', "applySimpleWhereWithParser - generated reference navigation IN clause: {$sqlCondition}");
                             }
                         }
+                        // Handle 3-part reference.reference.column (e.g., "Employee.Company.PdksCompanyID")
+                        elseif (count($pathParts) === 3) {
+                            $firstNavInfo = $this->getNavigationInfo($pathParts[0]);
+                            $secondNavInfo = $firstNavInfo ? $this->getNavigationInfoForEntity($pathParts[1], $firstNavInfo['entityType']) : null;
+                            if ($firstNavInfo && !$firstNavInfo['isCollection'] && $secondNavInfo && !$secondNavInfo['isCollection']) {
+                                // reference.reference.column path - add joins and build IN clause
+                                if ($builder !== null) {
+                                    $this->addJoinForNavigationPath($builder, $pathParts[0]);
+                                    $this->addJoinForNestedNavigationPath($builder, $pathParts[0], $pathParts[1]);
+                                }
+                                $refTableName = $this->context->getTableName($secondNavInfo['entityType']);
+                                $refEntityReflection = new \ReflectionClass($secondNavInfo['entityType']);
+                                $refColumnName = $this->getColumnNameFromProperty($refEntityReflection, $pathParts[2]);
+                                $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
+                                $quotedTable = $provider->escapeIdentifier($refTableName);
+                                $quotedColumn = $provider->escapeIdentifier($refColumnName);
+                                if ($values !== '?') {
+                                    $sqlCondition = "{$quotedTable}.{$quotedColumn} IN ({$values})";
+                                } else {
+                                    $sqlCondition = "{$quotedTable}.{$quotedColumn} IN (?)";
+                                }
+                                log_message('debug', "applySimpleWhereWithParser - generated 3-part reference navigation IN clause: {$sqlCondition}");
+                            }
+                        }
                         // Handle collection navigation property (e.g., "EmployeeDepartments.Department.DepartmentID")
                         // OR nested path through reference navigation (e.g., "Employee.EmployeeDepartments.Department.DepartmentID")
                         elseif (count($pathParts) >= 3) {
@@ -2739,7 +2774,70 @@ class AdvancedQueryBuilder
         
         return $paths;
     }
-    
+
+    /**
+     * Detect navigation property paths referenced in raw SQL (e.g. "Employee.EmployeeID", "[Employee].[EmployeeID]").
+     * Used by count() to add required JOINs when WHERE contains raw SQL that references related tables.
+     *
+     * @param string $rawSql Raw SQL string (WHERE clause or full condition)
+     * @return array Navigation property names that should be joined (e.g. ['Employee'])
+     */
+    private function detectNavigationPathsFromRawSql(string $rawSql): array
+    {
+        $paths = [];
+        $mainTableName = $this->context->getTableName($this->entityType);
+
+        // Match TableName.ColumnName and [TableName].[ColumnName] (SQL Server style)
+        if (preg_match_all('/\b([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)/', $rawSql, $plainMatches)) {
+            foreach ($plainMatches[1] as $tableOrAlias) {
+                $paths[] = $tableOrAlias;
+            }
+        }
+        if (preg_match_all('/\[([^\]]+)\]\.\[([^\]]+)\]/', $rawSql, $bracketMatches)) {
+            foreach ($bracketMatches[1] as $tableOrAlias) {
+                $paths[] = $tableOrAlias;
+            }
+        }
+
+        $tableNames = array_unique($paths);
+        $navigationPaths = [];
+
+        foreach ($tableNames as $tableOrAlias) {
+            if ($tableOrAlias === $mainTableName) {
+                continue;
+            }
+            $navProperty = $this->getNavigationPropertyForTable($tableOrAlias);
+            if ($navProperty !== null && !in_array($navProperty, $navigationPaths)) {
+                $navigationPaths[] = $navProperty;
+            }
+        }
+
+        return $navigationPaths;
+    }
+
+    /**
+     * Resolve a table name (or alias) to the entity's navigation property name that maps to that table.
+     *
+     * @param string $tableName Table name as it appears in SQL
+     * @return string|null Navigation property name, or null if not found
+     */
+    private function getNavigationPropertyForTable(string $tableName): ?string
+    {
+        $entityReflection = new ReflectionClass($this->entityType);
+        foreach ($entityReflection->getProperties(\ReflectionProperty::IS_PUBLIC) as $property) {
+            $propName = $property->getName();
+            $navInfo = $this->getNavigationInfo($propName);
+            if ($navInfo === null || empty($navInfo['entityType'])) {
+                continue;
+            }
+            $relatedTable = $this->context->getTableName($navInfo['entityType']);
+            if (strcasecmp($relatedTable, $tableName) === 0) {
+                return $propName;
+            }
+        }
+        return null;
+    }
+
     /**
      * Add JOIN for navigation property path
      */
@@ -2833,6 +2931,45 @@ class AdvancedQueryBuilder
             'table' => $relatedTableName,
             'alias' => $relatedTableName, // Use table name as alias for CodeIgniter Query Builder
             'entityType' => $relatedEntityType
+        ];
+    }
+
+    /**
+     * Add JOIN for nested navigation path (e.g., Employee.Company)
+     * Parent navigation must already be joined via addJoinForNavigationPath
+     */
+    private function addJoinForNestedNavigationPath($builder, string $parentNavigation, string $childNavigation): void
+    {
+        $joinKey = $parentNavigation . '.' . $childNavigation;
+        if (isset($this->requiredJoins[$joinKey])) {
+            log_message('debug', "addJoinForNestedNavigationPath - join already added for '{$joinKey}'");
+            return;
+        }
+        $parentNavInfo = $this->getNavigationInfo($parentNavigation);
+        if ($parentNavInfo === null || $parentNavInfo['isCollection']) {
+            return;
+        }
+        $childNavInfo = $this->getNavigationInfoForEntity($childNavigation, $parentNavInfo['entityType']);
+        if ($childNavInfo === null || $childNavInfo['isCollection']) {
+            return;
+        }
+        $parentTableName = $this->context->getTableName($parentNavInfo['entityType']);
+        $childTableName = $this->context->getTableName($childNavInfo['entityType']);
+        $parentReflection = new ReflectionClass($parentNavInfo['entityType']);
+        $fkColumnName = $this->getColumnNameFromProperty($parentReflection, $childNavInfo['foreignKey']);
+        $childReflection = new ReflectionClass($childNavInfo['entityType']);
+        $childPkColumn = $this->getPrimaryKeyColumnName($childReflection);
+        $quotedParentTable = $this->connection->escapeIdentifiers($parentTableName);
+        $quotedChildTable = $this->connection->escapeIdentifiers($childTableName);
+        $quotedFkColumn = $this->connection->escapeIdentifiers($fkColumnName);
+        $quotedChildPk = $this->connection->escapeIdentifiers($childPkColumn);
+        $joinCondition = "{$quotedParentTable}.{$quotedFkColumn} = {$quotedChildTable}.{$quotedChildPk}";
+        $builder->join($childTableName, $joinCondition, 'LEFT');
+        log_message('debug', "addJoinForNestedNavigationPath - added JOIN: {$childTableName} ON {$joinCondition}");
+        $this->requiredJoins[$joinKey] = [
+            'table' => $childTableName,
+            'alias' => $childTableName,
+            'entityType' => $childNavInfo['entityType']
         ];
     }
     
