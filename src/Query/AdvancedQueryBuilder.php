@@ -1409,7 +1409,7 @@ class AdvancedQueryBuilder
             if (strlen($sql) > 1000) {
                 log_message('debug', 'SQL Query (continued): ' . substr($sql, 1000, 1000));
             }
-            
+            $this->connection->query("SET DATEFORMAT YMD;");
             $query = $this->connection->query($sql);
             $results = $query->getResultArray();
         } catch (\Exception $e) {
