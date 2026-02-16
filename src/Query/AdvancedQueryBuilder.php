@@ -1440,8 +1440,22 @@ class AdvancedQueryBuilder
         }
         
         // Parse flat result set into hierarchical entities
-        $entities = $this->parseEfCoreStyleResults($results);
+        log_message('error', 'AdvancedQueryBuilder::parseEfCoreStyleResults - started, row count: ' . count($results));
+        try {
+            $entities = $this->parseEfCoreStyleResults($results);
+        } catch (\Throwable $e) {
+            $msg = $e->getMessage();
+            if (stripos($msg, 'memory') !== false || stripos($msg, 'Maximum execution time') !== false) {
+                throw new \RuntimeException(
+                    'Büyük sonuç seti maplenirken bellek veya zaman aşımı. Diğer sunucuda php.ini\'de memory_limit ve max_execution_time değerlerini artırın veya sayfalama (take/skip) kullanın. Orijinal hata: ' . $msg,
+                    0,
+                    $e
+                );
+            }
+            throw $e;
+        }
         
+        log_message('error', 'AdvancedQueryBuilder::parseEfCoreStyleResults - completed, entity count: ' . count($entities));
         log_message('debug', 'Parsed entities count: ' . count($entities));
         
         // Apply change tracking and lazy loading proxies
@@ -1693,6 +1707,7 @@ class AdvancedQueryBuilder
             log_message('error', 'SQL Parameters: ' . json_encode($parameters ?? $this->rawSqlParameters));
             throw $e;
         }
+        log_message('error', 'AdvancedQueryBuilder: SQL result received, row count: ' . count($results));
         $entities = $this->mapToEntities($results);
         
         // Enable lazy loading for navigation properties
@@ -1735,37 +1750,56 @@ class AdvancedQueryBuilder
     }
 
     /**
-     * Map database results to entities
+     * Map database results to entities.
+     * For large result sets (e.g. 50k+ rows), ensure PHP memory_limit and max_execution_time
+     * are sufficient on the server, or use pagination (take/skip) to avoid memory/timeout errors.
      */
     private function mapToEntities(array $results, ?string $entityType = null): array
     {
-        $entities = [];
-        $entityType = $entityType ?? $this->entityType;
-        $reflection = new ReflectionClass($entityType);
-        
-        foreach ($results as $row) {
-            $entity = $reflection->newInstance();
-            
-            foreach ($row as $column => $value) {
-                // Convert column name to property name (camelCase)
-                $propertyName = $this->columnToProperty($column);
-                
-                if ($reflection->hasProperty($propertyName)) {
-                    $property = $reflection->getProperty($propertyName);
-                    $property->setAccessible(true);
-                    
-                    // Type conversion
-                    $type = $this->getPropertyType($property);
-                    $value = $this->convertValue($value, $type);
-                    
-                    $property->setValue($entity, $value);
+        $rowCount = count($results);
+        log_message('error', 'AdvancedQueryBuilder::mapToEntities - started, row count: ' . $rowCount);
+        try {
+            $entities = [];
+            $entityType = $entityType ?? $this->entityType;
+            $reflection = new ReflectionClass($entityType);
+            $rowIndex = 0;
+            foreach ($results as $row) {
+                if (++$rowIndex % 1000 === 0) {
+                    gc_collect_cycles();
                 }
+                $entity = $reflection->newInstance();
+                
+                foreach ($row as $column => $value) {
+                    // Convert column name to property name (camelCase)
+                    $propertyName = $this->columnToProperty($column);
+                    
+                    if ($reflection->hasProperty($propertyName)) {
+                        $property = $reflection->getProperty($propertyName);
+                        $property->setAccessible(true);
+                        
+                        // Type conversion
+                        $type = $this->getPropertyType($property);
+                        $value = $this->convertValue($value, $type);
+                        
+                        $property->setValue($entity, $value);
+                    }
+                }
+                
+                $entities[] = $entity;
             }
-            
-            $entities[] = $entity;
+            log_message('error', 'AdvancedQueryBuilder::mapToEntities - completed, entity count: ' . count($entities));
+            return $entities;
+        } catch (\Throwable $e) {
+            $msg = $e->getMessage();
+            if (stripos($msg, 'memory') !== false || stripos($msg, 'Maximum execution time') !== false) {
+                throw new \RuntimeException(
+                    'Büyük sonuç seti maplenirken bellek veya zaman aşımı. Sunucuda php.ini\'de memory_limit ve max_execution_time değerlerini artırın veya sayfalama (take/skip) kullanın. Orijinal hata: ' . $msg,
+                    0,
+                    $e
+                );
+            }
+            throw $e;
         }
-        
-        return $entities;
     }
 
     /**
@@ -9795,7 +9829,11 @@ class AdvancedQueryBuilder
             $validColumnsCache[$info['entityType']] = $validColumns;
         }
         
+        $rowIndex = 0;
         foreach ($results as $row) {
+            if (++$rowIndex % 1000 === 0) {
+                gc_collect_cycles();
+            }
             // Extract main entity data
             // Main entity columns are prefixed with 's_' to avoid conflicts
             $entityData = [];
