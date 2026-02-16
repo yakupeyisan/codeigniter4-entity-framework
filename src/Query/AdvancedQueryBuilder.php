@@ -1439,8 +1439,6 @@ class AdvancedQueryBuilder
             log_message('debug', 'First result row sample: ' . json_encode(array_slice($firstRow, 0, 10)));
         }
         
-        // Parse flat result set into hierarchical entities
-        log_message('error', 'AdvancedQueryBuilder::parseEfCoreStyleResults - started, row count: ' . count($results));
         try {
             $entities = $this->parseEfCoreStyleResults($results);
         } catch (\Throwable $e) {
@@ -1454,9 +1452,6 @@ class AdvancedQueryBuilder
             }
             throw $e;
         }
-        
-        log_message('error', 'AdvancedQueryBuilder::parseEfCoreStyleResults - completed, entity count: ' . count($entities));
-        log_message('debug', 'Parsed entities count: ' . count($entities));
         
         // Apply change tracking and lazy loading proxies
         if ($this->isTracking && !$this->isNoTracking) {
@@ -1707,7 +1702,6 @@ class AdvancedQueryBuilder
             log_message('error', 'SQL Parameters: ' . json_encode($parameters ?? $this->rawSqlParameters));
             throw $e;
         }
-        log_message('error', 'AdvancedQueryBuilder: SQL result received, row count: ' . count($results));
         $entities = $this->mapToEntities($results);
         
         // Enable lazy loading for navigation properties
@@ -1757,7 +1751,6 @@ class AdvancedQueryBuilder
     private function mapToEntities(array $results, ?string $entityType = null): array
     {
         $rowCount = count($results);
-        log_message('error', 'AdvancedQueryBuilder::mapToEntities - started, row count: ' . $rowCount);
         try {
             $entities = [];
             $entityType = $entityType ?? $this->entityType;
@@ -1787,7 +1780,6 @@ class AdvancedQueryBuilder
                 
                 $entities[] = $entity;
             }
-            log_message('error', 'AdvancedQueryBuilder::mapToEntities - completed, entity count: ' . count($entities));
             return $entities;
         } catch (\Throwable $e) {
             $msg = $e->getMessage();
