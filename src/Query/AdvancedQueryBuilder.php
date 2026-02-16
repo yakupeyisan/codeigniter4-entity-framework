@@ -8804,15 +8804,18 @@ class AdvancedQueryBuilder
                             }
                         }
                         // Handle reference.reference.column (e.g., "Employee.Company.PdksCompanyID") - 3 parts
+                        // Only when first part is a reference navigation. If first part is a collection (e.g. EmployeeDepartments),
+                        // the join alias would not exist in main query - use collection.reference.column EXISTS path instead.
                         elseif (count($pathParts) === 3) {
-                            $navPathToRef = $pathParts[0] . '.' . $pathParts[1]; // e.g., "Employee.Company"
-                            $columnName = $pathParts[2]; // e.g., "PdksCompanyID"
-                            $joinAlias = $referenceNavAliases[$navPathToRef] ?? null;
-                            if ($joinAlias !== null) {
-                                $firstNavInfo = $this->getNavigationInfo($pathParts[0]);
-                                $refEntityType = $firstNavInfo['entityType'] ?? null;
-                                $navInfo = $refEntityType ? $this->getNavigationInfoForEntity($pathParts[1], $refEntityType) : null;
-                                if ($navInfo && !$navInfo['isCollection']) {
+                            $firstNavInfo = $this->getNavigationInfo($pathParts[0]);
+                            if ($firstNavInfo && !$firstNavInfo['isCollection']) {
+                                $navPathToRef = $pathParts[0] . '.' . $pathParts[1]; // e.g., "Employee.Company"
+                                $columnName = $pathParts[2]; // e.g., "PdksCompanyID"
+                                $joinAlias = $referenceNavAliases[$navPathToRef] ?? null;
+                                if ($joinAlias !== null) {
+                                    $refEntityType = $firstNavInfo['entityType'] ?? null;
+                                    $navInfo = $refEntityType ? $this->getNavigationInfoForEntity($pathParts[1], $refEntityType) : null;
+                                    if ($navInfo && !$navInfo['isCollection']) {
                                     $refEntityReflection = new \ReflectionClass($navInfo['entityType']);
                                     $refColumnName = $this->getColumnNameFromProperty($refEntityReflection, $columnName);
                                     $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
@@ -8832,6 +8835,7 @@ class AdvancedQueryBuilder
                                     }
                                     log_message('debug', "convertSimpleWhereToSql - generated 3-part reference navigation IN clause: {$sqlCondition}");
                                     return $sqlCondition;
+                                }
                                 }
                             }
                         }
