@@ -2220,14 +2220,18 @@ class AdvancedQueryBuilder
                     }
                 }
                 // Check if SQL condition is a navigation property path (NAVIGATION_IN:...)
-                elseif (strpos($sqlCondition, 'NAVIGATION_IN:') === 0) {
+                elseif (strpos($sqlCondition, 'NAVIGATION_IN:') !== false) {
                     // Extract navigation property path and values
                     // Format: NAVIGATION_IN:CollectionProperty.ReferenceProperty.Column:value1,value2,...
+                    // Values may have trailing " IS NULL" when combined with AND in search (strip it)
                     $parts = explode(':', $sqlCondition, 3);
                     if (count($parts) >= 2) {
                         $navPath = $parts[1]; // e.g., "EmployeeDepartments.Department.DepartmentID"
-                        $values = isset($parts[2]) ? $parts[2] : '?'; // e.g., "1,2" or "?"
-                        
+                        $values = isset($parts[2]) ? trim($parts[2]) : '?'; // e.g., "1,2" or "?"
+                        $values = preg_replace('/\s+IS\s+NOT\s+NULL$/i', '', $values);
+                        $values = preg_replace('/\s+IS\s+NULL$/i', '', $values);
+                        $values = trim($values) !== '' ? $values : '?';
+
                         log_message('debug', "applySimpleWhereWithParser - navigation property path detected: {$navPath}, values: {$values}");
                         
                         // Parse navigation property path
@@ -2660,9 +2664,22 @@ class AdvancedQueryBuilder
                         log_message('debug', 'SQL condition after parameter replacement: ' . $sqlCondition);
                     }
                     
-                    // Apply the parsed SQL condition
-                    // For OR logic, use orWhere() for OR conditions, where() for AND conditions
-                    if ($isOr) {
+                    // Resolve NAVIGATION_IN: placeholder if still present (e.g. dynamic predicate
+                    // $e->$field so detectNavigationPaths didn't run; or 3-part block didn't set EXISTS)
+                    if ($builder !== null && (strpos($sqlCondition, 'NAVIGATION_IN:') !== false || strpos($sqlCondition, 'NAVIGATION:') !== false)) {
+                        $mainAlias = $this->context->getTableName($this->entityType);
+                        $resolved = $this->convertSimpleWhereToSql($predicate, $mainAlias, []);
+                        if ($resolved !== null && trim($resolved) !== '') {
+                            $sqlCondition = $resolved;
+                            log_message('debug', 'applySimpleWhereWithParser - resolved navigation placeholder to: ' . $sqlCondition);
+                        }
+                    }
+                    
+                    // Apply the parsed SQL condition (skip if unresolved placeholder remains)
+                    $hasPlaceholder = (strpos($sqlCondition, 'NAVIGATION:') !== false || strpos($sqlCondition, 'NAVIGATION_IN:') !== false);
+                    if ($hasPlaceholder) {
+                        log_message('error', 'applySimpleWhereWithParser - unresolved navigation placeholder, not applying: ' . $sqlCondition);
+                    } elseif ($isOr) {
                         // Use orWhere for OR conditions (after the first where clause)
                         $builder->orWhere($sqlCondition, null, false);
                         log_message('debug', 'OR WHERE clause applied: ' . $sqlCondition);
@@ -2790,11 +2807,9 @@ class AdvancedQueryBuilder
             
             log_message('debug', "detectNavigationPaths - parsing predicate code: " . substr($code, 0, 300));
             
-            // Extract patterns like $u->Company->Name or $u->CustomField->CustomField01
-            // Pattern: $var->NavProp->Property (NavProp is the navigation property)
-            // We want to match: $u->Company->Name (Company is nav prop) or $u->CustomField->CustomField01 (CustomField is nav prop)
-            // Updated pattern to also match lowercase first letter navigation properties
-            if (preg_match_all('/\$[a-zA-Z_][a-zA-Z0-9_]*->([A-Za-z][a-zA-Z0-9_]*)->[A-Za-z][a-zA-Z0-9_]*/', $code, $matches)) {
+            // Extract patterns like $u->Company->Name, $u->EmployeeDepartments->Department->DepartmentID
+            // Pattern: $var->NavProp->Property (2 levels) or $var->NavProp->X->Y (3+ levels); capture first nav prop
+            if (preg_match_all('/\$[a-zA-Z_][a-zA-Z0-9_]*->([A-Za-z][a-zA-Z0-9_]*)(?:->[A-Za-z][a-zA-Z0-9_]*)+/', $code, $matches)) {
                 foreach ($matches[1] as $navProp) {
                     if (!in_array($navProp, $paths)) {
                         $paths[] = $navProp;
@@ -3087,8 +3102,18 @@ class AdvancedQueryBuilder
             if ($sqlCondition) {
                 log_message('debug', "applyNavigationWhereToSql - parsed SQL condition: {$sqlCondition}");
                 
+                // Resolve NAVIGATION_IN: placeholder (e.g. EmployeeDepartments.Department.DepartmentID IN [1])
+                // so count() and other simple-builder paths get valid SQL (EXISTS subquery) instead of placeholder
+                if (strpos($sqlCondition, 'NAVIGATION_IN:') === 0) {
+                    $mainAlias = $this->context->getTableName($this->entityType);
+                    $resolved = $this->convertSimpleWhereToSql($predicate, $mainAlias, []);
+                    if ($resolved !== null && trim($resolved) !== '') {
+                        $sqlCondition = $resolved;
+                        log_message('debug', "applyNavigationWhereToSql - resolved NAVIGATION_IN to: {$sqlCondition}");
+                    }
+                }
                 // Check if SQL condition contains NAVIGATION: prefix and convert it
-                if (strpos($sqlCondition, 'NAVIGATION:') !== false) {
+                elseif (strpos($sqlCondition, 'NAVIGATION:') !== false) {
                     // Extract navigation property path and SQL expression
                     // Format: NAVIGATION:CollectionProperty.Property SQL_OPERATOR
                     // Handle both simple operators (= 86) and complex ones (IS NULL, IS NOT NULL)
@@ -3151,11 +3176,12 @@ class AdvancedQueryBuilder
                 }
                 
                 // Apply the WHERE condition
-                // The SQL condition should now be in valid SQL format
-                if ($sqlCondition && strpos($sqlCondition, 'NAVIGATION:') === false) {
+                // The SQL condition should now be in valid SQL format (no unresolved placeholders)
+                $hasPlaceholder = (strpos($sqlCondition, 'NAVIGATION:') !== false || strpos($sqlCondition, 'NAVIGATION_IN:') !== false);
+                if ($sqlCondition && !$hasPlaceholder) {
                     $builder->where($sqlCondition, null, false);
-                } else {
-                    log_message('error', "applyNavigationWhereToSql - failed to convert NAVIGATION: prefix to SQL: {$sqlCondition}");
+                } elseif ($hasPlaceholder) {
+                    log_message('error', "applyNavigationWhereToSql - failed to convert navigation placeholder to SQL: {$sqlCondition}");
                 }
             } else {
                 log_message('debug', "applyNavigationWhereToSql - failed to parse SQL condition");
@@ -8836,6 +8862,53 @@ class AdvancedQueryBuilder
                                     log_message('debug', "convertSimpleWhereToSql - generated 3-part reference navigation IN clause: {$sqlCondition}");
                                     return $sqlCondition;
                                 }
+                                }
+                            } else {
+                                // First part is a collection (e.g. EmployeeDepartments.Department.DepartmentID) - build EXISTS subquery
+                                $collectionProperty = $pathParts[0];
+                                $referenceProperty = $pathParts[1];
+                                $columnName = $pathParts[2];
+                                $navInfo = $this->getNavigationInfo($collectionProperty);
+                                if ($navInfo && $navInfo['isCollection']) {
+                                    $collectionEntityType = $navInfo['entityType'];
+                                    $refNavInfo = $this->getNavigationInfoForEntity($referenceProperty, $collectionEntityType);
+                                    if ($refNavInfo && !$refNavInfo['isCollection']) {
+                                        $collectionTableName = $this->context->getTableName($collectionEntityType);
+                                        $refTableName = $this->context->getTableName($refNavInfo['entityType']);
+                                        $mainEntityReflection = new \ReflectionClass($this->entityType);
+                                        $mainPkColumn = $this->getPrimaryKeyColumnName($mainEntityReflection);
+                                        $refFkProperty = $refNavInfo['foreignKey'];
+                                        $collectionEntityReflection = new \ReflectionClass($collectionEntityType);
+                                        $refFkColumn = $this->getColumnNameFromProperty($collectionEntityReflection, $refFkProperty);
+                                        $refEntityReflection = new \ReflectionClass($refNavInfo['entityType']);
+                                        $refPkColumn = $this->getPrimaryKeyColumnName($refEntityReflection);
+                                        $refColumnName = $this->getColumnNameFromProperty($refEntityReflection, $columnName);
+                                        $collectionFkProperty = $navInfo['foreignKey'];
+                                        $collectionFkColumn = $this->getColumnNameFromProperty($collectionEntityReflection, $collectionFkProperty);
+                                        $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
+                                        $quotedMainTable = $provider->escapeIdentifier($alias);
+                                        $quotedMainPk = $provider->escapeIdentifier($mainPkColumn);
+                                        $quotedCollectionTable = $provider->escapeIdentifier($collectionTableName);
+                                        $quotedCollectionFk = $provider->escapeIdentifier($collectionFkColumn);
+                                        $quotedRefTable = $provider->escapeIdentifier($refTableName);
+                                        $quotedRefFk = $provider->escapeIdentifier($refFkColumn);
+                                        $quotedRefPk = $provider->escapeIdentifier($refPkColumn);
+                                        $quotedRefColumn = $provider->escapeIdentifier($refColumnName);
+                                        if ($values !== '?') {
+                                            $valuesArray = explode(',', $values);
+                                            $filteredValues = $this->filterInvalidValuesForInClause($valuesArray, $refEntityReflection, $columnName);
+                                            if (empty($filteredValues)) {
+                                                log_message('debug', "convertSimpleWhereToSql - all values filtered out, returning false condition");
+                                                return "1=0";
+                                            }
+                                            $values = implode(',', $filteredValues);
+                                            $sqlCondition = "EXISTS (SELECT 1 FROM {$quotedCollectionTable} AS [ed] INNER JOIN {$quotedRefTable} AS [d] ON [ed].{$quotedRefFk} = [d].{$quotedRefPk} WHERE [ed].{$quotedCollectionFk} = {$quotedMainTable}.{$quotedMainPk} AND [d].{$quotedRefColumn} IN ({$values}))";
+                                        } else {
+                                            $sqlCondition = "EXISTS (SELECT 1 FROM {$quotedCollectionTable} AS [ed] INNER JOIN {$quotedRefTable} AS [d] ON [ed].{$quotedRefFk} = [d].{$quotedRefPk} WHERE [ed].{$quotedCollectionFk} = {$quotedMainTable}.{$quotedMainPk} AND [d].{$quotedRefColumn} IN (?))";
+                                        }
+                                        log_message('debug', "convertSimpleWhereToSql - generated EXISTS subquery: {$sqlCondition}");
+                                        return $sqlCondition;
+                                    }
                                 }
                             }
                         }
