@@ -652,18 +652,17 @@ class ExpressionParser
         }
         
         // Match: $x->Property === value, $x->Property == value, etc.
-        // IMPORTANT: Make sure we don't match property access like $x->Property
-        // The pattern should only match if there's a comparison operator that's NOT part of ->
+        // CRITICAL: Try !== and != BEFORE === and ==, otherwise "!==" is incorrectly split
+        // by the "==" pattern (left becomes "$e->IsVisitor !", right " true").
         $patterns = [
-            '/^(.+?)\s*===\s*(.+)$/' => '=',
-            '/^(.+?)\s*==\s*(.+)$/' => '=',
             '/^(.+?)\s*!==\s*(.+)$/' => '!=',
             '/^(.+?)\s*!=\s*(.+)$/' => '!=',
+            '/^(.+?)\s*===\s*(.+)$/' => '=',
+            '/^(.+?)\s*==\s*(.+)$/' => '=',
             '/^(.+?)\s*<=\s*(.+)$/' => '<=',
             '/^(.+?)\s*>=\s*(.+)$/' => '>=',
             '/^(.+?)\s*<\s*(.+)$/' => '<',
             // For > operator, check that it's not part of -> (property access)
-            // Use a pattern that ensures > is not immediately after ->
             '/^(.+?)(?<!->)\s*>\s*(.+)$/' => '>',
         ];
         
@@ -1351,11 +1350,13 @@ class ExpressionParser
         
         // Handle nested properties (e.g., Company->Name) - but -> is already removed
         // If we had navigation properties, they would be handled differently
-        // For now, just get the last property name
+        // For now, just get the last word that looks like a property name (identifier).
         if (strpos($expression, ' ') !== false) {
-            // If there are spaces, take the last word (property name)
-            $parts = explode(' ', $expression);
-            $expression = end($parts);
+            $parts = array_filter(explode(' ', $expression), static function ($p) {
+                $t = trim($p);
+                return $t !== '' && preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $t);
+            });
+            $expression = $parts !== [] ? end($parts) : trim($expression);
             log_message('debug', "parsePropertyAccess - after extracting last word: {$expression}");
         }
         
