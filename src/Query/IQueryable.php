@@ -146,6 +146,14 @@ interface IQueryable
     public function disableSensitive(): IQueryable;
 
     /**
+     * EnableSensitive - Enable sensitive value masking
+     * Returns unmasked sensitive values (bypasses SensitiveValue attribute)
+     * 
+     * @return IQueryable
+     */
+    public function enableSensitive(): IQueryable;
+
+    /**
      * Execute query and get first result
      */
     public function first(): ?object;

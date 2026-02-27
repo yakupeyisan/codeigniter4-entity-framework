@@ -627,6 +627,16 @@ class AdvancedQueryBuilder
     }
 
     /**
+     * EnableSensitive - Enable sensitive value masking
+     * Returns masked sensitive values (uses SensitiveValue attribute)
+     */
+    public function enableSensitive(): self
+    {
+        $this->isSensitive = false;
+        return $this;
+    }
+
+    /**
      * Set raw SQL
      */
     public function fromSqlRaw(string $sql, array $parameters = []): self
