@@ -712,6 +712,68 @@ class AdvancedQueryBuilder
     }
 
     /**
+     * Execute as summary query in database: GROUP BY groupFields and SUM(sumFields).
+     * No pagination; returns array of associative rows (e.g. [['ZoneName'=>'A','ApplicationName'=>'X','Qty'=>100], ...]).
+     * Only supported for simple queries (no includes, raw joins, or raw SQL).
+     *
+     * @param array $sumFields Property names to aggregate (e.g. ['Qty']) -> SUM(...) AS alias
+     * @param array $groupFields Property names to group by (e.g. ['ZoneName','ApplicationName']). Empty = single global row.
+     * @return array List of summary rows (associative arrays)
+     */
+    public function toSummary(array $sumFields = [], array $groupFields = []): array
+    {
+        if (empty($sumFields) && empty($groupFields)) {
+            return [];
+        }
+        if ($this->useRawSql || !empty($this->rawJoins) || !empty($this->includes) || $this->hasNavigationFilters()) {
+            throw new \InvalidArgumentException('toSummary is only supported for simple queries without includes, raw joins, or raw SQL.');
+        }
+        $this->validateGroupBalance();
+        $tableName = $this->context->getTableName($this->entityType);
+        $entityReflection = self::getCachedReflection($this->entityType);
+        $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
+        $selectParts = [];
+        foreach ($groupFields as $prop) {
+            $col = $this->getColumnNameFromProperty($entityReflection, $prop);
+            $selectParts[] = $provider->escapeIdentifier($col);
+        }
+        foreach ($sumFields as $prop) {
+            $col = $this->getColumnNameFromProperty($entityReflection, $prop);
+            $quoted = $provider->escapeIdentifier($col);
+            $alias = $provider->escapeIdentifier($prop);
+            $selectParts[] = "SUM({$quoted}) AS {$alias}";
+        }
+        $builder = $this->connection->table($tableName);
+        $builder->select(implode(', ', $selectParts), false);
+        foreach ($this->wheres as $index => $whereItem) {
+            $groupStart = is_array($whereItem) && isset($whereItem['groupStart']) ? $whereItem['groupStart'] : false;
+            $groupEnd = is_array($whereItem) && isset($whereItem['groupEnd']) ? $whereItem['groupEnd'] : false;
+            if ($groupStart) {
+                $builder->groupStart();
+                continue;
+            }
+            if ($groupEnd) {
+                $builder->groupEnd();
+                continue;
+            }
+            $where = is_array($whereItem) ? $whereItem['predicate'] : $whereItem;
+            $rawSql = is_array($whereItem) && isset($whereItem['rawSql']) ? $whereItem['rawSql'] : null;
+            $isOr = is_array($whereItem) && isset($whereItem['isOr']) ? $whereItem['isOr'] : false;
+            $whereToApply = $rawSql !== null ? $rawSql : $where;
+            $this->applyWhere($builder, $whereToApply, $isOr);
+        }
+        if (!empty($groupFields)) {
+            $groupByCols = [];
+            foreach ($groupFields as $prop) {
+                $groupByCols[] = $this->getColumnNameFromProperty($entityReflection, $prop);
+            }
+            $builder->groupBy($groupByCols);
+        }
+        $query = $builder->get();
+        return $query->getResultArray();
+    }
+
+    /**
      * Execute query in chunks to prevent memory overflow
      * Processes results in batches instead of loading all into memory
      * 
@@ -2076,6 +2138,7 @@ class AdvancedQueryBuilder
         $queryStartTime = microtime(true);
         try {
             $sql = $this->rawSql;
+            log_message('debug','Generated Sql Query: '.$sql);
             $parameters = $this->rawSqlParameters;
             
             // If we have WHERE clauses, wrap the raw SQL in a subquery and apply WHERE clauses
@@ -3310,6 +3373,12 @@ class AdvancedQueryBuilder
                         log_message('debug', 'SQL condition after parameter replacement: ' . $sqlCondition);
                     }
                     
+                    // Replace NotMapped+InjectQuery column references (e.g. Day, Time, DayName) with their SQL expressions
+                    // so COUNT and other simple WHERE paths work (main query already does this in buildEfCoreStyleQuery)
+                    $entityReflection = new ReflectionClass($this->entityType);
+                    $mainAlias = $this->getTableAliasForParser();
+                    $sqlCondition = $this->replaceInjectQueryColumnsInWhere($sqlCondition, $entityReflection, $mainAlias);
+                    
                     // Apply the parsed SQL condition
                     // For OR logic, use orWhere() for OR conditions, where() for AND conditions
                     if ($isOr) {
@@ -4542,7 +4611,17 @@ class AdvancedQueryBuilder
             $col = $colInfo['column'];
             $selectedColumns[$col] = true;
             $property = $entityReflection->getProperty($colInfo['property']);
+            $injectAttributes = $property->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\InjectQuery::class);
             $sensitiveAttributes = $property->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\SensitiveValue::class);
+            
+            // NotMapped + InjectQuery: use custom SQL expression in SELECT only
+            if (!empty($injectAttributes)) {
+                $expr = $this->getColumnSelectExpression($entityReflection, $colInfo['property'], $mainAlias);
+                if ($expr !== '') {
+                    $mainSelectColumns[] = $expr;
+                }
+                continue;
+            }
             
             // Use provider's escapeIdentifier for database-specific formatting
             $quotedCol = $provider->escapeIdentifier($col);
@@ -5197,6 +5276,9 @@ class AdvancedQueryBuilder
                     log_message('debug', "buildEfCoreStyleQuery - navigation filter #{$index}, sqlWhere: " . ($sqlWhere ?? 'NULL'));
                 } else {
                     $sqlWhere = $this->convertSimpleWhereToSql($where, $mainAlias, $referenceNavAliases);
+                    if ($sqlWhere !== null && $sqlWhere !== '') {
+                        $sqlWhere = $this->replaceInjectQueryColumnsInWhere($sqlWhere, $entityReflection, $mainAlias);
+                    }
                     log_message('debug', "buildEfCoreStyleQuery - simple filter #{$index}, sqlWhere: " . ($sqlWhere ?? 'NULL'));
                 }
             } else {
@@ -6740,9 +6822,16 @@ class AdvancedQueryBuilder
                 continue;
             }
             
-            // Check for NotMapped attribute - exclude these properties
+            // Check for NotMapped attribute - exclude unless has InjectQuery (SELECT-only expression)
             $notMappedAttributes = $property->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\NotMapped::class);
             if (!empty($notMappedAttributes)) {
+                $injectAttributes = $property->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\InjectQuery::class);
+                if (empty($injectAttributes)) {
+                    continue;
+                }
+                // NotMapped + InjectQuery: include in SELECT only (column name from Column attr or property name)
+                $columnName = $this->getColumnNameFromProperty($entityReflection, $propertyName);
+                $columns[] = $columnName;
                 continue;
             }
             
@@ -6841,7 +6930,20 @@ class AdvancedQueryBuilder
         $columnName = $this->getColumnNameFromProperty($entityReflection, $propertyName);
         $quotedColumn = $this->connection->escapeIdentifiers($columnName);
         $quotedAlias = $this->connection->escapeIdentifiers($tableAlias);
-        
+
+        // Check for InjectQuery attribute (custom SQL expression for this column)
+        $injectAttributes = $property->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\InjectQuery::class);
+        if (!empty($injectAttributes)) {
+            $injectAttr = $injectAttributes[0]->newInstance();
+            $expression = trim($injectAttr->expression ?? '');
+
+            if ($expression !== '') {
+                // Replace {alias} with quoted table alias for qualified column refs (e.g. DATEPART(DAY, {alias}.[EventTime]))
+                $expression = str_replace('{alias}', $quotedAlias, $expression);
+                return "{$expression} AS {$quotedColumn}";
+            }
+        }
+
         // Check if disableSensitive is enabled
         if ($this->isSensitive) {
             return "[{$quotedAlias}].{$quotedColumn}";
@@ -6870,6 +6972,90 @@ class AdvancedQueryBuilder
     }
 
     /**
+     * Get InjectQuery expression for WHERE clause (expression only, no AS alias).
+     * Returns null if property does not have InjectQuery.
+     * @param string|null $alreadyQuotedTableRef If set, use this as the table reference in the expression (e.g. connection's FROM table); no escaping.
+     */
+    private function getInjectQueryWhereExpression(ReflectionClass $entityReflection, string $propertyName, string $tableAlias, ?string $alreadyQuotedTableRef = null): ?string
+    {
+        if (!$entityReflection->hasProperty($propertyName)) {
+            return null;
+        }
+        $property = $entityReflection->getProperty($propertyName);
+        $injectAttributes = $property->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\InjectQuery::class);
+        if (empty($injectAttributes)) {
+            return null;
+        }
+        $injectAttr = $injectAttributes[0]->newInstance();
+        $expression = trim($injectAttr->expression ?? '');
+        if ($expression === '') {
+            return null;
+        }
+        $quotedAlias = $alreadyQuotedTableRef !== null
+            ? $alreadyQuotedTableRef
+            : $this->connection->escapeIdentifiers($tableAlias);
+        return str_replace('{alias}', $quotedAlias, $expression);
+    }
+
+    /**
+     * Replace main-entity NotMapped+InjectQuery column references in WHERE SQL with their actual expressions.
+     * e.g. "u.Day = '...'" -> "CONVERT(DATE, [u].[EventTime]) = '...'" (EF subquery uses alias [u]);
+     * "AccessEvent.Day = '...'" -> "CONVERT(DATE, [AccessEvent].[EventTime]) = '...'" (simple/COUNT uses table name).
+     * Expression must use the same alias that appears in the query (u in EF subquery, table name in simple query).
+     */
+    private function replaceInjectQueryColumnsInWhere(string $sqlWhere, ReflectionClass $entityReflection, string $mainAlias): string
+    {
+        $tableName = $this->context->getTableName($entityReflection->getName());
+        $quotedMainAlias = $this->connection->escapeIdentifiers($mainAlias);
+        // For COUNT/simple query the FROM may use connection's full table ref (e.g. "DB"."schema"."Table"); use it in expression so WHERE binds
+        $tableRefForFrom = $this->connection->protectIdentifiers($tableName, true, true, false);
+        foreach ($entityReflection->getProperties() as $property) {
+            if ($property->isStatic()) {
+                continue;
+            }
+            $notMapped = $property->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\NotMapped::class);
+            $inject = $property->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\InjectQuery::class);
+            if (empty($notMapped) || empty($inject)) {
+                continue;
+            }
+            $propertyName = $property->getName();
+            $columnName = $this->getColumnNameFromProperty($entityReflection, $propertyName);
+            // Replace for every alias that might appear: mainAlias, table name, and 'u' (parser output or EF subquery alias)
+            // Build expression per alias so the injected SQL uses the correct table reference for that context
+            $aliasesToReplace = array_unique([$mainAlias, $tableName, 'u']);
+            foreach ($aliasesToReplace as $alias) {
+                $expr = ($alias === $tableName)
+                    ? $this->getInjectQueryWhereExpression($entityReflection, $propertyName, $alias, $tableRefForFrom)
+                    : $this->getInjectQueryWhereExpression($entityReflection, $propertyName, $alias);
+                if ($expr === null) {
+                    continue;
+                }
+                $sqlWhere = preg_replace(
+                    '/\b' . preg_quote($alias, '/') . '\.' . preg_quote($columnName, '/') . '\b/',
+                    $expr,
+                    $sqlWhere
+                );
+                $sqlWhere = preg_replace(
+                    '/\[' . preg_quote($alias, '/') . '\]\.\[' . preg_quote($columnName, '/') . '\]/',
+                    $expr,
+                    $sqlWhere
+                );
+            }
+            if ($quotedMainAlias !== $mainAlias && $quotedMainAlias !== '[' . $mainAlias . ']') {
+                $expr = $this->getInjectQueryWhereExpression($entityReflection, $propertyName, $mainAlias);
+                if ($expr !== null) {
+                    $sqlWhere = preg_replace(
+                        '/' . preg_quote($quotedMainAlias, '/') . '\.' . preg_quote($columnName, '/') . '\b/',
+                        $expr,
+                        $sqlWhere
+                    );
+                }
+            }
+        }
+        return $sqlWhere;
+    }
+
+    /**
      * Get entity columns with property names mapping
      * Returns array of ['column' => 'ColumnName', 'property' => 'PropertyName']
      */
@@ -6895,9 +7081,19 @@ class AdvancedQueryBuilder
                 continue;
             }
             
-            // Check for NotMapped attribute - exclude these properties
+            // Check for NotMapped attribute - exclude unless has InjectQuery (SELECT-only expression)
             $notMappedAttributes = $property->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\NotMapped::class);
             if (!empty($notMappedAttributes)) {
+                $injectAttributes = $property->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\InjectQuery::class);
+                if (empty($injectAttributes)) {
+                    continue;
+                }
+                // NotMapped + InjectQuery: include in SELECT only
+                $columnName = $this->getColumnNameFromProperty($entityReflection, $propertyName);
+                $columns[] = [
+                    'column' => $columnName,
+                    'property' => $propertyName
+                ];
                 continue;
             }
             

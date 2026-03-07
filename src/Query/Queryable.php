@@ -358,6 +358,11 @@ class Queryable implements IQueryable
         return $this->queryBuilder->max($selector);
     }
 
+    public function toSummary(array $sumFields = [], array $groupFields = []): array
+    {
+        return $this->queryBuilder->toSummary($sumFields, $groupFields);
+    }
+
     public function fromSqlRaw(string $sql, array $parameters = []): IQueryable
     {
         $this->queryBuilder->fromSqlRaw($sql, $parameters);

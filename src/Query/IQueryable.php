@@ -198,6 +198,15 @@ interface IQueryable
     public function toArray(bool $includeNavigationProperties = true): array;
 
     /**
+     * Execute as summary query in database (GROUP BY + SUM). No pagination.
+     *
+     * @param array $sumFields Property names to aggregate (e.g. ['Qty'])
+     * @param array $groupFields Property names to group by (e.g. ['ZoneName','ApplicationName'])
+     * @return array List of summary rows (associative arrays)
+     */
+    public function toSummary(array $sumFields = [], array $groupFields = []): array;
+
+    /**
      * Execute query and get count
      */
     public function count(): int;
