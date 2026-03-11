@@ -2213,6 +2213,15 @@ class AdvancedQueryBuilder
                             $parsedSql = $parser->parse($predicate);
                             log_message('debug', 'executeRawSql - Parsed SQL: ' . ($parsedSql ?: '(empty)'));
                             
+                            // Expand NAVIGATION_IN:... placeholder when present (e.g. from in_array on navigation path)
+                            if (!empty($parsedSql) && strpos($parsedSql, 'NAVIGATION_IN:') === 0) {
+                                $expanded = $this->expandNavigationInForRawSql($parsedSql, $alias);
+                                if ($expanded !== null) {
+                                    $parsedSql = $expanded;
+                                    log_message('debug', 'executeRawSql - Expanded NAVIGATION_IN to: ' . $parsedSql);
+                                }
+                            }
+                            
                             // If ExpressionParser failed, try to build SQL from static variables
                             $fallbackParams = [];
                             if (empty($parsedSql)) {
@@ -3015,6 +3024,63 @@ class AdvancedQueryBuilder
                                 }
                                 
                                 log_message('debug', "applySimpleWhereWithParser - generated reference navigation IN clause: {$sqlCondition}");
+                            }
+                        }
+                        // Handle nested reference navigation (3 parts: reference.reference.column e.g. Employee.Company.PdksCompanyID)
+                        elseif (count($pathParts) === 3) {
+                            $referenceNavProperty = $pathParts[0];
+                            $nestedRefProperty = $pathParts[1];
+                            $columnName = $pathParts[2];
+                            $refNavInfo = $this->getNavigationInfo($referenceNavProperty);
+                            if ($refNavInfo && !$refNavInfo['isCollection']) {
+                                $nestedNavInfo = $this->getNavigationInfoForEntity($nestedRefProperty, $refNavInfo['entityType']);
+                                if ($nestedNavInfo && !$nestedNavInfo['isCollection']) {
+                                    if ($builder !== null) {
+                                        if (!isset($this->requiredJoins[$referenceNavProperty])) {
+                                            $this->addJoinForNavigationPath($builder, $referenceNavProperty);
+                                        }
+                                        $nestedNavPath = $referenceNavProperty . '.' . $nestedRefProperty;
+                                        if (!isset($this->requiredJoins[$nestedNavPath])) {
+                                            $refTableName = $this->context->getTableName($refNavInfo['entityType']);
+                                            $nestedTableName = $this->context->getTableName($nestedNavInfo['entityType']);
+                                            $refEntityReflection = new \ReflectionClass($refNavInfo['entityType']);
+                                            $nestedEntityReflection = new \ReflectionClass($nestedNavInfo['entityType']);
+                                            $fkOnRef = $this->getColumnNameFromProperty($refEntityReflection, $nestedNavInfo['foreignKey']);
+                                            $pkOnNested = $this->getPrimaryKeyColumnName($nestedEntityReflection);
+                                            $quotedRef = $this->connection->escapeIdentifiers($refTableName);
+                                            $quotedNested = $this->connection->escapeIdentifiers($nestedTableName);
+                                            $quotedFk = $this->connection->escapeIdentifiers($fkOnRef);
+                                            $quotedPk = $this->connection->escapeIdentifiers($pkOnNested);
+                                            $joinCondition = "{$quotedRef}.{$quotedFk} = {$quotedNested}.{$quotedPk}";
+                                            $builder->join($nestedTableName, $joinCondition, 'LEFT');
+                                            $this->requiredJoins[$nestedNavPath] = [
+                                                'table' => $nestedTableName,
+                                                'alias' => $nestedTableName,
+                                                'entityType' => $nestedNavInfo['entityType']
+                                            ];
+                                        }
+                                        $joinAlias = $this->requiredJoins[$nestedNavPath]['alias'];
+                                        $nestedEntityReflection = new \ReflectionClass($nestedNavInfo['entityType']);
+                                        $refColumnName = $this->getColumnNameFromProperty($nestedEntityReflection, $columnName);
+                                        $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
+                                        $quotedJoinAlias = $provider->escapeIdentifier($joinAlias);
+                                        $quotedRefColumn = $provider->escapeIdentifier($refColumnName);
+                                        if ($values !== '?') {
+                                            $sqlCondition = "{$quotedJoinAlias}.{$quotedRefColumn} IN ({$values})";
+                                        } else {
+                                            $sqlCondition = "{$quotedJoinAlias}.{$quotedRefColumn} IN (?)";
+                                        }
+                                        log_message('debug', "applySimpleWhereWithParser - generated nested reference navigation IN clause: {$sqlCondition}");
+                                        if ($builder !== null) {
+                                            if ($isOr) {
+                                                $builder->orWhere($sqlCondition, null, false);
+                                            } else {
+                                                $builder->where($sqlCondition, null, false);
+                                            }
+                                        }
+                                        return;
+                                    }
+                                }
                             }
                         }
                         // Handle collection navigation property (e.g., "EmployeeDepartments.Department.DepartmentID")
@@ -9280,6 +9346,79 @@ class AdvancedQueryBuilder
     }
 
     /**
+     * Expand NAVIGATION_IN:... placeholder to real SQL for raw SQL / executeRawSql context.
+     * Uses EXISTS subquery when the path is nested (e.g. Employee.Company.PdksCompanyID).
+     */
+    private function expandNavigationInForRawSql(string $parsedSql, string $mainAlias): ?string
+    {
+        if (strpos($parsedSql, 'NAVIGATION_IN:') !== 0) {
+            return null;
+        }
+        $parts = explode(':', $parsedSql, 3);
+        if (count($parts) < 2) {
+            return null;
+        }
+        $navPath = $parts[1];
+        $values = isset($parts[2]) ? $parts[2] : '?';
+        if ($values === '') {
+            return '1=0';
+        }
+        $pathParts = explode('.', $navPath);
+        $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
+        $quotedMainAlias = $provider->escapeIdentifier($mainAlias);
+
+        // 3 parts: reference.reference.column (e.g. Employee.Company.PdksCompanyID)
+        if (count($pathParts) === 3) {
+            $refNavInfo = $this->getNavigationInfo($pathParts[0]);
+            if (!$refNavInfo || $refNavInfo['isCollection']) {
+                return null;
+            }
+            $nestedNavInfo = $this->getNavigationInfoForEntity($pathParts[1], $refNavInfo['entityType']);
+            if (!$nestedNavInfo || $nestedNavInfo['isCollection']) {
+                return null;
+            }
+            $mainEntityReflection = new \ReflectionClass($this->entityType);
+            $refEntityReflection = new \ReflectionClass($refNavInfo['entityType']);
+            $nestedEntityReflection = new \ReflectionClass($nestedNavInfo['entityType']);
+            $mainFkColumn = $this->getColumnNameFromProperty($mainEntityReflection, $refNavInfo['foreignKey']);
+            $refFkColumn = $this->getColumnNameFromProperty($refEntityReflection, $nestedNavInfo['foreignKey']);
+            $nestedPkColumn = $this->getPrimaryKeyColumnName($nestedEntityReflection);
+            $filterColumn = $this->getColumnNameFromProperty($nestedEntityReflection, $pathParts[2]);
+            $refTableName = $this->context->getTableName($refNavInfo['entityType']);
+            $nestedTableName = $this->context->getTableName($nestedNavInfo['entityType']);
+            $quotedRefTable = $provider->escapeIdentifier($refTableName);
+            $quotedNestedTable = $provider->escapeIdentifier($nestedTableName);
+            $quotedMainFk = $provider->escapeIdentifier($mainFkColumn);
+            $quotedRefFk = $provider->escapeIdentifier($refFkColumn);
+            $quotedNestedPk = $provider->escapeIdentifier($nestedPkColumn);
+            $quotedFilterCol = $provider->escapeIdentifier($filterColumn);
+            $existsSql = "EXISTS (SELECT 1 FROM {$quotedRefTable} AS _r INNER JOIN {$quotedNestedTable} AS _n ON _r.{$quotedRefFk} = _n.{$quotedNestedPk} WHERE _r.{$quotedMainFk} = {$quotedMainAlias}.{$quotedMainFk} AND _n.{$quotedFilterCol} IN ({$values}))";
+            return $existsSql;
+        }
+
+        // 2 parts: reference.column (e.g. Kadro.ID)
+        if (count($pathParts) === 2) {
+            $navInfo = $this->getNavigationInfo($pathParts[0]);
+            if (!$navInfo || $navInfo['isCollection']) {
+                return null;
+            }
+            $mainEntityReflection = new \ReflectionClass($this->entityType);
+            $refEntityReflection = new \ReflectionClass($navInfo['entityType']);
+            $mainFkColumn = $this->getColumnNameFromProperty($mainEntityReflection, $navInfo['foreignKey']);
+            $refColumn = $this->getColumnNameFromProperty($refEntityReflection, $pathParts[1]);
+            $refTableName = $this->context->getTableName($navInfo['entityType']);
+            $refPkColumn = $this->getPrimaryKeyColumnName($refEntityReflection);
+            $quotedRefTable = $provider->escapeIdentifier($refTableName);
+            $quotedMainFk = $provider->escapeIdentifier($mainFkColumn);
+            $quotedRefPk = $provider->escapeIdentifier($refPkColumn);
+            $quotedRefCol = $provider->escapeIdentifier($refColumn);
+            return "EXISTS (SELECT 1 FROM {$quotedRefTable} AS _r WHERE _r.{$quotedRefPk} = {$quotedMainAlias}.{$quotedMainFk} AND _r.{$quotedRefCol} IN ({$values}))";
+        }
+
+        return null;
+    }
+
+    /**
      * Convert simple WHERE clause to SQL
      */
     private function convertSimpleWhereToSql(callable $predicate, string $alias, array $referenceNavAliases = []): ?string
@@ -9633,6 +9772,47 @@ class AdvancedQueryBuilder
                                             }
                                             
                                             log_message('debug', "convertSimpleWhereToSql - generated nested EXISTS subquery: {$sqlCondition}");
+                                            return $sqlCondition;
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            // Handle nested reference navigation (3 parts: reference.reference.column e.g. Employee.Company.PdksCompanyID)
+                            if (count($pathParts) === 3) {
+                                $referenceNavProperty = $pathParts[0]; // e.g., "Employee"
+                                $nestedRefProperty = $pathParts[1]; // e.g., "Company"
+                                $columnName = $pathParts[2]; // e.g., "PdksCompanyID"
+                                
+                                $refNavInfo = $this->getNavigationInfo($referenceNavProperty);
+                                if ($refNavInfo && !$refNavInfo['isCollection']) {
+                                    $refEntityType = $refNavInfo['entityType'];
+                                    $nestedNavInfo = $this->getNavigationInfoForEntity($nestedRefProperty, $refEntityType);
+                                    if ($nestedNavInfo && !$nestedNavInfo['isCollection']) {
+                                        $nestedNavPath = $referenceNavProperty . '.' . $nestedRefProperty;
+                                        $joinAlias = $referenceNavAliases[$nestedNavPath] ?? null;
+                                        if ($joinAlias === null && isset($this->requiredJoins[$nestedNavPath])) {
+                                            $joinAlias = $this->requiredJoins[$nestedNavPath]['alias'] ?? null;
+                                        }
+                                        if ($joinAlias !== null) {
+                                            $nestedEntityReflection = new \ReflectionClass($nestedNavInfo['entityType']);
+                                            $refColumnName = $this->getColumnNameFromProperty($nestedEntityReflection, $columnName);
+                                            $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
+                                            $quotedJoinAlias = $provider->escapeIdentifier($joinAlias);
+                                            $quotedRefColumn = $provider->escapeIdentifier($refColumnName);
+                                            if ($values !== '?') {
+                                                $valuesArray = explode(',', $values);
+                                                $filteredValues = $this->filterInvalidValuesForInClause($valuesArray, $nestedEntityReflection, $columnName);
+                                                if (empty($filteredValues)) {
+                                                    log_message('debug', "convertSimpleWhereToSql - all values filtered out, returning false condition");
+                                                    return "1=0";
+                                                }
+                                                $values = implode(',', $filteredValues);
+                                                $sqlCondition = "{$quotedJoinAlias}.{$quotedRefColumn} IN ({$values})";
+                                            } else {
+                                                $sqlCondition = "{$quotedJoinAlias}.{$quotedRefColumn} IN (?)";
+                                            }
+                                            log_message('debug', "convertSimpleWhereToSql - generated nested reference navigation IN clause: {$sqlCondition}");
                                             return $sqlCondition;
                                         }
                                     }
