@@ -9691,10 +9691,77 @@ class AdvancedQueryBuilder
                                 return $sqlCondition;
                             }
                         }
-                        // Handle collection navigation property (e.g., "EmployeeDepartments.Department.DepartmentID")
-                        // OR nested path through reference navigation (e.g., "Employee.EmployeeDepartments.Department.DepartmentID")
+                        // Handle collection/navigation combinations
+                        // Examples:
+                        // - "Employee.EmployeeDepartments.DepartmentID" (reference -> collection -> column)
+                        // - "Employee.EmployeeDepartments.Department.DepartmentID" (reference -> collection -> reference -> column)
+                        // - "Employee.Company.PdksCompanyID" (reference -> reference -> column)
+                        // - "EmployeeDepartments.Department.DepartmentID" (collection -> reference -> column)
                         elseif (count($pathParts) >= 3) {
-                            // Check if first part is a reference navigation (4+ parts: reference.collection.reference.column)
+                            // Special case: 3-part path with reference -> collection -> column
+                            // e.g., "Employee.EmployeeDepartments.DepartmentID"
+                            if (count($pathParts) === 3) {
+                                $referenceNavProperty = $pathParts[0]; // e.g., "Employee"
+                                $collectionProperty = $pathParts[1];   // e.g., "EmployeeDepartments"
+                                $columnName = $pathParts[2];           // e.g., "DepartmentID"
+                                
+                                $refNavInfo = $this->getNavigationInfo($referenceNavProperty);
+                                if ($refNavInfo && !$refNavInfo['isCollection']) {
+                                    $refEntityType = $refNavInfo['entityType'];
+                                    
+                                    // Get collection navigation from the reference entity
+                                    $collectionNavInfo = $this->getNavigationInfoForEntity($collectionProperty, $refEntityType);
+                                    if ($collectionNavInfo && $collectionNavInfo['isCollection']) {
+                                        // Main entity (this->entityType) -> Reference entity (e.g., Employee) via $refNavInfo
+                                        // Reference entity -> Collection entity (e.g., EmployeeDepartments) via $collectionNavInfo
+                                        
+                                        // Get FK in main entity that points to reference entity
+                                        $mainEntityReflection = new \ReflectionClass($this->entityType);
+                                        $mainToRefFkProperty = $refNavInfo['foreignKey'];
+                                        $mainToRefFkColumn = $this->getColumnNameFromProperty($mainEntityReflection, $mainToRefFkProperty);
+                                        
+                                        // Get collection entity info
+                                        $collectionEntityType = $collectionNavInfo['entityType'];
+                                        $collectionTableName = $this->context->getTableName($collectionEntityType);
+                                        $collectionEntityReflection = new \ReflectionClass($collectionEntityType);
+                                        
+                                        // FK in collection entity that points back to the reference entity
+                                        $collectionFkProperty = $collectionNavInfo['foreignKey'];
+                                        $collectionFkColumn = $this->getColumnNameFromProperty($collectionEntityReflection, $collectionFkProperty);
+                                        
+                                        // Column in collection entity used for filtering (e.g., DepartmentID)
+                                        $filterColumnName = $this->getColumnNameFromProperty($collectionEntityReflection, $columnName);
+                                        
+                                        $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
+                                        $quotedMainTable = $provider->escapeIdentifier($alias);
+                                        $quotedMainToRefFk = $provider->escapeIdentifier($mainToRefFkColumn);
+                                        $quotedCollectionTable = $provider->escapeIdentifier($collectionTableName);
+                                        $quotedCollectionFk = $provider->escapeIdentifier($collectionFkColumn);
+                                        $quotedFilterColumn = $provider->escapeIdentifier($filterColumnName);
+                                        
+                                        if ($values !== '?') {
+                                            // Filter invalid values (like 'undefined' for integer types)
+                                            $valuesArray = explode(',', $values);
+                                            $filteredValues = $this->filterInvalidValuesForInClause($valuesArray, $collectionEntityReflection, $columnName);
+                                            
+                                            if (empty($filteredValues)) {
+                                                log_message('debug', "convertSimpleWhereToSql - all values filtered out for reference->collection path, returning false condition");
+                                                return "1=0";
+                                            }
+                                            
+                                            $values = implode(',', $filteredValues);
+                                            $sqlCondition = "EXISTS (SELECT 1 FROM {$quotedCollectionTable} AS [ed] WHERE [ed].{$quotedCollectionFk} = {$quotedMainTable}.{$quotedMainToRefFk} AND [ed].{$quotedFilterColumn} IN ({$values}))";
+                                        } else {
+                                            $sqlCondition = "EXISTS (SELECT 1 FROM {$quotedCollectionTable} AS [ed] WHERE [ed].{$quotedCollectionFk} = {$quotedMainTable}.{$quotedMainToRefFk} AND [ed].{$quotedFilterColumn} IN (?))";
+                                        }
+                                        
+                                        log_message('debug', "convertSimpleWhereToSql - generated EXISTS subquery for reference->collection path: {$sqlCondition}");
+                                        return $sqlCondition;
+                                    }
+                                }
+                            }
+                            
+                            // Check if first part is a reference navigation with nested collection/reference (4+ parts: reference.collection.reference.column)
                             if (count($pathParts) >= 4) {
                                 $referenceNavProperty = $pathParts[0]; // e.g., "Employee"
                                 $collectionProperty = $pathParts[1]; // e.g., "EmployeeDepartments"
@@ -12150,9 +12217,8 @@ class AdvancedQueryBuilder
         // If this is a collection navigation
         if ($navInfo['isCollection']) {
             // Collection navigation requires EXISTS subquery
-            // If there are more parts, continue recursively
+            // If there are more parts, continue recursively (Collection -> Reference -> ... -> Column)
             if (!empty($pathParts)) {
-                // Collection -> Reference -> ... -> Column
                 return $this->buildCollectionExistsWithRecursivePath(
                     $navInfo,
                     $pathParts,
@@ -12163,8 +12229,60 @@ class AdvancedQueryBuilder
                     $depth
                 );
             } else {
-                // Collection -> Column (should not happen, collections don't have direct columns)
-                return null;
+                // Collection -> Column (column lives directly on the collection entity)
+                // Example: Employee.EmployeeDepartments.DepartmentID
+                $collectionEntityType = $navInfo['entityType'];
+                $collectionTableName = $this->context->getTableName($collectionEntityType);
+
+                // Use root entity (main query entity) as the "main" side for the EXISTS,
+                // so that we compare collection FK directly to the root entity column (e.g., AccessEvent.EmployeeID)
+                $rootEntityType = $this->entityType;
+                $rootEntityReflection = new \ReflectionClass($rootEntityType);
+                $rootPkColumn = $this->getPrimaryKeyColumnName($rootEntityReflection);
+
+                // Get FK in collection entity pointing to main entity
+                $collectionFkProperty = $navInfo['foreignKey'];
+                $collectionEntityReflection = new \ReflectionClass($collectionEntityType);
+                $collectionFkColumn = $this->getColumnNameFromProperty($collectionEntityReflection, $collectionFkProperty);
+
+                // Determine main table alias (always root entity table for parser/builder context)
+                if ($builder !== null) {
+                    $mainTableAlias = $this->context->getTableName($rootEntityType);
+                } else {
+                    $mainTableAlias = $this->getTableAliasForParser();
+                }
+
+                // Try to use the same FK column name on the root entity if it exists (e.g., EmployeeID on AccessEvent)
+                if ($rootEntityReflection->hasProperty($collectionFkProperty)) {
+                    $mainJoinColumn = $this->getColumnNameFromProperty($rootEntityReflection, $collectionFkProperty);
+                } else {
+                    // Fallback to primary key if FK property is not present on root entity
+                    $mainJoinColumn = $rootPkColumn;
+                }
+
+                // Get column on collection entity used for filtering
+                $filterColumn = $this->getColumnNameFromProperty($collectionEntityReflection, $columnName);
+
+                $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
+                $quotedMainTable = $provider->escapeIdentifier($mainTableAlias);
+                $quotedMainJoinCol = $provider->escapeIdentifier($mainJoinColumn);
+                $quotedCollectionTable = $provider->escapeIdentifier($collectionTableName);
+                $quotedCollectionFk = $provider->escapeIdentifier($collectionFkColumn);
+                $quotedFilterColumn = $provider->escapeIdentifier($filterColumn);
+
+                // Build EXISTS subquery
+                $existsCondition = "EXISTS (SELECT 1 FROM {$quotedCollectionTable} AS [c{$depth}]";
+                $existsCondition .= " WHERE [c{$depth}].{$quotedCollectionFk} = {$quotedMainTable}.{$quotedMainJoinCol}";
+
+                if ($values !== '?') {
+                    $existsCondition .= " AND [c{$depth}].{$quotedFilterColumn} IN ({$values})";
+                } else {
+                    $existsCondition .= " AND [c{$depth}].{$quotedFilterColumn} IN (?)";
+                }
+
+                $existsCondition .= ')';
+
+                return $existsCondition;
             }
         } else {
             // Reference navigation
