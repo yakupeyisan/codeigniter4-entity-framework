@@ -5,7 +5,7 @@ namespace Yakupeyisan\CodeIgniter4\EntityFramework\Migrations;
 use ReflectionClass;
 use ReflectionMethod;
 use ReflectionProperty;
-use CodeIgniter\Database\BaseConnection;
+use Yakupeyisan\CodeIgniter4\EntityFramework\Core\PdoAdapter;
 
 /**
  * MigrationGenerator - Generates migration code from ApplicationDbContext
@@ -17,11 +17,11 @@ class MigrationGenerator
     private array $foreignKeys = [];
     private array $indexes = [];
     private string $contextClass;
-    private ?BaseConnection $connection;
+    private ?PdoAdapter $connection;
     private array $existingTables = [];
     private array $existingColumns = [];
 
-    public function __construct(string $contextClass, ?BaseConnection $connection = null)
+    public function __construct(string $contextClass, ?PdoAdapter $connection = null)
     {
         $this->contextClass = $contextClass;
         $this->connection = $connection;
@@ -140,14 +140,7 @@ class MigrationGenerator
             return $this->connection->getDatabase();
         }
         
-        // Fallback to config
-        try {
-            $dbConfig = new \Config\Database();
-            $defaultConfig = $dbConfig->default;
-            return $defaultConfig['database'] ?? null;
-        } catch (\Exception $e) {
-            return null;
-        }
+        return null;
     }
 
     /**

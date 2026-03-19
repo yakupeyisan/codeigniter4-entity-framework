@@ -2,7 +2,7 @@
 
 namespace Yakupeyisan\CodeIgniter4\EntityFramework\Query;
 
-use CodeIgniter\Database\BaseConnection;
+use Yakupeyisan\CodeIgniter4\EntityFramework\Core\PdoAdapter;
 use Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProvider;
 use Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory;
 
@@ -12,10 +12,10 @@ use Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory;
  */
 class QueryPlanAnalyzer
 {
-    private BaseConnection $connection;
+    private PdoAdapter $connection;
     private DatabaseProvider $provider;
 
-    public function __construct(BaseConnection $connection)
+    public function __construct(PdoAdapter $connection)
     {
         $this->connection = $connection;
         $this->provider = DatabaseProviderFactory::getProvider($connection);

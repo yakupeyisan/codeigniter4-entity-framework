@@ -2,7 +2,7 @@
 
 namespace Yakupeyisan\CodeIgniter4\EntityFramework\Providers;
 
-use CodeIgniter\Database\BaseConnection;
+use Yakupeyisan\CodeIgniter4\EntityFramework\Core\PdoAdapter;
 
 /**
  * MySQL Database Provider
@@ -14,7 +14,7 @@ class MySqlProvider implements DatabaseProvider
         return 'MySQL';
     }
 
-    public function supports(BaseConnection $connection): bool
+    public function supports(PdoAdapter $connection): bool
     {
         $driver = strtolower($connection->getPlatform() ?? '');
         return $driver === 'mysql' || $driver === 'mysqli';
@@ -198,4 +198,5 @@ class MySqlProvider implements DatabaseProvider
         throw new \RuntimeException('MySQL does not support table-valued functions. Use stored procedures or views instead.');
     }
 }
+
 

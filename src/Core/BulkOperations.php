@@ -2,7 +2,6 @@
 
 namespace Yakupeyisan\CodeIgniter4\EntityFramework\Core;
 
-use CodeIgniter\Database\BaseConnection;
 use ReflectionClass;
 use Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProvider;
 use Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory;
@@ -13,12 +12,12 @@ use Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory;
  */
 class BulkOperations
 {
-    private BaseConnection $connection;
+    private PdoAdapter $connection;
     private DatabaseProvider $provider;
     private int $batchSize;
     private bool $useTransactions;
 
-    public function __construct(BaseConnection $connection, int $batchSize = 1000, bool $useTransactions = true)
+    public function __construct(PdoAdapter $connection, int $batchSize = 1000, bool $useTransactions = true)
     {
         $this->connection = $connection;
         $this->provider = DatabaseProviderFactory::getProvider($connection);

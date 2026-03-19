@@ -2,7 +2,7 @@
 
 namespace Yakupeyisan\CodeIgniter4\EntityFramework\Providers;
 
-use CodeIgniter\Database\BaseConnection;
+use Yakupeyisan\CodeIgniter4\EntityFramework\Core\PdoAdapter;
 
 /**
  * DatabaseProvider - Base interface for database provider implementations
@@ -18,7 +18,7 @@ interface DatabaseProvider
     /**
      * Check if this provider supports the given connection
      */
-    public function supports(BaseConnection $connection): bool;
+    public function supports(PdoAdapter $connection): bool;
 
     /**
      * Escape identifier (table name, column name)

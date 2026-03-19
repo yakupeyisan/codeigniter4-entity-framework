@@ -3,7 +3,6 @@
 namespace Yakupeyisan\CodeIgniter4\EntityFramework\Query;
 
 use Yakupeyisan\CodeIgniter4\EntityFramework\Core\DbContext;
-use CodeIgniter\Database\BaseConnection;
 
 /**
  * CompiledQuery - Compiled query for performance optimization

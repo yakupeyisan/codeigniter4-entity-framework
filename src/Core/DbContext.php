@@ -2,8 +2,7 @@
 
 namespace Yakupeyisan\CodeIgniter4\EntityFramework\Core;
 
-use CodeIgniter\Database\BaseConnection;
-use CodeIgniter\Database\ConnectionInterface;
+use PDO;
 use Yakupeyisan\CodeIgniter4\EntityFramework\Query\IQueryable;
 use Yakupeyisan\CodeIgniter4\EntityFramework\Query\Queryable;
 use Yakupeyisan\CodeIgniter4\EntityFramework\Configuration\EntityTypeBuilder;
@@ -15,26 +14,40 @@ use ReflectionClass;
  */
 abstract class DbContext
 {
-    protected BaseConnection $connection;
+    protected PdoAdapter $connection;
     protected array $entityConfigurations = [];
     protected array $trackedEntities = [];
     protected bool $isTransactionActive = false;
     protected array $queryFilters = [];
     protected array $changeTracker = [];
     protected bool $lazyLoadingEnabled = true;
+    protected bool $strictSqlSecurity = true;
+    protected bool $auditRawSql = true;
     protected ?\Yakupeyisan\CodeIgniter4\EntityFramework\Core\TransactionManager $transactionManager = null;
     protected array $pendingLazyLoads = []; // Batch lazy loading queue: ['entityType' => ['navigationProperty' => [Entity1, Entity2, ...]]]
 
-    public function __construct(?BaseConnection $connection = null)
+    public function __construct(PDO|PdoAdapter|null $connection = null)
     {
         if ($connection === null) {
-            // CodeIgniter 4 way to get database connection
-            $db = \Config\Database::connect();
-            $this->connection = $db;
+            $dsn = getenv('ENTITY_FRAMEWORK_PDO_DSN') ?: '';
+            if ($dsn === '') {
+                throw new \RuntimeException('PDO connection is required. Pass PDO instance or set ENTITY_FRAMEWORK_PDO_DSN.');
+            }
+            $username = getenv('ENTITY_FRAMEWORK_PDO_USER') ?: null;
+            $password = getenv('ENTITY_FRAMEWORK_PDO_PASSWORD') ?: null;
+            $this->connection = new PdoAdapter(new PDO($dsn, $username ?: '', $password ?: ''));
         } else {
-            $this->connection = $connection;
+            $this->connection = $connection instanceof PDO ? new PdoAdapter($connection) : $connection;
         }
         $this->transactionManager = new \Yakupeyisan\CodeIgniter4\EntityFramework\Core\TransactionManager($this->connection);
+        $strictEnv = getenv('ENTITY_FRAMEWORK_STRICT_SQL_SECURITY');
+        if ($strictEnv !== false && $strictEnv !== '') {
+            $this->strictSqlSecurity = filter_var($strictEnv, FILTER_VALIDATE_BOOL, FILTER_NULL_ON_FAILURE) ?? true;
+        }
+        $auditEnv = getenv('ENTITY_FRAMEWORK_AUDIT_RAW_SQL');
+        if ($auditEnv !== false && $auditEnv !== '') {
+            $this->auditRawSql = filter_var($auditEnv, FILTER_VALIDATE_BOOL, FILTER_NULL_ON_FAILURE) ?? true;
+        }
         $this->onModelCreating();
     }
 
@@ -81,9 +94,29 @@ abstract class DbContext
     /**
      * Get connection
      */
-    public function getConnection(): BaseConnection
+    public function getConnection(): PdoAdapter
     {
         return $this->connection;
+    }
+
+    public function isStrictSqlSecurityEnabled(): bool
+    {
+        return $this->strictSqlSecurity;
+    }
+
+    public function setStrictSqlSecurity(bool $enabled): void
+    {
+        $this->strictSqlSecurity = $enabled;
+    }
+
+    public function isRawSqlAuditEnabled(): bool
+    {
+        return $this->auditRawSql;
+    }
+
+    public function setRawSqlAudit(bool $enabled): void
+    {
+        $this->auditRawSql = $enabled;
     }
 
     /**
@@ -897,6 +930,7 @@ abstract class DbContext
      */
     public function executeSqlRaw(string $sql, array $parameters = []): bool
     {
+        $this->guardRawSql($sql, $parameters, 'DbContext::executeSqlRaw');
         return $this->connection->query($sql, $parameters);
     }
 
@@ -905,8 +939,34 @@ abstract class DbContext
      */
     public function fromSqlRaw(string $sql, array $parameters = []): array
     {
+        $this->guardRawSql($sql, $parameters, 'DbContext::fromSqlRaw');
         $query = $this->connection->query($sql, $parameters);
         return $query->getResultArray();
+    }
+
+    private function guardRawSql(string $sql, array $parameters = [], string $source = 'DbContext'): void
+    {
+        if (!$this->strictSqlSecurity) {
+            return;
+        }
+
+        $trimmed = trim($sql);
+        if ($trimmed === '') {
+            throw new \InvalidArgumentException("{$source}: empty SQL is not allowed");
+        }
+
+        if (preg_match('/(;\\s*\\S)|\\b(ALTER|DROP|TRUNCATE|CREATE|GRANT|REVOKE|EXEC|EXECUTE|MERGE)\\b/i', $trimmed)) {
+            throw new \RuntimeException("{$source}: blocked SQL pattern detected by strict security");
+        }
+
+        $placeholderCount = substr_count($trimmed, '?');
+        if ($placeholderCount !== count($parameters)) {
+            throw new \RuntimeException("{$source}: placeholder/binding count mismatch");
+        }
+
+        if ($this->auditRawSql) {
+            log_message('warning', "{$source} strict SQL audit: " . substr($trimmed, 0, 300));
+        }
     }
 
     /**

@@ -4,7 +4,7 @@ namespace Yakupeyisan\CodeIgniter4\EntityFramework\Query;
 
 use Yakupeyisan\CodeIgniter4\EntityFramework\Core\DbContext;
 use Yakupeyisan\CodeIgniter4\EntityFramework\Query\AdvancedQueryBuilder;
-use CodeIgniter\Database\BaseConnection;
+use Yakupeyisan\CodeIgniter4\EntityFramework\Core\PdoAdapter;
 use ReflectionClass;
 use stdClass;
 
@@ -16,10 +16,10 @@ class Queryable implements IQueryable
 {
     private DbContext $context;
     private string $entityType;
-    private BaseConnection $connection;
+    private PdoAdapter $connection;
     private AdvancedQueryBuilder $queryBuilder;
 
-    public function __construct(DbContext $context, string $entityType, BaseConnection $connection)
+    public function __construct(DbContext $context, string $entityType, PdoAdapter $connection)
     {
         $this->context = $context;
         $this->entityType = $entityType;
@@ -189,7 +189,13 @@ class Queryable implements IQueryable
     public function chunk(callable $callback, int $chunkSize = 1000): int
     {
         return $this->queryBuilder->chunk($callback, $chunkSize);
-    }    
+    }
+
+    public function stream(int $batchSize = 1000): \Generator
+    {
+        return $this->queryBuilder->stream($batchSize);
+    }
+
     public function cleanEntityState($data) {
         if (is_array($data)) {
             $cleaned = [];

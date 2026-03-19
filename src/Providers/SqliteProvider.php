@@ -2,7 +2,7 @@
 
 namespace Yakupeyisan\CodeIgniter4\EntityFramework\Providers;
 
-use CodeIgniter\Database\BaseConnection;
+use Yakupeyisan\CodeIgniter4\EntityFramework\Core\PdoAdapter;
 
 /**
  * SQLite Database Provider
@@ -14,7 +14,7 @@ class SqliteProvider implements DatabaseProvider
         return 'SQLite';
     }
 
-    public function supports(BaseConnection $connection): bool
+    public function supports(PdoAdapter $connection): bool
     {
         $driver = strtolower($connection->getPlatform() ?? '');
         return $driver === 'sqlite' || $driver === 'sqlite3';
@@ -190,4 +190,5 @@ class SqliteProvider implements DatabaseProvider
         throw new \RuntimeException('SQLite does not support table-valued functions. Use views or subqueries instead.');
     }
 }
+
 

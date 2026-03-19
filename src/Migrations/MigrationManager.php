@@ -2,7 +2,8 @@
 
 namespace Yakupeyisan\CodeIgniter4\EntityFramework\Migrations;
 
-use CodeIgniter\Database\BaseConnection;
+use PDO;
+use Yakupeyisan\CodeIgniter4\EntityFramework\Core\PdoAdapter;
 
 /**
  * MigrationManager - Manages migrations
@@ -10,16 +11,21 @@ use CodeIgniter\Database\BaseConnection;
  */
 class MigrationManager
 {
-    private BaseConnection $connection;
+    private PdoAdapter $connection;
     private string $migrationsPath;
 
-    public function __construct(?BaseConnection $connection = null, ?string $migrationsPath = null)
+    public function __construct(PDO|PdoAdapter|null $connection = null, ?string $migrationsPath = null)
     {
         if ($connection === null) {
-            // CodeIgniter 4 way to get database connection
-            $this->connection = \Config\Database::connect();
+            $dsn = getenv('ENTITY_FRAMEWORK_PDO_DSN') ?: '';
+            if ($dsn === '') {
+                throw new \RuntimeException('PDO connection is required. Pass PDO instance or set ENTITY_FRAMEWORK_PDO_DSN.');
+            }
+            $username = getenv('ENTITY_FRAMEWORK_PDO_USER') ?: '';
+            $password = getenv('ENTITY_FRAMEWORK_PDO_PASSWORD') ?: '';
+            $this->connection = new PdoAdapter(new PDO($dsn, $username, $password));
         } else {
-            $this->connection = $connection;
+            $this->connection = $connection instanceof PDO ? new PdoAdapter($connection) : $connection;
         }
         $this->migrationsPath = $migrationsPath ?? APPPATH . 'Database/Migrations/';
         
@@ -37,9 +43,7 @@ class MigrationManager
             $this->connection->initialize();
         } catch (\Exception $e) {
             // If connection fails, try to create database
-            $dbConfig = new \Config\Database();
-            $defaultConfig = $dbConfig->default;
-            $database = $defaultConfig['database'] ?? null;
+            $database = $this->connection->getDatabase();
             
             if (empty($database)) {
                 throw new \RuntimeException('Database name not configured');
@@ -406,15 +410,12 @@ PHP;
             $this->createMigrationsTableSqlServer();
         } else {
             // MySQL and other databases
-            $forge = new \CodeIgniter\Database\Forge($this->connection);
-            $forge->addField([
-                'id' => ['type' => 'INT', 'auto_increment' => true],
-                'timestamp' => ['type' => 'VARCHAR(14)'],
-                'name' => ['type' => 'VARCHAR(255)'],
-                'applied_at' => ['type' => 'DATETIME']
-            ]);
-            $forge->addKey('id', true);
-            $forge->createTable('migrations');
+            $this->connection->query("CREATE TABLE IF NOT EXISTS migrations (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                timestamp VARCHAR(14) NOT NULL,
+                name VARCHAR(255) NOT NULL,
+                applied_at DATETIME NOT NULL
+            )");
         }
     }
     

@@ -2,8 +2,6 @@
 
 namespace Yakupeyisan\CodeIgniter4\EntityFramework\Core;
 
-use CodeIgniter\Database\BaseConnection;
-
 /**
  * TransactionScope - Provides a scope-based transaction management
  * Automatically commits on success, rolls back on exception

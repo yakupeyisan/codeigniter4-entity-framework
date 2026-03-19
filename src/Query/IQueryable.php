@@ -187,6 +187,15 @@ interface IQueryable
      * @return int Total number of records processed
      */
     public function chunk(callable $callback, int $chunkSize = 1000): int;
+    
+    /**
+     * Stream query results using Generator.
+     * Designed for large result sets to keep memory usage stable.
+     *
+     * @param int $batchSize Internal fallback batch size for non-cursor flows
+     * @return \Generator<object>
+     */
+    public function stream(int $batchSize = 1000): \Generator;
 
     /**
      * Execute query and get all results as arrays

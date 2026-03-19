@@ -3,7 +3,7 @@
 namespace Yakupeyisan\CodeIgniter4\EntityFramework\Query;
 
 use Yakupeyisan\CodeIgniter4\EntityFramework\Core\DbContext;
-use CodeIgniter\Database\BaseConnection;
+use Yakupeyisan\CodeIgniter4\EntityFramework\Core\PdoAdapter;
 
 /**
  * DatabaseSpecificQueryBuilder - Database-specific query features
@@ -12,11 +12,11 @@ use CodeIgniter\Database\BaseConnection;
 class DatabaseSpecificQueryBuilder
 {
     private DbContext $context;
-    private BaseConnection $connection;
+    private PdoAdapter $connection;
     private AdvancedQueryBuilder $queryBuilder;
     private string $driver;
 
-    public function __construct(DbContext $context, BaseConnection $connection, AdvancedQueryBuilder $queryBuilder)
+    public function __construct(DbContext $context, PdoAdapter $connection, AdvancedQueryBuilder $queryBuilder)
     {
         $this->context = $context;
         $this->connection = $connection;

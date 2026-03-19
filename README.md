@@ -12,6 +12,45 @@ A VSCode extension is available to enhance your Entity Framework development exp
 composer require yakupeyisan/codeigniter4-entity-framework
 ```
 
+## PDO-Only Connection
+
+This package now uses PDO directly (no CodeIgniter Database dependency).
+
+Provide a PDO instance to your context/migration manager, or configure environment variables:
+
+```env
+ENTITY_FRAMEWORK_PDO_DSN=mysql:host=127.0.0.1;port=3306;dbname=app;charset=utf8mb4
+ENTITY_FRAMEWORK_PDO_USER=root
+ENTITY_FRAMEWORK_PDO_PASSWORD=secret
+```
+
+## Strict SQL Security (Default ON)
+
+Raw SQL security is strict by default for enterprise workloads.
+
+- Blocks risky SQL patterns (multi-statement and dangerous DDL/DCL tokens)
+- Enforces placeholder/binding count consistency
+- Audits raw SQL usage (masked/truncated log output)
+
+Environment flags:
+
+```env
+ENTITY_FRAMEWORK_STRICT_SQL_SECURITY=true
+ENTITY_FRAMEWORK_AUDIT_RAW_SQL=true
+```
+
+## Streaming Large Result Sets
+
+Use `stream()` for very large tables to avoid loading all rows into memory.
+
+```php
+foreach ($context->set(User::class)->where(fn($u) => $u->IsActive)->stream(2000) as $user) {
+    // process row
+}
+```
+
+`chunk()` is still available and backward compatible. `stream()` is the preferred API for million-row scans.
+
 ## Supported Database Providers
 
 This package supports multiple database providers with optimized implementations:

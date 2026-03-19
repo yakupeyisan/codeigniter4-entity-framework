@@ -2,7 +2,7 @@
 
 namespace Yakupeyisan\CodeIgniter4\EntityFramework\Providers;
 
-use CodeIgniter\Database\BaseConnection;
+use Yakupeyisan\CodeIgniter4\EntityFramework\Core\PdoAdapter;
 
 /**
  * DatabaseProviderFactory - Factory for creating database providers
@@ -22,7 +22,7 @@ class DatabaseProviderFactory
     /**
      * Get database provider for connection
      */
-    public static function getProvider(BaseConnection $connection): DatabaseProvider
+    public static function getProvider(PdoAdapter $connection): DatabaseProvider
     {
         // Check registered providers first
         foreach (self::$providers as $provider) {

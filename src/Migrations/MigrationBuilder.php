@@ -2,7 +2,7 @@
 
 namespace Yakupeyisan\CodeIgniter4\EntityFramework\Migrations;
 
-use CodeIgniter\Database\BaseConnection;
+use Yakupeyisan\CodeIgniter4\EntityFramework\Core\PdoAdapter;
 
 /**
  * MigrationBuilder - Fluent API for building migrations
@@ -10,10 +10,10 @@ use CodeIgniter\Database\BaseConnection;
  */
 class MigrationBuilder
 {
-    private BaseConnection $connection;
+    private PdoAdapter $connection;
     private array $operations = [];
 
-    public function __construct(BaseConnection $connection)
+    public function __construct(PdoAdapter $connection)
     {
         $this->connection = $connection;
     }
@@ -205,38 +205,51 @@ class MigrationBuilder
     {
         $driver = strtolower($this->connection->getPlatform() ?? '');
         
-        // SQL Server uses IDENTITY instead of AUTO_INCREMENT
         if ($driver === 'sqlsrv' || $driver === 'sqlserver') {
             $this->executeCreateTableSqlServer($operation);
-        } else {
-            // MySQL and other databases
-            $builder = new \CodeIgniter\Database\Forge($this->connection);
-            $fields = [];
-            $primaryKeys = [];
-            
-            if (is_callable($operation['columns'])) {
-                $columnBuilder = new ColumnBuilder();
-                $operation['columns']($columnBuilder);
-                $fields = $columnBuilder->getFields();
-                
-                // Extract primary keys
-                foreach ($fields as $fieldName => $fieldConfig) {
-                    if (isset($fieldConfig['primary_key']) && $fieldConfig['primary_key']) {
-                        $primaryKeys[] = $fieldName;
-                        unset($fields[$fieldName]['primary_key']);
-                    }
-                }
-            }
-            
-            $builder->addField($fields);
-            
-            // Add primary key if exists
-            if (!empty($primaryKeys)) {
-                $builder->addKey($primaryKeys, true);
-            }
-            
-            $builder->createTable($operation['name']);
+            return;
         }
+
+        if (!is_callable($operation['columns'])) {
+            return;
+        }
+
+        $columnBuilder = new ColumnBuilder();
+        $operation['columns']($columnBuilder);
+        $fields = $columnBuilder->getFields();
+
+        $columns = [];
+        $primaryKeys = [];
+        foreach ($fields as $fieldName => $fieldConfig) {
+            $type = $fieldConfig['type'] ?? 'VARCHAR(255)';
+            $isPrimary = isset($fieldConfig['primary_key']) && $fieldConfig['primary_key'];
+            $isAutoIncrement = isset($fieldConfig['auto_increment']) && $fieldConfig['auto_increment'];
+            $isNull = isset($fieldConfig['null']) ? (bool) $fieldConfig['null'] : true;
+
+            $columnDef = "`{$fieldName}` {$type}";
+            if ($isAutoIncrement) {
+                $columnDef .= ' AUTO_INCREMENT';
+            }
+            $columnDef .= $isNull ? ' NULL' : ' NOT NULL';
+
+            if (array_key_exists('default', $fieldConfig) && $fieldConfig['default'] !== null) {
+                $default = $fieldConfig['default'];
+                $columnDef .= is_numeric($default) ? " DEFAULT {$default}" : " DEFAULT '" . str_replace("'", "''", (string)$default) . "'";
+            }
+
+            if ($isPrimary) {
+                $primaryKeys[] = $fieldName;
+            }
+            $columns[] = $columnDef;
+        }
+
+        if (!empty($primaryKeys)) {
+            $pkSql = implode(', ', array_map(fn($pk) => "`{$pk}`", $primaryKeys));
+            $columns[] = "PRIMARY KEY ({$pkSql})";
+        }
+
+        $sql = "CREATE TABLE IF NOT EXISTS `{$operation['name']}` (\n    " . implode(",\n    ", $columns) . "\n)";
+        $this->connection->query($sql);
     }
     
     /**
@@ -308,14 +321,10 @@ class MigrationBuilder
      */
     private function executeAddColumn(array $operation): void
     {
-        $builder = new \CodeIgniter\Database\Forge($this->connection);
-        $field = [
-            $operation['name'] => [
-                'type' => $operation['columnType'],
-                ...$operation['options']
-            ]
-        ];
-        $builder->addColumn($operation['table'], $field);
+        $type = $operation['columnType'];
+        $null = ($operation['options']['null'] ?? true) ? 'NULL' : 'NOT NULL';
+        $sql = "ALTER TABLE `{$operation['table']}` ADD COLUMN `{$operation['name']}` {$type} {$null}";
+        $this->connection->query($sql);
     }
 
     /**
@@ -323,8 +332,10 @@ class MigrationBuilder
      */
     private function executeCreateIndex(array $operation): void
     {
-        $builder = new \CodeIgniter\Database\Forge($this->connection);
-        $builder->addKey($operation['columns'], $operation['isUnique'], false, $operation['name'], $operation['table']);
+        $unique = $operation['isUnique'] ? 'UNIQUE ' : '';
+        $columns = implode(', ', array_map(fn($c) => "`{$c}`", $operation['columns']));
+        $sql = "CREATE {$unique}INDEX `{$operation['name']}` ON `{$operation['table']}` ({$columns})";
+        $this->connection->query($sql);
     }
 
     /**
@@ -338,14 +349,10 @@ class MigrationBuilder
         if ($driver === 'sqlsrv' || $driver === 'sqlserver') {
             $this->executeAddForeignKeySqlServer($operation);
         } else {
-            $builder = new \CodeIgniter\Database\Forge($this->connection);
-            $builder->addForeignKey(
-                $operation['columns'],
-                $operation['referencedTable'],
-                $operation['referencedColumns'],
-                $operation['onDelete'],
-                $operation['name']
-            );
+            $columns = implode(', ', array_map(fn($c) => "`{$c}`", $operation['columns']));
+            $refColumns = implode(', ', array_map(fn($c) => "`{$c}`", $operation['referencedColumns']));
+            $sql = "ALTER TABLE `{$operation['table']}` ADD CONSTRAINT `{$operation['name']}` FOREIGN KEY ({$columns}) REFERENCES `{$operation['referencedTable']}` ({$refColumns}) ON DELETE {$operation['onDelete']}";
+            $this->connection->query($sql);
         }
     }
     

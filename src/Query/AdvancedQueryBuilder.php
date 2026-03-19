@@ -4,7 +4,7 @@ namespace Yakupeyisan\CodeIgniter4\EntityFramework\Query;
 
 use Yakupeyisan\CodeIgniter4\EntityFramework\Core\DbContext;
 use Yakupeyisan\CodeIgniter4\EntityFramework\Core\Entity;
-use CodeIgniter\Database\BaseConnection;
+use Yakupeyisan\CodeIgniter4\EntityFramework\Core\PdoAdapter;
 use ReflectionClass;
 use ReflectionProperty;
 
@@ -15,9 +15,10 @@ use ReflectionProperty;
  */
 class AdvancedQueryBuilder
 {
+    private const BLOCKED_SQL_PATTERN = '/(;\\s*\\S)|\\b(ALTER|DROP|TRUNCATE|CREATE|GRANT|REVOKE|EXEC|EXECUTE|MERGE)\\b/i';
     private DbContext $context;
     private string $entityType;
-    private BaseConnection $connection;
+    private PdoAdapter $connection;
     
     // Query building state
     private array $wheres = []; // Array of ['predicate' => callable, 'isOr' => bool, 'groupStart' => bool, 'groupEnd' => bool]
@@ -97,7 +98,7 @@ class AdvancedQueryBuilder
         self::$queryStats = [];
     }
 
-    public function __construct(DbContext $context, string $entityType, BaseConnection $connection)
+    public function __construct(DbContext $context, string $entityType, PdoAdapter $connection)
     {
         $this->context = $context;
         $this->entityType = $entityType;
@@ -122,6 +123,7 @@ class AdvancedQueryBuilder
      */
     public function selectRaw(string $sql, array $bindings = []): self
     {
+        $this->guardRawSql($sql, $bindings, 'selectRaw');
         if (!empty($bindings)) {
             // Apply parameter binding
             $sql = $this->bindParameters($sql, $bindings);
@@ -140,6 +142,7 @@ class AdvancedQueryBuilder
      */
     public function whereRaw(string $sql, array $bindings = []): self
     {
+        $this->guardRawSql($sql, $bindings, 'whereRaw');
         if (!empty($bindings)) {
             // Apply parameter binding
             $sql = $this->bindParameters($sql, $bindings);
@@ -163,6 +166,35 @@ class AdvancedQueryBuilder
         } elseif ($level !== 'debug') {
             // Always log non-debug messages
             log_message($level, $message);
+        }
+    }
+
+    private function guardRawSql(string $sql, array $bindings = [], string $source = 'raw'): void
+    {
+        if (!$this->context->isStrictSqlSecurityEnabled()) {
+            return;
+        }
+
+        $trimmed = trim($sql);
+        if ($trimmed === '') {
+            throw new \InvalidArgumentException("{$source}: empty SQL is not allowed");
+        }
+
+        if (preg_match(self::BLOCKED_SQL_PATTERN, $trimmed)) {
+            throw new \RuntimeException("{$source}: blocked SQL pattern detected by strict security");
+        }
+
+        $placeholderCount = substr_count($trimmed, '?');
+        if ($placeholderCount > 0 && $placeholderCount !== count($bindings)) {
+            throw new \RuntimeException("{$source}: placeholder/binding count mismatch");
+        }
+
+        if ($placeholderCount === 0 && !empty($bindings)) {
+            throw new \RuntimeException("{$source}: bindings provided without placeholders");
+        }
+
+        if ($this->context->isRawSqlAuditEnabled()) {
+            log_message('warning', "Strict SQL audit ({$source}): " . substr($trimmed, 0, 300));
         }
     }
 
@@ -293,6 +325,7 @@ class AdvancedQueryBuilder
         
         // If it's a string, treat it as raw SQL
         if (is_string($predicate)) {
+            $this->guardRawSql($predicate, [], 'where');
             $this->wheres[] = [
                 'predicate' => null,
                 'rawSql' => $predicate,
@@ -555,6 +588,7 @@ class AdvancedQueryBuilder
      */
     public function joinRaw(string $rawSql, string $alias, string $joinCondition, string $joinType = 'LEFT', array $parameters = []): self
     {
+        $this->guardRawSql($rawSql, $parameters, 'joinRaw');
         $this->rawJoins[] = [
             'rawSql' => $rawSql,
             'alias' => $alias,
@@ -641,10 +675,67 @@ class AdvancedQueryBuilder
      */
     public function fromSqlRaw(string $sql, array $parameters = []): self
     {
+        $this->guardRawSql($sql, $parameters, 'fromSqlRaw');
         $this->useRawSql = true;
         $this->rawSql = $sql;
         $this->rawSqlParameters = $parameters;
         return $this;
+    }
+
+    /**
+     * Stream query results with low memory usage.
+     * Raw SQL flows use true PDO cursor streaming.
+     * Complex builder flows fallback to chunked streaming.
+     */
+    public function stream(int $batchSize = 1000): \Generator
+    {
+        if ($batchSize <= 0) {
+            throw new \InvalidArgumentException('Batch size must be greater than 0');
+        }
+
+        if ($this->useRawSql && empty($this->wheres)) {
+            foreach ($this->connection->streamQuery((string) $this->rawSql, $this->rawSqlParameters) as $row) {
+                $entities = $this->mapToEntities([$row]);
+                foreach ($entities as $entity) {
+                    yield $entity;
+                }
+            }
+            return;
+        }
+
+        $offset = $this->skipCount ?? 0;
+        $originalSkip = $this->skipCount;
+        $originalTake = $this->takeCount;
+        $processed = 0;
+
+        try {
+            while (true) {
+                $chunkBuilder = clone $this;
+                $chunkBuilder->skipCount = $offset;
+                $chunkBuilder->takeCount = $batchSize;
+                $chunk = $chunkBuilder->executeQuery();
+                if (empty($chunk)) {
+                    break;
+                }
+
+                foreach ($chunk as $item) {
+                    yield $item;
+                    $processed++;
+                }
+
+                if (count($chunk) < $batchSize) {
+                    break;
+                }
+
+                $offset += $batchSize;
+                if ($originalTake !== null && $processed >= $originalTake) {
+                    break;
+                }
+            }
+        } finally {
+            $this->skipCount = $originalSkip;
+            $this->takeCount = $originalTake;
+        }
     }
 
     /**

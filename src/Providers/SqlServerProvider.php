@@ -2,7 +2,7 @@
 
 namespace Yakupeyisan\CodeIgniter4\EntityFramework\Providers;
 
-use CodeIgniter\Database\BaseConnection;
+use Yakupeyisan\CodeIgniter4\EntityFramework\Core\PdoAdapter;
 
 /**
  * SQL Server Database Provider
@@ -14,7 +14,7 @@ class SqlServerProvider implements DatabaseProvider
         return 'SQL Server';
     }
 
-    public function supports(BaseConnection $connection): bool
+    public function supports(PdoAdapter $connection): bool
     {
         $driver = strtolower($connection->getPlatform() ?? '');
         return $driver === 'sqlsrv' || $driver === 'sqlserver';
@@ -216,4 +216,5 @@ class SqlServerProvider implements DatabaseProvider
         return "SET DATEFORMAT YMD; SELECT * FROM {$quotedSchema}.{$quotedFunctionName}({$params})";
     }
 }
+
 

@@ -2,7 +2,7 @@
 
 namespace Yakupeyisan\CodeIgniter4\EntityFramework\Migrations;
 
-use CodeIgniter\Database\BaseConnection;
+use Yakupeyisan\CodeIgniter4\EntityFramework\Core\PdoAdapter;
 
 /**
  * Migration - Base migration class
@@ -10,9 +10,9 @@ use CodeIgniter\Database\BaseConnection;
  */
 abstract class Migration
 {
-    protected BaseConnection $connection;
+    protected PdoAdapter $connection;
 
-    public function __construct(BaseConnection $connection)
+    public function __construct(PdoAdapter $connection)
     {
         $this->connection = $connection;
     }

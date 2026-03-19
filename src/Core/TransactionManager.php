@@ -2,15 +2,13 @@
 
 namespace Yakupeyisan\CodeIgniter4\EntityFramework\Core;
 
-use CodeIgniter\Database\BaseConnection;
-
 /**
  * TransactionManager - Advanced transaction management
  * Provides nested transactions, savepoints, and transaction statistics
  */
 class TransactionManager
 {
-    private BaseConnection $connection;
+    private PdoAdapter $connection;
     private int $transactionLevel = 0;
     private array $savepoints = [];
     private array $statistics = [
@@ -21,7 +19,7 @@ class TransactionManager
         'savepoints_created' => 0,
     ];
 
-    public function __construct(BaseConnection $connection)
+    public function __construct(PdoAdapter $connection)
     {
         $this->connection = $connection;
     }

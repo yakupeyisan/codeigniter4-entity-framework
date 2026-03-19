@@ -2,7 +2,7 @@
 
 namespace Yakupeyisan\CodeIgniter4\EntityFramework\Providers;
 
-use CodeIgniter\Database\BaseConnection;
+use Yakupeyisan\CodeIgniter4\EntityFramework\Core\PdoAdapter;
 
 /**
  * PostgreSQL Database Provider
@@ -14,7 +14,7 @@ class PostgreSqlProvider implements DatabaseProvider
         return 'PostgreSQL';
     }
 
-    public function supports(BaseConnection $connection): bool
+    public function supports(PdoAdapter $connection): bool
     {
         $driver = strtolower($connection->getPlatform() ?? '');
         return $driver === 'postgre' || $driver === 'pgsql';
@@ -209,4 +209,5 @@ class PostgreSqlProvider implements DatabaseProvider
         return "SELECT * FROM {$quotedSchema}.{$quotedFunctionName}({$params})";
     }
 }
+
 
