@@ -2244,9 +2244,9 @@ class AdvancedQueryBuilder
                             $parsedSql = $parser->parse($predicate);
                             log_message('debug', 'executeRawSql - Parsed SQL: ' . ($parsedSql ?: '(empty)'));
                             
-                            // Expand NAVIGATION_IN:... placeholder when present (e.g. from in_array on navigation path)
-                            if (!empty($parsedSql) && strpos($parsedSql, 'NAVIGATION_IN:') === 0) {
-                                $expanded = $this->expandNavigationInForRawSql($parsedSql, $alias);
+                            // Expand NAVIGATION_IN placeholders (also inside wrappers like NOT (...)).
+                            if (!empty($parsedSql) && strpos($parsedSql, 'NAVIGATION_IN:') !== false) {
+                                $expanded = $this->expandNavigationInTokensForRawSql($parsedSql, $alias);
                                 if ($expanded !== null) {
                                     $parsedSql = $expanded;
                                     log_message('debug', 'executeRawSql - Expanded NAVIGATION_IN to: ' . $parsedSql);
@@ -9493,6 +9493,36 @@ class AdvancedQueryBuilder
         }
 
         return null;
+    }
+
+    /**
+     * Expand all NAVIGATION_IN tokens inside a parsed SQL condition.
+     * Supports direct form (NAVIGATION_IN:...) and wrapped form (e.g. NOT (NAVIGATION_IN:...)).
+     */
+    private function expandNavigationInTokensForRawSql(string $sqlCondition, string $mainAlias): ?string
+    {
+        if (strpos($sqlCondition, 'NAVIGATION_IN:') === false) {
+            return $sqlCondition;
+        }
+
+        $expandedCondition = preg_replace_callback(
+            '/NAVIGATION_IN:[A-Za-z0-9_.]+:[^)\s]+/',
+            function (array $m) use ($mainAlias) {
+                $expanded = $this->expandNavigationInForRawSql($m[0], $mainAlias);
+                return $expanded ?? $m[0];
+            },
+            $sqlCondition
+        );
+
+        if ($expandedCondition === null) {
+            return null;
+        }
+
+        if (strpos($expandedCondition, 'NAVIGATION_IN:') !== false) {
+            return $sqlCondition;
+        }
+
+        return $expandedCondition;
     }
 
     /**
