@@ -9421,13 +9421,35 @@ class AdvancedQueryBuilder
         $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
         $quotedMainAlias = $provider->escapeIdentifier($mainAlias);
 
-        // 3 parts: reference.reference.column (e.g. Employee.Company.PdksCompanyID)
+        // 3 parts: reference.reference.column
+        // - Non-collection nested: Employee.Company.PdksCompanyID (JOIN Employee ref + nested table)
+        // - Collection + scalar on junction row: Employee.EmployeeDepartments.DepartmentID (EXISTS EmployeeDepartments)
         if (count($pathParts) === 3) {
             $refNavInfo = $this->getNavigationInfo($pathParts[0]);
             if (!$refNavInfo || $refNavInfo['isCollection']) {
                 return null;
             }
             $nestedNavInfo = $this->getNavigationInfoForEntity($pathParts[1], $refNavInfo['entityType']);
+
+            // e.g. Employee.EmployeeDepartments.DepartmentID — filter on many-to-many / junction entity row
+            if ($nestedNavInfo && $nestedNavInfo['isCollection']) {
+                $collectionEntityReflection = new \ReflectionClass($nestedNavInfo['entityType']);
+                if (!$collectionEntityReflection->hasProperty($pathParts[2])) {
+                    return null;
+                }
+                $mainEntityReflection = new \ReflectionClass($this->entityType);
+                $mainFkColumn = $this->getColumnNameFromProperty($mainEntityReflection, $refNavInfo['foreignKey']);
+                $collFkColumn = $this->getColumnNameFromProperty($collectionEntityReflection, $nestedNavInfo['foreignKey']);
+                $filterColumn = $this->getColumnNameFromProperty($collectionEntityReflection, $pathParts[2]);
+                $collTableName = $this->context->getTableName($nestedNavInfo['entityType']);
+                $quotedCollTable = $provider->escapeIdentifier($collTableName);
+                $quotedMainFk = $provider->escapeIdentifier($mainFkColumn);
+                $quotedCollFk = $provider->escapeIdentifier($collFkColumn);
+                $quotedFilterCol = $provider->escapeIdentifier($filterColumn);
+
+                return "EXISTS (SELECT 1 FROM {$quotedCollTable} AS _ed WHERE _ed.{$quotedCollFk} = {$quotedMainAlias}.{$quotedMainFk} AND _ed.{$quotedFilterCol} IN ({$values}))";
+            }
+
             if (!$nestedNavInfo || $nestedNavInfo['isCollection']) {
                 return null;
             }
@@ -9447,6 +9469,7 @@ class AdvancedQueryBuilder
             $quotedNestedPk = $provider->escapeIdentifier($nestedPkColumn);
             $quotedFilterCol = $provider->escapeIdentifier($filterColumn);
             $existsSql = "EXISTS (SELECT 1 FROM {$quotedRefTable} AS _r INNER JOIN {$quotedNestedTable} AS _n ON _r.{$quotedRefFk} = _n.{$quotedNestedPk} WHERE _r.{$quotedMainFk} = {$quotedMainAlias}.{$quotedMainFk} AND _n.{$quotedFilterCol} IN ({$values}))";
+
             return $existsSql;
         }
 
