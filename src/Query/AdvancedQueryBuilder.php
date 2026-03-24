@@ -2131,6 +2131,34 @@ class AdvancedQueryBuilder
     }
 
     /**
+     * SQL Server session directives (SET DATEFORMAT, SET LANGUAGE, …) must not appear inside
+     * a subquery. fromFunction TVF SQL is "SET DATEFORMAT YMD; SELECT * FROM fn…"; when WHERE
+     * is applied we wrap as SELECT * FROM ( … ) AS t0 — SET inside parentheses is invalid.
+     * Execute SET statements on the connection first, return only the SELECT portion.
+     */
+    private function executeSessionStatementsAndStripFromSql(string $sql): string
+    {
+        if (stripos($sql, 'SET ') === false) {
+            return $sql;
+        }
+        $parts = array_map('trim', explode(';', $sql));
+        $selectParts = [];
+        foreach ($parts as $part) {
+            if ($part === '') {
+                continue;
+            }
+            if (stripos($part, 'SET ') === 0) {
+                $this->connection->query($part);
+                log_message('debug', 'executeRawSql - Executed session statement: ' . $part);
+            } else {
+                $selectParts[] = $part;
+            }
+        }
+        $out = implode('; ', $selectParts);
+        return $out !== '' ? $out : $sql;
+    }
+
+    /**
      * Execute raw SQL
      */
     private function executeRawSql(): array
@@ -2140,6 +2168,9 @@ class AdvancedQueryBuilder
             $sql = $this->rawSql;
             log_message('debug','Generated Sql Query: '.$sql);
             $parameters = $this->rawSqlParameters;
+
+            $sql = $this->executeSessionStatementsAndStripFromSql($sql);
+            log_message('debug', 'executeRawSql - SQL after session SET strip: ' . $sql);
             
             // If we have WHERE clauses, wrap the raw SQL in a subquery and apply WHERE clauses
             if (!empty($this->wheres)) {
