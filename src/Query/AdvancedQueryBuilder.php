@@ -2244,6 +2244,15 @@ class AdvancedQueryBuilder
                             $parsedSql = $parser->parse($predicate);
                             log_message('debug', 'executeRawSql - Parsed SQL: ' . ($parsedSql ?: '(empty)'));
                             
+                            // Expand NAVIGATION placeholders (also inside wrappers like NOT (...)).
+                            if (!empty($parsedSql) && strpos($parsedSql, 'NAVIGATION:') !== false) {
+                                $expandedNav = $this->expandNavigationTokenForRawSql($parsedSql, $alias);
+                                if ($expandedNav !== null) {
+                                    $parsedSql = $expandedNav;
+                                    log_message('debug', 'executeRawSql - Expanded NAVIGATION to: ' . $parsedSql);
+                                }
+                            }
+
                             // Expand NAVIGATION_IN placeholders (also inside wrappers like NOT (...)).
                             if (!empty($parsedSql) && strpos($parsedSql, 'NAVIGATION_IN:') !== false) {
                                 $expanded = $this->expandNavigationInTokensForRawSql($parsedSql, $alias);
@@ -9523,6 +9532,99 @@ class AdvancedQueryBuilder
         }
 
         return $expandedCondition;
+    }
+
+    /**
+     * Expand NAVIGATION:... condition to real SQL for raw SQL / executeRawSql context.
+     * Supports direct and NOT (...) wrapped forms.
+     */
+    private function expandNavigationTokenForRawSql(string $sqlCondition, string $mainAlias): ?string
+    {
+        $trimmed = trim($sqlCondition);
+        $isNotWrapped = false;
+        $inner = $trimmed;
+
+        if (preg_match('/^NOT\s*\((.*)\)$/is', $trimmed, $m)) {
+            $isNotWrapped = true;
+            $inner = trim($m[1]);
+        }
+
+        if (!preg_match('/^NAVIGATION:([^\s]+)\s+(.+)$/is', $inner, $navMatches)) {
+            return null;
+        }
+
+        $navPath = $navMatches[1];
+        $sqlOperator = trim($navMatches[2]);
+        $pathParts = explode('.', $navPath);
+        $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
+        $quotedMainAlias = $provider->escapeIdentifier($mainAlias);
+
+        $expanded = null;
+
+        // 2 parts: reference.column (e.g. Employee.Name)
+        if (count($pathParts) === 2) {
+            $navInfo = $this->getNavigationInfo($pathParts[0]);
+            if ($navInfo && !$navInfo['isCollection']) {
+                $mainEntityReflection = new \ReflectionClass($this->entityType);
+                $refEntityReflection = new \ReflectionClass($navInfo['entityType']);
+                $mainFkColumn = $this->getColumnNameFromProperty($mainEntityReflection, $navInfo['foreignKey']);
+                $refColumn = $this->getColumnNameFromProperty($refEntityReflection, $pathParts[1]);
+                $refTableName = $this->context->getTableName($navInfo['entityType']);
+                $refPkColumn = $this->getPrimaryKeyColumnName($refEntityReflection);
+                $quotedRefTable = $provider->escapeIdentifier($refTableName);
+                $quotedMainFk = $provider->escapeIdentifier($mainFkColumn);
+                $quotedRefPk = $provider->escapeIdentifier($refPkColumn);
+                $quotedRefCol = $provider->escapeIdentifier($refColumn);
+                $expanded = "EXISTS (SELECT 1 FROM {$quotedRefTable} AS _r WHERE _r.{$quotedRefPk} = {$quotedMainAlias}.{$quotedMainFk} AND _r.{$quotedRefCol} {$sqlOperator})";
+            }
+        }
+        // 3 parts: collection.reference.column (e.g. Employee.EmployeeDepartments.Department.DepartmentName)
+        elseif (count($pathParts) >= 3) {
+            $refNavInfo = $this->getNavigationInfo($pathParts[0]);
+            if ($refNavInfo && !$refNavInfo['isCollection']) {
+                $nestedNavInfo = $this->getNavigationInfoForEntity($pathParts[1], $refNavInfo['entityType']);
+                if ($nestedNavInfo && $nestedNavInfo['isCollection'] && isset($pathParts[2])) {
+                    // collection scalar column on junction entity
+                    $collectionEntityReflection = new \ReflectionClass($nestedNavInfo['entityType']);
+                    if ($collectionEntityReflection->hasProperty($pathParts[2])) {
+                        $mainEntityReflection = new \ReflectionClass($this->entityType);
+                        $mainFkColumn = $this->getColumnNameFromProperty($mainEntityReflection, $refNavInfo['foreignKey']);
+                        $collFkColumn = $this->getColumnNameFromProperty($collectionEntityReflection, $nestedNavInfo['foreignKey']);
+                        $filterColumn = $this->getColumnNameFromProperty($collectionEntityReflection, $pathParts[2]);
+                        $collTableName = $this->context->getTableName($nestedNavInfo['entityType']);
+                        $quotedCollTable = $provider->escapeIdentifier($collTableName);
+                        $quotedMainFk = $provider->escapeIdentifier($mainFkColumn);
+                        $quotedCollFk = $provider->escapeIdentifier($collFkColumn);
+                        $quotedFilterCol = $provider->escapeIdentifier($filterColumn);
+                        $expanded = "EXISTS (SELECT 1 FROM {$quotedCollTable} AS _ed WHERE _ed.{$quotedCollFk} = {$quotedMainAlias}.{$quotedMainFk} AND _ed.{$quotedFilterCol} {$sqlOperator})";
+                    }
+                } elseif ($nestedNavInfo && !$nestedNavInfo['isCollection'] && isset($pathParts[2])) {
+                    // reference.reference.column
+                    $mainEntityReflection = new \ReflectionClass($this->entityType);
+                    $refEntityReflection = new \ReflectionClass($refNavInfo['entityType']);
+                    $nestedEntityReflection = new \ReflectionClass($nestedNavInfo['entityType']);
+                    $mainFkColumn = $this->getColumnNameFromProperty($mainEntityReflection, $refNavInfo['foreignKey']);
+                    $refFkColumn = $this->getColumnNameFromProperty($refEntityReflection, $nestedNavInfo['foreignKey']);
+                    $nestedPkColumn = $this->getPrimaryKeyColumnName($nestedEntityReflection);
+                    $filterColumn = $this->getColumnNameFromProperty($nestedEntityReflection, $pathParts[2]);
+                    $refTableName = $this->context->getTableName($refNavInfo['entityType']);
+                    $nestedTableName = $this->context->getTableName($nestedNavInfo['entityType']);
+                    $quotedRefTable = $provider->escapeIdentifier($refTableName);
+                    $quotedNestedTable = $provider->escapeIdentifier($nestedTableName);
+                    $quotedMainFk = $provider->escapeIdentifier($mainFkColumn);
+                    $quotedRefFk = $provider->escapeIdentifier($refFkColumn);
+                    $quotedNestedPk = $provider->escapeIdentifier($nestedPkColumn);
+                    $quotedFilterCol = $provider->escapeIdentifier($filterColumn);
+                    $expanded = "EXISTS (SELECT 1 FROM {$quotedRefTable} AS _r INNER JOIN {$quotedNestedTable} AS _n ON _r.{$quotedRefFk} = _n.{$quotedNestedPk} WHERE _r.{$quotedMainFk} = {$quotedMainAlias}.{$quotedMainFk} AND _n.{$quotedFilterCol} {$sqlOperator})";
+                }
+            }
+        }
+
+        if ($expanded === null) {
+            return null;
+        }
+
+        return $isNotWrapped ? "NOT ({$expanded})" : $expanded;
     }
 
     /**
