@@ -2500,25 +2500,48 @@ class AdvancedQueryBuilder
             $entity = $reflection->newInstance();
             
             foreach ($row as $column => $value) {
-                // Convert column name to property name (camelCase)
-                $propertyName = $this->columnToProperty($column);
-                
-                if ($reflection->hasProperty($propertyName)) {
-                    $property = $reflection->getProperty($propertyName);
-                    $property->setAccessible(true);
-                    
-                    // Type conversion
-                    $type = $this->getPropertyType($property);
-                    $value = $this->convertValue($value, $type);
-                    
-                    $property->setValue($entity, $value);
+                if (is_string($column)) {
+                    $column = trim($column, "[]\t\n\r\0\x0B");
                 }
+                // Convert column name to property name (camelCase)
+                $propertyName = $this->columnToProperty((string) $column);
+                $resolvedName = $this->resolveEntityPropertyName($reflection, $propertyName);
+                if ($resolvedName === null) {
+                    continue;
+                }
+                $property = $reflection->getProperty($resolvedName);
+                $property->setAccessible(true);
+                
+                // Type conversion
+                $type = $this->getPropertyType($property);
+                $value = $this->convertValue($value, $type);
+                
+                $property->setValue($entity, $value);
             }
             
             $entities[] = $entity;
         }
         
         return $entities;
+    }
+
+    /**
+     * ODBC/SQL Server may return column keys in a different case than entity properties (e.g. employeeid vs EmployeeID).
+     */
+    private function resolveEntityPropertyName(\ReflectionClass $reflection, string $propertyName): ?string
+    {
+        if ($reflection->hasProperty($propertyName)) {
+            return $propertyName;
+        }
+        foreach ($reflection->getProperties() as $prop) {
+            if ($prop->isStatic()) {
+                continue;
+            }
+            if (strcasecmp($prop->getName(), $propertyName) === 0) {
+                return $prop->getName();
+            }
+        }
+        return null;
     }
 
     /**
