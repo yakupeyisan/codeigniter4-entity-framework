@@ -3711,6 +3711,34 @@ class AdvancedQueryBuilder
         $quotedFkColumn = $this->connection->escapeIdentifiers($fkColumnName);
         $quotedRelatedIdColumn = $this->connection->escapeIdentifiers($relatedIdColumn);
         $quotedMainIdColumn = $this->connection->escapeIdentifiers($mainIdColumn);
+
+        // If include() has a custom join condition for this navigation, prefer it.
+        // This is required for non-standard relations like AccessEvent -> Terminal
+        // where join is DeviceSerial = SerialNumber (not FK by property name).
+        $customJoinCondition = null;
+        if (!empty($this->includes) && is_array($this->includes)) {
+            foreach ($this->includes as $include) {
+                if (!is_array($include)) {
+                    continue;
+                }
+                if (($include['path'] ?? null) === $navigationProperty && isset($include['joinCondition'])) {
+                    $customJoinCondition = (string) $include['joinCondition'];
+                    break;
+                }
+            }
+        }
+        if ($customJoinCondition !== null && trim($customJoinCondition) !== '') {
+            $joinCondition = str_replace('{alias}', $quotedMainTable, $customJoinCondition);
+            $joinCondition = str_replace('{relatedAlias}', $quotedRelatedTable, $joinCondition);
+            $builder->join($relatedTableName, $joinCondition, 'LEFT');
+            log_message('debug', "Added JOIN (custom): {$relatedTableName} ON {$joinCondition}");
+            $this->requiredJoins[$joinKey] = [
+                'table' => $relatedTableName,
+                'alias' => $relatedTableName,
+                'entityType' => $relatedEntityType
+            ];
+            return;
+        }
         
         if ($isCollection) {
             // One-to-many: Join on related table's foreign key
