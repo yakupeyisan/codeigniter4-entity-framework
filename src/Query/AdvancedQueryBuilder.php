@@ -3728,8 +3728,10 @@ class AdvancedQueryBuilder
             }
         }
         if ($customJoinCondition !== null && trim($customJoinCondition) !== '') {
-            $joinCondition = str_replace('{alias}', $quotedMainTable, $customJoinCondition);
-            $joinCondition = str_replace('{relatedAlias}', $quotedRelatedTable, $joinCondition);
+            // Query Builder count() path expects plain table identifiers here;
+            // using fully escaped/schema-qualified identifier may collapse to ".Column".
+            $joinCondition = str_replace('{alias}', $mainTableName, $customJoinCondition);
+            $joinCondition = str_replace('{relatedAlias}', $relatedTableName, $joinCondition);
             $builder->join($relatedTableName, $joinCondition, 'LEFT');
             log_message('debug', "Added JOIN (custom): {$relatedTableName} ON {$joinCondition}");
             $this->requiredJoins[$joinKey] = [
