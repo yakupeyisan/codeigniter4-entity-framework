@@ -373,6 +373,37 @@ class ExpressionParser
         // Handle null comparisons FIRST - BEFORE method calls (for navigation properties)
         // Pattern: $x->NavProp->Property == null or $x->NavProp->Property === null
         // This must be checked before parseMethodCall to prevent incorrect parsing
+        // IMPORTANT: !== / != must be checked before === / ==
+        // otherwise expressions like "$x->OutDate !== null" can be
+        // incorrectly matched as "=== null" with a trailing "!" in left side.
+        if (preg_match('/^(.+?)\s*!==\s*null$/i', $expression, $matches)) {
+            $property = trim($matches[1]);
+            $propertySql = $this->parsePropertyAccess($property);
+            if (!empty($propertySql)) {
+                if (preg_match('/^[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*$|^\[[^\]]+\]\.\[[^\]]+\]$/', $propertySql)) {
+                    log_message('debug', "parseExpression - null comparison (!==) result: {$propertySql} IS NOT NULL");
+                    return "{$propertySql} IS NOT NULL";
+                }
+                if (preg_match('/^NAVIGATION:/', $propertySql)) {
+                    log_message('debug', "parseExpression - null comparison (!==) with navigation result: {$propertySql} IS NOT NULL");
+                    return "{$propertySql} IS NOT NULL";
+                }
+            }
+        }
+        if (preg_match('/^(.+?)\s*!=\s*null$/i', $expression, $matches)) {
+            $property = trim($matches[1]);
+            $propertySql = $this->parsePropertyAccess($property);
+            if (!empty($propertySql)) {
+                if (preg_match('/^[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*$|^\[[^\]]+\]\.\[[^\]]+\]$/', $propertySql)) {
+                    log_message('debug', "parseExpression - null comparison (!=) result: {$propertySql} IS NOT NULL");
+                    return "{$propertySql} IS NOT NULL";
+                }
+                if (preg_match('/^NAVIGATION:/', $propertySql)) {
+                    log_message('debug', "parseExpression - null comparison (!=) with navigation result: {$propertySql} IS NOT NULL");
+                    return "{$propertySql} IS NOT NULL";
+                }
+            }
+        }
         if (preg_match('/^(.+?)\s*===\s*null$/i', $expression, $matches)) {
             $property = trim($matches[1]);
             $propertySql = $this->parsePropertyAccess($property);
@@ -1067,6 +1098,7 @@ class ExpressionParser
                         $valuesArray = $this->variableValues[$varName];
                         $valuesSql = [];
                         foreach ($valuesArray as $value) {
+                            $value = $this->unwrapSelectOptionItem($value);
                             // Filter out invalid values like 'undefined', 'null', empty strings
                             if (is_string($value) && in_array(strtolower($value), ['undefined', 'null', ''])) {
                                 log_message('debug', "parseIn - filtering out invalid value: '{$value}'");
@@ -1082,6 +1114,9 @@ class ExpressionParser
                                 $valuesSql[] = $value ? '1' : '0';
                             } elseif (is_null($value)) {
                                 $valuesSql[] = 'NULL';
+                            } elseif (is_array($value) || is_object($value)) {
+                                log_message('debug', 'parseIn - skipping non-scalar value in IN list after unwrap');
+                                continue;
                             } else {
                                 $value = str_replace("'", "''", (string)$value);
                                 $valuesSql[] = "'{$value}'";
@@ -1108,6 +1143,7 @@ class ExpressionParser
                 $valuesArray = $this->variableValues[$varName];
                 $valuesSql = [];
                 foreach ($valuesArray as $value) {
+                    $value = $this->unwrapSelectOptionItem($value);
                     // Filter out invalid values like 'undefined', 'null', empty strings
                     if (is_string($value) && in_array(strtolower($value), ['undefined', 'null', ''])) {
                         log_message('debug', "parseIn - filtering out invalid value: '{$value}'");
@@ -1123,6 +1159,9 @@ class ExpressionParser
                         $valuesSql[] = $value ? '1' : '0';
                     } elseif (is_null($value)) {
                         $valuesSql[] = 'NULL';
+                    } elseif (is_array($value) || is_object($value)) {
+                        log_message('debug', 'parseIn - skipping non-scalar value in IN list after unwrap');
+                        continue;
                     } else {
                         $value = str_replace("'", "''", (string)$value);
                         $valuesSql[] = "'{$value}'";
@@ -1411,6 +1450,33 @@ class ExpressionParser
     }
 
     /**
+     * Unwrap UI / enum filter values shaped like Select2 options: { id, text }.
+     */
+    private function unwrapSelectOptionItem(mixed $value): mixed
+    {
+        if (is_array($value)) {
+            if (array_key_exists('id', $value)) {
+                return $value['id'];
+            }
+            if (array_key_exists('text', $value)) {
+                return $value['text'];
+            }
+
+            return $value;
+        }
+        if (is_object($value)) {
+            if (property_exists($value, 'id')) {
+                return $value->id;
+            }
+            if (property_exists($value, 'text')) {
+                return $value->text;
+            }
+        }
+
+        return $value;
+    }
+
+    /**
      * Parse value (literal, variable, etc.)
      */
     private function parseValue(string $value): string
@@ -1452,6 +1518,7 @@ class ExpressionParser
             // Check if we have the value in variableValues
             if (isset($this->variableValues[$varName])) {
                 $varValue = $this->variableValues[$varName];
+                $varValue = $this->unwrapSelectOptionItem($varValue);
                 log_message('debug', "parseValue - found value for \${$varName}: " . (is_scalar($varValue) ? $varValue : gettype($varValue)));
                 
                 // Parse the actual value
@@ -1467,6 +1534,9 @@ class ExpressionParser
                 } elseif (is_object($varValue)) {
                     // Objects should not be passed as variable values - log error and return NULL
                     log_message('error', "parseValue - object of type " . get_class($varValue) . " passed as variable value for \${$varName}. Objects cannot be converted to SQL values.");
+                    return 'NULL';
+                } elseif (is_array($varValue)) {
+                    log_message('error', "parseValue - array passed as variable value for \${$varName}. Arrays cannot be converted to a single SQL value.");
                     return 'NULL';
                 } else {
                     $varValue = str_replace("'", "''", (string)$varValue);
