@@ -3023,7 +3023,7 @@ class AdvancedQueryBuilder
                         log_message('debug', "applySimpleWhereWithParser - navigation property path detected: {$navPath}, values: {$values}");
                         
                         // Parse navigation property path using recursive method
-                        $pathParts = explode('.', $navPath);
+                        $pathParts = $this->stripRedundantRootEntityFromPathParts(explode('.', $navPath));
                         
                         // Try recursive method first (supports any depth)
                         $recursiveCondition = $this->buildNavigationPathConditionRecursive($pathParts, $values, $builder);
@@ -9456,7 +9456,7 @@ class AdvancedQueryBuilder
         if ($values === '') {
             return '1=0';
         }
-        $pathParts = explode('.', $navPath);
+        $pathParts = $this->stripRedundantRootEntityFromPathParts(explode('.', $navPath));
         $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
         $quotedMainAlias = $provider->escapeIdentifier($mainAlias);
 
@@ -9873,7 +9873,7 @@ class AdvancedQueryBuilder
                         log_message('debug', "convertSimpleWhereToSql - navigation property path detected: {$navPath}, values: {$values}");
                         
                         // Parse navigation property path
-                        $pathParts = explode('.', $navPath);
+                        $pathParts = $this->stripRedundantRootEntityFromPathParts(explode('.', $navPath));
                         
                         // Handle reference navigation property (e.g., "Kadro.ID")
                         if (count($pathParts) === 2) {
@@ -12394,6 +12394,31 @@ class AdvancedQueryBuilder
         }
         
         return null;
+    }
+
+    /**
+     * Remove a redundant first segment when the client sends root-qualified paths (e.g. "Employee.Company.Id")
+     * while the query entity is already Employee. Only strips when the first segment is not a navigation property
+     * on the root entity but matches the root entity's short class name (e.g. Card -> Employee keeps "Employee").
+     *
+     * @param string[] $pathParts
+     * @return string[]
+     */
+    private function stripRedundantRootEntityFromPathParts(array $pathParts): array
+    {
+        if (count($pathParts) < 2) {
+            return $pathParts;
+        }
+        $first = $pathParts[0];
+        if ($this->getNavigationInfo($first) !== null) {
+            return $pathParts;
+        }
+        $shortName = (new \ReflectionClass($this->entityType))->getShortName();
+        if (strcasecmp($first, $shortName) === 0) {
+            array_shift($pathParts);
+        }
+
+        return $pathParts;
     }
 
     /**
