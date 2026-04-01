@@ -5215,15 +5215,13 @@ class AdvancedQueryBuilder
                 $refAlias = $referenceNavAliases[$navPath];
                 $refTableName = $this->context->getTableName($navInfo['entityType']);
                 
-                // Check if custom joinCondition is provided in include
-                $customJoinCondition = null;
-                foreach ($this->includes as $include) {
-                    $includeNavPath = $include['path'] ?? $include['navigation'] ?? null;
-                    if ($includeNavPath === $navPath && isset($include['joinCondition'])) {
-                        $customJoinCondition = $include['joinCondition'];
-                        break;
-                    }
-                }
+                $includeConfig = $this->findIncludeConfig($navPath);
+                $customJoinCondition = $includeConfig['joinCondition'] ?? null;
+                $refTableName = $this->resolveSpecialReferenceTableExpression(
+                    $navPath,
+                    $refTableName,
+                    $includeConfig['whereClause'] ?? null
+                );
                 
                 // Determine parent alias for JOIN condition
                 // For nested navigations (e.g., Card.Employee), use parent navigation's alias
@@ -5262,7 +5260,7 @@ class AdvancedQueryBuilder
                 $isInWhere = in_array($navPath, $navigationPathsInWhere);
                 $isThenInclude = in_array($navPath, $thenIncludePaths);
                 $joinType = $this->getJoinType($navPath, $navInfo, $isInWhere, $isThenInclude);
-                $quotedRefTableName = $provider->escapeIdentifier($refTableName);
+                $quotedRefTableName = $this->quoteTableNameOrExpression($provider, $refTableName);
                 $quotedRefAlias = $provider->escapeIdentifier($refAlias);
                 $joinSql = "{$joinType} {$quotedRefTableName} AS {$quotedRefAlias} ON {$joinCondition}";
                 $mainJoins[] = $joinSql;
@@ -6010,6 +6008,11 @@ class AdvancedQueryBuilder
                 if ($navInfo && !$navInfo['isCollection']) {
                     $refAlias = $referenceNavAliases[$navPath];
                     $refTableName = $this->context->getTableName($navInfo['entityType']);
+                    $refTableName = $this->resolveSpecialReferenceTableExpression(
+                        $navPath,
+                        $refTableName,
+                        $include['whereClause'] ?? null
+                    );
                     
                     // Check if custom joinCondition is provided in include
                     $customJoinCondition = $include['joinCondition'] ?? null;
@@ -6028,7 +6031,9 @@ class AdvancedQueryBuilder
                     $isInWhere = in_array($navPath, $navigationPathsInWhere);
                     $isThenInclude = in_array($navPath, $thenIncludePaths);
                     $joinType = $this->getJoinType($navPath, $navInfo, $isInWhere, $isThenInclude);
-                    $mainJoins[] = "{$joinType} [{$refTableName}] AS [{$refAlias}] ON {$joinCondition}";
+                    $quotedRefTableName = $this->quoteTableNameOrExpression($provider, $refTableName);
+                    $quotedRefAlias = $provider->escapeIdentifier($refAlias);
+                    $mainJoins[] = "{$joinType} {$quotedRefTableName} AS {$quotedRefAlias} ON {$joinCondition}";
                 }
             }
         }
@@ -12742,6 +12747,53 @@ class AdvancedQueryBuilder
         }
         
         return null;
+    }
+
+    /**
+     * Find include configuration by exact navigation path.
+     */
+    private function findIncludeConfig(string $navPath): ?array
+    {
+        foreach ($this->includes as $include) {
+            $includeNavPath = $include['path'] ?? $include['navigation'] ?? null;
+            if ($includeNavPath === $navPath) {
+                return $include;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Resolve special reference table expressions (TVF, etc.).
+     */
+    private function resolveSpecialReferenceTableExpression(string $navPath, string $defaultTableName, ?string $includeWhereClause = null): string
+    {
+        // EmployeeLastAccessEvent was converted from a view to TVF.
+        if ($navPath !== 'EmployeeLastAccessEvent') {
+            return $defaultTableName;
+        }
+
+        $dateValue = $includeWhereClause !== null ? trim((string)$includeWhereClause) : '';
+        if ($dateValue === '') {
+            return "fnInOutAccessEvents(GETDATE())";
+        }
+
+        $escapedDate = str_replace("'", "''", $dateValue);
+        return "fnInOutAccessEvents('{$escapedDate}')";
+    }
+
+    /**
+     * Quote identifier unless it's a known raw SQL expression.
+     */
+    private function quoteTableNameOrExpression($provider, string $tableNameOrExpression): string
+    {
+        $trimmed = trim($tableNameOrExpression);
+        if (stripos($trimmed, 'fnInOutAccessEvents(') === 0) {
+            return $trimmed;
+        }
+
+        return $provider->escapeIdentifier($tableNameOrExpression);
     }
 }
 
