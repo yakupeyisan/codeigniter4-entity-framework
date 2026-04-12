@@ -1355,10 +1355,13 @@ class AdvancedQueryBuilder
             $this->logSlowQuery($totalTime);
         }
         
-        // Log performance info if debug mode
+        // Log performance info if debug mode (include full SQL on same line as timing; concat SQL so % in literals cannot break sprintf)
         if (defined('CI_DEBUG') && CI_DEBUG === true) {
-            $this->debugLog(sprintf(
-                'Query Performance - Entity: %s, Type: %s, Total: %.2fms, SQL: %.2fms, Mapping: %.2fms, Parsing: %.2fms, Rows: %d',
+            $sqlFull = (string) ($this->currentQueryStats['sqlFull'] ?? $this->currentQueryStats['sql'] ?? '');
+            $sqlFullOneLine = preg_replace('/\s+/', ' ', trim(str_replace(["\r\n", "\n", "\r"], ' ', $sqlFull)));
+            $sqlPart = $sqlFullOneLine !== '' ? $sqlFullOneLine : '(n/a)';
+            $perfLine = sprintf(
+                'Query Performance - Entity: %s, Type: %s, Total: %.2fms, SQL: %.2fms, Mapping: %.2fms, Parsing: %.2fms, Rows: %d | Query: ',
                 $this->currentQueryStats['entityType'] ?? 'Unknown',
                 $this->currentQueryStats['queryType'] ?? 'Unknown',
                 $totalTime * 1000,
@@ -1366,7 +1369,8 @@ class AdvancedQueryBuilder
                 $mappingTime * 1000,
                 ($parsingTime ?? 0) * 1000,
                 $this->currentQueryStats['rowCount'] ?? 0
-            ));
+            );
+            $this->debugLog($perfLine . $sqlPart);
         }
     }
 
@@ -1611,17 +1615,23 @@ class AdvancedQueryBuilder
             $queryEndTime = microtime(true);
             $queryExecutionTime = $queryEndTime - $queryStartTime;
             
+            // Use connection last query (reliable after execution; getCompiledSelect before get() can differ by driver/CI version)
+            $lastQ = $this->connection->getLastQuery();
+            $sql = ($lastQ !== false && $lastQ !== null) ? (string) $lastQ : $builder->getCompiledSelect(false);
+            
             // Track SQL execution time
-            $sql = $builder->getCompiledSelect(false);
             $this->currentQueryStats['sqlExecutionTime'] = $queryExecutionTime;
             $this->currentQueryStats['sql'] = substr($sql, 0, 500);
+            $this->currentQueryStats['sqlFull'] = $sql;
             $this->currentQueryStats['rowCount'] = count($results);
         } catch (\Exception $e) {
             $queryEndTime = microtime(true);
             $queryExecutionTime = $queryEndTime - $queryStartTime;
-            $sql = $builder->getCompiledSelect(false);
+            $lastQ = $this->connection->getLastQuery();
+            $sql = ($lastQ !== false && $lastQ !== null) ? (string) $lastQ : $builder->getCompiledSelect(false);
             $this->currentQueryStats['sqlExecutionTime'] = $queryExecutionTime;
             $this->currentQueryStats['sql'] = substr($sql, 0, 500);
+            $this->currentQueryStats['sqlFull'] = $sql;
             log_message('error', 'SQL Query Error: ' . $e->getMessage());
             log_message('error', 'Failed SQL Query: ' . $sql);
             log_message('error', 'Query execution time: ' . number_format($queryExecutionTime * 1000, 2) . 'ms');
@@ -1705,9 +1715,6 @@ class AdvancedQueryBuilder
         $quotedTableName = $provider->escapeIdentifier($tableName);
         $quotedAliasForFrom = $provider->escapeIdentifier($mainAlias);
         $sql .= "FROM {$quotedTableName} AS {$quotedAliasForFrom}";
-        
-        // Debug log
-        log_message('debug', 'SensitiveValue masking SQL: ' . substr($sql, 0, 500));
         
         // Build WHERE clauses with performance tracking
         $parsingStartTime = microtime(true);
@@ -1827,12 +1834,14 @@ class AdvancedQueryBuilder
             // Track SQL execution time
             $this->currentQueryStats['sqlExecutionTime'] = $queryExecutionTime;
             $this->currentQueryStats['sql'] = substr($sql, 0, 500);
+            $this->currentQueryStats['sqlFull'] = $sql;
             $this->currentQueryStats['rowCount'] = count($results);
         } catch (\Exception $e) {
             $queryEndTime = microtime(true);
             $queryExecutionTime = $queryEndTime - $queryStartTime;
             $this->currentQueryStats['sqlExecutionTime'] = $queryExecutionTime;
             $this->currentQueryStats['sql'] = substr($sql, 0, 500);
+            $this->currentQueryStats['sqlFull'] = $sql;
             
             log_message('error', 'SQL Query Error: ' . $e->getMessage());
             log_message('error', 'Exception trace: ' . $e->getTraceAsString());
@@ -1970,12 +1979,14 @@ class AdvancedQueryBuilder
             // Track SQL execution time
             $this->currentQueryStats['sqlExecutionTime'] = $queryExecutionTime;
             $this->currentQueryStats['sql'] = substr($sql, 0, 500);
+            $this->currentQueryStats['sqlFull'] = $sql;
             $this->currentQueryStats['rowCount'] = count($results);
         } catch (\Exception $e) {
             $queryEndTime = microtime(true);
             $queryExecutionTime = $queryEndTime - $queryStartTime;
             $this->currentQueryStats['sqlExecutionTime'] = $queryExecutionTime;
             $this->currentQueryStats['sql'] = substr($sql, 0, 500);
+            $this->currentQueryStats['sqlFull'] = $sql;
             log_message('error', 'SQL Query Error: ' . $e->getMessage());
             log_message('error', 'Failed SQL Query: ' . $sql);
             log_message('error', 'Query execution time: ' . number_format($queryExecutionTime * 1000, 2) . 'ms');
@@ -2059,12 +2070,6 @@ class AdvancedQueryBuilder
         // Execute raw SQL with performance tracking
         $queryStartTime = microtime(true);
         try {
-            // Log SQL query before execution for debugging
-            $this->debugLog('Executing SQL Query: ' . substr($sql, 0, 1000));
-            if (strlen($sql) > 1000) {
-                $this->debugLog('SQL Query (continued): ' . substr($sql, 1000, 1000));
-            }
-            
             $query = $this->connection->query($sql);
             $results = $query->getResultArray();
             $queryEndTime = microtime(true);
@@ -2073,6 +2078,7 @@ class AdvancedQueryBuilder
             // Track SQL execution time
             $this->currentQueryStats['sqlExecutionTime'] = $queryExecutionTime;
             $this->currentQueryStats['sql'] = substr($sql, 0, 500);
+            $this->currentQueryStats['sqlFull'] = $sql;
             $this->currentQueryStats['rowCount'] = count($results);
             $this->currentQueryStats['queryType'] = 'EF_CORE_STYLE';
         } catch (\Exception $e) {
@@ -2080,6 +2086,7 @@ class AdvancedQueryBuilder
             $queryExecutionTime = $queryEndTime - $queryStartTime;
             $this->currentQueryStats['sqlExecutionTime'] = $queryExecutionTime;
             $this->currentQueryStats['sql'] = substr($sql, 0, 500);
+            $this->currentQueryStats['sqlFull'] = $sql;
             log_message('error', 'SQL Query Error: ' . $e->getMessage());
             log_message('error', 'SQL Query Error: ' . $e->getTraceAsString());
             log_message('error', 'Failed SQL Query: ' . $sql);
@@ -2090,8 +2097,6 @@ class AdvancedQueryBuilder
                 : \Exception::class;
             throw new $exceptionClass('EF Core style query execution failed: ' . $e->getMessage(), $sql, [], $e->getCode(), $e);
         }
-        // Log actual SQL executed
-        $this->debugLog('EF Core Style SQL executed: ' . substr($sql, 0, 500) . '...');
         
         // Log first result row structure for debugging
         if (!empty($results)) {
@@ -2412,6 +2417,7 @@ class AdvancedQueryBuilder
             // Track SQL execution time
             $this->currentQueryStats['sqlExecutionTime'] = $queryExecutionTime;
             $this->currentQueryStats['sql'] = substr($sql ?? $this->rawSql, 0, 500);
+            $this->currentQueryStats['sqlFull'] = (string) ($sql ?? $this->rawSql);
             $this->currentQueryStats['rowCount'] = count($results);
             $this->currentQueryStats['queryType'] = 'RAW_SQL';
         } catch (\Exception $e) {
@@ -2419,6 +2425,7 @@ class AdvancedQueryBuilder
             $queryExecutionTime = $queryEndTime - $queryStartTime;
             $this->currentQueryStats['sqlExecutionTime'] = $queryExecutionTime;
             $this->currentQueryStats['sql'] = substr($sql ?? $this->rawSql, 0, 500);
+            $this->currentQueryStats['sqlFull'] = (string) ($sql ?? $this->rawSql);
             log_message('error', 'SQL Query Error: ' . $e->getMessage());
             log_message('error', 'Failed SQL Query: ' . ($sql ?? $this->rawSql));
             log_message('error', 'SQL Parameters: ' . json_encode($parameters ?? $this->rawSqlParameters));
@@ -6952,8 +6959,6 @@ class AdvancedQueryBuilder
             }
         }
         
-        // Log the generated SQL for debugging
-        log_message('debug', 'Generated EF Core Style SQL: ' . $finalQuery);
         log_message('debug', 'buildEfCoreStyleQuery: ORDER BY columns: ' . implode(', ', $orderByColumns));
         
         return $finalQuery;
@@ -10965,14 +10970,15 @@ class AdvancedQueryBuilder
             $entityData = [];
             foreach ($entityColumns as $col) {
                 $prefixedCol = 's_' . $col;
-                if (isset($row[$prefixedCol])) {
-                    $entityData[$col] = $row[$prefixedCol];
+                [$foundCol, $colVal] = $this->getRowValueInsensitive($row, $prefixedCol);
+                if ($foundCol) {
+                    $entityData[$col] = $colVal;
                 }
             }
             
             // Get entity ID - it's prefixed with 's_' and uses the actual primary key column name
             $prefixedPrimaryKey = 's_' . $primaryKeyColumn;
-            $entityId = $row[$prefixedPrimaryKey] ?? null;
+            [, $entityId] = $this->getRowValueInsensitive($row, $prefixedPrimaryKey);
             if ($entityId === null) {
                 log_message('debug', "parseEfCoreStyleResults: Entity ID is null, looking for '{$prefixedPrimaryKey}'. Row keys: " . implode(', ', array_keys($row)));
                 log_message('debug', "parseEfCoreStyleResults: Available prefixed columns: " . implode(', ', array_filter(array_keys($row), function($key) { return str_starts_with($key, 's_'); })));
@@ -12270,6 +12276,25 @@ class AdvancedQueryBuilder
     }
 
     /**
+     * Read associative row value when the DB driver may use different key casing than our mapped names.
+     *
+     * @return array{0: bool, 1: mixed} [found, value]
+     */
+    private function getRowValueInsensitive(array $row, string $key): array
+    {
+        if (array_key_exists($key, $row)) {
+            return [true, $row[$key]];
+        }
+        foreach ($row as $k => $v) {
+            if (is_string($k) && strcasecmp($k, $key) === 0) {
+                return [true, $v];
+            }
+        }
+
+        return [false, null];
+    }
+
+    /**
      * Map database row to entity
      */
     private function mapRowToEntity(array $row, ReflectionClass $entityReflection): object
@@ -12282,9 +12307,9 @@ class AdvancedQueryBuilder
             }
             
             $columnName = $this->getColumnNameFromProperty($entityReflection, $property->getName());
-            if (isset($row[$columnName])) {
+            [$hasColumn, $value] = $this->getRowValueInsensitive($row, $columnName);
+            if ($hasColumn) {
                 $property->setAccessible(true);
-                $value = $row[$columnName];
                 
                 // Check if property has type and if null is allowed
                 $isNullable = false;
