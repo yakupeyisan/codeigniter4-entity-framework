@@ -693,8 +693,8 @@ class ExpressionParser
             '/^(.+?)\s*<=\s*(.+)$/' => '<=',
             '/^(.+?)\s*>=\s*(.+)$/' => '>=',
             '/^(.+?)\s*<\s*(.+)$/' => '<',
-            // For > operator, check that it's not part of -> (property access)
-            '/^(.+?)(?<!->)\s*>\s*(.+)$/' => '>',
+            // For > operator: must not be the > in PHP's -> (lookbehind is one char: not hyphen)
+            '/^(.+?)(?<!\-)\s*>\s*(.+)$/' => '>',
         ];
         
         foreach ($patterns as $pattern => $operator) {
@@ -1080,9 +1080,9 @@ class ExpressionParser
             return "{$propertySql} IN (" . implode(', ', $valuesArray) . ")";
         }
         
-        // Pattern 2: in_array($x->Property, $variable) - variable array
-        // Match: in_array($s->Id, $selectedShowIds) or in_array($s->Id, $selectedShowIds)
-        if (preg_match('/^in_array\((.+?),\s*\$([a-zA-Z_][a-zA-Z0-9_]*)\)$/i', $expression, $matches)) {
+        // Pattern 2: in_array($x->Property, $variable[, strict]) - variable array (third arg is PHP strict mode)
+        // Match: in_array($s->Id, $selectedShowIds) or in_array($s->Id, $selectedShowIds, true)
+        if (preg_match('/^in_array\((.+?),\s*\$([a-zA-Z_][a-zA-Z0-9_]*)(?:\s*,\s*(?:true|false|0|1))?\s*\)$/i', $expression, $matches)) {
             $property = trim($matches[1]);
             $varName = trim($matches[2]);
             $propertySql = $this->parsePropertyAccess($property);
