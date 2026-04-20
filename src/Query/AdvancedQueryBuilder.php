@@ -1485,6 +1485,8 @@ class AdvancedQueryBuilder
      */
     private function executeQuery(): array
     {
+        //setdateformat to mssqlDateFormat
+        $this->connection->query("SET DATEFORMAT " . env('app.mssqlDateFormat','Ymd'));
         // Initialize performance tracking
         $this->currentQueryStats = [
             'entityType' => $this->entityType,
@@ -1676,6 +1678,8 @@ class AdvancedQueryBuilder
      */
     private function executeQueryWithMasking(array $columnsWithProperties, ReflectionClass $entityReflection): array
     {
+        //setdateformat to mssqlDateFormat
+        $this->connection->query("SET DATEFORMAT " . env('app.mssqlDateFormat','Ymd'));
         $tableName = $this->context->getTableName($this->entityType);
         $mainAlias = 'main';
         $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
@@ -1881,6 +1885,8 @@ class AdvancedQueryBuilder
      */
     private function executeQueryWithRawJoins(): array
     {
+        //setdateformat to mssqlDateFormat
+        $this->connection->query("SET DATEFORMAT " . env('app.mssqlDateFormat','Ymd'));
         $tableName = $this->context->getTableName($this->entityType);
         $mainAlias = 'main';
         $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
@@ -2052,6 +2058,8 @@ class AdvancedQueryBuilder
      */
     private function executeEfCoreStyleQuery(): array
     {
+        //setdateformat to mssqlDateFormat
+        $this->connection->query("SET DATEFORMAT " . env('app.mssqlDateFormat','Ymd'));
         // Build EF Core style SQL query
         $sql = $this->buildEfCoreStyleQuery();
         
@@ -2143,6 +2151,8 @@ class AdvancedQueryBuilder
      */
     private function executeSessionStatementsAndStripFromSql(string $sql): string
     {
+        //setdateformat to mssqlDateFormat
+        $this->connection->query("SET DATEFORMAT " . env('app.mssqlDateFormat','Ymd'));
         if (stripos($sql, 'SET ') === false) {
             return $sql;
         }
@@ -2168,6 +2178,8 @@ class AdvancedQueryBuilder
      */
     private function executeRawSql(): array
     {
+        //setdateformat to mssqlDateFormat
+        $this->connection->query("SET DATEFORMAT " . env('app.mssqlDateFormat','Ymd'));
         $queryStartTime = microtime(true);
         try {
             $sql = $this->rawSql;
