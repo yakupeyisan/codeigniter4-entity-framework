@@ -363,6 +363,11 @@ class Queryable implements IQueryable
         return $this->queryBuilder->toSummary($sumFields, $groupFields);
     }
 
+    public function aggregateSelectFirstRow(string $selectListRaw, array $additionalJoinNavigationPaths = []): ?array
+    {
+        return $this->queryBuilder->aggregateSelectFirstRow($selectListRaw, $additionalJoinNavigationPaths);
+    }
+
     public function fromSqlRaw(string $sql, array $parameters = []): IQueryable
     {
         $this->queryBuilder->fromSqlRaw($sql, $parameters);

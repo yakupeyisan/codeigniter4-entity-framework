@@ -207,6 +207,15 @@ interface IQueryable
     public function toSummary(array $sumFields = [], array $groupFields = []): array;
 
     /**
+     * count() ile aynı JOIN/WHERE üzerinde tek satır aggregate SELECT (SUM vb.).
+     *
+     * @param list<string> $additionalJoinNavigationPaths WHERE’de geçmeyen ek kök join’ler.
+     *
+     * @return array<string, mixed>|null
+     */
+    public function aggregateSelectFirstRow(string $selectListRaw, array $additionalJoinNavigationPaths = []): ?array;
+
+    /**
      * Execute query and get count
      */
     public function count(): int;

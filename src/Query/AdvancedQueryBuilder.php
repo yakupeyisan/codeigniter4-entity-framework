@@ -834,6 +834,91 @@ class AdvancedQueryBuilder
     }
 
     /**
+     * JOIN + WHERE ile filtrelenmiş sorgu (count() ile aynı). aggregateSelectFirstRow ile SELECT … kullanılır.
+     *
+     * @param list<string> $additionalJoinNavigationPaths Örn. aggregate SELECT için `['Payment']` — WHERE’de geçmeyen kök navigasyon join’i (ExpressionParser `u.` üretmeden).
+     *
+     * @return \CodeIgniter\Database\BaseBuilder
+     */
+    private function prepareFilterBuilderForCountAggregate(array $additionalJoinNavigationPaths = [])
+    {
+        $tableName = $this->context->getTableName($this->entityType);
+        $builder = $this->connection->table($tableName);
+
+        // First pass: Detect all navigation property paths
+        $allNavigationPaths = [];
+        foreach ($this->wheres as $whereItem) {
+            $groupStart = is_array($whereItem) && isset($whereItem['groupStart']) ? $whereItem['groupStart'] : false;
+            $groupEnd = is_array($whereItem) && isset($whereItem['groupEnd']) ? $whereItem['groupEnd'] : false;
+
+            if ($groupStart || $groupEnd) {
+                continue;
+            }
+
+            $where = is_array($whereItem) ? $whereItem['predicate'] : $whereItem;
+
+            if ($where === null) {
+                continue;
+            }
+
+            $paths = $this->detectNavigationPaths($where);
+            foreach ($paths as $path) {
+                if (! in_array($path, $allNavigationPaths)) {
+                    $allNavigationPaths[] = $path;
+                }
+            }
+        }
+
+        foreach ($additionalJoinNavigationPaths as $path) {
+            if (is_string($path) && $path !== '' && ! in_array($path, $allNavigationPaths, true)) {
+                $allNavigationPaths[] = $path;
+            }
+        }
+
+        foreach ($allNavigationPaths as $path) {
+            $this->addJoinForNavigationPath($builder, $path);
+        }
+
+        foreach ($this->wheres as $index => $whereItem) {
+            $groupStart = is_array($whereItem) && isset($whereItem['groupStart']) ? $whereItem['groupStart'] : false;
+            $groupEnd = is_array($whereItem) && isset($whereItem['groupEnd']) ? $whereItem['groupEnd'] : false;
+
+            if ($groupStart) {
+                $builder->groupStart();
+                log_message('debug', "count(): Group start at index #{$index}");
+                continue;
+            }
+
+            if ($groupEnd) {
+                $builder->groupEnd();
+                log_message('debug', "count(): Group end at index #{$index}");
+                continue;
+            }
+
+            $where = is_array($whereItem) ? $whereItem['predicate'] : $whereItem;
+            $rawSql = is_array($whereItem) && isset($whereItem['rawSql']) ? $whereItem['rawSql'] : null;
+            $isOr = is_array($whereItem) && isset($whereItem['isOr']) ? $whereItem['isOr'] : false;
+
+            $whereToApply = $rawSql !== null ? $rawSql : $where;
+
+            log_message('debug', "count(): Processing where item #{$index}, isOr=" . ($isOr ? 'true' : 'false') . ", type=" . (is_string($whereToApply) ? 'raw SQL' : 'callable'));
+
+            if (is_string($whereToApply)) {
+                $this->applyWhere($builder, $whereToApply, $isOr);
+            } else {
+                $paths = $this->detectNavigationPaths($whereToApply);
+                if (! empty($paths)) {
+                    $this->applyNavigationWhereToSql($builder, $whereToApply, $paths);
+                } else {
+                    $this->applyWhere($builder, $whereToApply, $isOr);
+                }
+            }
+        }
+
+        return $builder;
+    }
+
+    /**
      * Execute and get count
      */
     public function count(): int
@@ -843,7 +928,8 @@ class AdvancedQueryBuilder
             try {
                 $result = $this->connection->query($sql, $this->rawSqlParameters);
                 $row = $result->getRowArray();
-                return (int)($row['count'] ?? 0);
+
+                return (int) ($row['count'] ?? 0);
             } catch (\Exception $e) {
                 log_message('error', 'SQL Query Error: ' . $e->getMessage());
                 log_message('error', 'Failed SQL Query: ' . $sql);
@@ -852,84 +938,41 @@ class AdvancedQueryBuilder
             }
         }
 
-        $tableName = $this->context->getTableName($this->entityType);
-        $builder = $this->connection->table($tableName);
-        
-        // First pass: Detect all navigation property paths
-        $allNavigationPaths = [];
-        foreach ($this->wheres as $whereItem) {
-            $groupStart = is_array($whereItem) && isset($whereItem['groupStart']) ? $whereItem['groupStart'] : false;
-            $groupEnd = is_array($whereItem) && isset($whereItem['groupEnd']) ? $whereItem['groupEnd'] : false;
-            
-            // Skip group markers (they don't have predicates)
-            if ($groupStart || $groupEnd) {
-                continue;
-            }
-            
-            $where = is_array($whereItem) ? $whereItem['predicate'] : $whereItem;
-            
-            // Skip if predicate is null
-            if ($where === null) {
-                continue;
-            }
-            
-            $paths = $this->detectNavigationPaths($where);
-            foreach ($paths as $path) {
-                if (!in_array($path, $allNavigationPaths)) {
-                    $allNavigationPaths[] = $path;
-                }
-            }
-        }
-        
-        // Add all JOINs first (before WHERE clauses)
-        foreach ($allNavigationPaths as $path) {
-            $this->addJoinForNavigationPath($builder, $path);
-        }
-        
-        // Second pass: Apply WHERE clauses (now JOINs are already added)
-        foreach ($this->wheres as $index => $whereItem) {
-            $groupStart = is_array($whereItem) && isset($whereItem['groupStart']) ? $whereItem['groupStart'] : false;
-            $groupEnd = is_array($whereItem) && isset($whereItem['groupEnd']) ? $whereItem['groupEnd'] : false;
-            
-            if ($groupStart) {
-                $builder->groupStart();
-                log_message('debug', "count(): Group start at index #{$index}");
-                continue;
-            }
-            
-            if ($groupEnd) {
-                $builder->groupEnd();
-                log_message('debug', "count(): Group end at index #{$index}");
-                continue;
-            }
-            
-            $where = is_array($whereItem) ? $whereItem['predicate'] : $whereItem;
-            $rawSql = is_array($whereItem) && isset($whereItem['rawSql']) ? $whereItem['rawSql'] : null;
-            $isOr = is_array($whereItem) && isset($whereItem['isOr']) ? $whereItem['isOr'] : false;
-            
-            // Use raw SQL if available, otherwise use predicate
-            $whereToApply = $rawSql !== null ? $rawSql : $where;
-            
-            log_message('debug', "count(): Processing where item #{$index}, isOr=" . ($isOr ? 'true' : 'false') . ", type=" . (is_string($whereToApply) ? 'raw SQL' : 'callable'));
-            
-            // If it's a string (raw SQL), apply directly
-            if (is_string($whereToApply)) {
-                $this->applyWhere($builder, $whereToApply, $isOr);
-            } else {
-                // Try to detect navigation property paths in predicate
-                $paths = $this->detectNavigationPaths($whereToApply);
-                if (!empty($paths)) {
-                    // Navigation property filter - convert to SQL
-                    $this->applyNavigationWhereToSql($builder, $whereToApply, $paths);
-                } else {
-                    // Simple property filter
-                    $this->applyWhere($builder, $whereToApply, $isOr);
-                }
-            }
-        }
-        
+        $builder = $this->prepareFilterBuilderForCountAggregate();
         log_message('debug', 'COUNT Query: ' . $builder->getCompiledSelect(false));
+
         return $builder->countAllResults();
+    }
+
+    /**
+     * count() ile aynı JOIN/WHERE sonrası tek satır aggregate SELECT (veritabanında SUM vb.).
+     * $selectListRaw örn. "SUM(a) AS x, SUM(b) AS y" — tablo/kolon adları çağıranın sorumluluğunda.
+     *
+     * @param list<string> $additionalJoinNavigationPaths WHERE’de geçmeyen ek kök join’ler (örn. `['Payment']`).
+     *
+     * @return array<string, mixed>|null
+     */
+    public function aggregateSelectFirstRow(string $selectListRaw, array $additionalJoinNavigationPaths = [])
+    {
+        if ($this->useRawSql) {
+            $sql = 'SELECT ' . $selectListRaw . ' FROM (' . $this->rawSql . ') AS __agg_sub';
+            try {
+                $result = $this->connection->query($sql, $this->rawSqlParameters);
+                $row = $result->getRowArray();
+
+                return $row !== null && $row !== [] ? $row : null;
+            } catch (\Exception $e) {
+                log_message('error', 'aggregateSelectFirstRow SQL Error: ' . $e->getMessage());
+                throw $e;
+            }
+        }
+
+        $builder = $this->prepareFilterBuilderForCountAggregate($additionalJoinNavigationPaths);
+        $builder->select($selectListRaw, false);
+        log_message('debug', 'aggregateSelectFirstRow: ' . $builder->getCompiledSelect(false));
+        $row = $builder->get()->getRowArray();
+
+        return $row !== null && $row !== [] ? $row : null;
     }
 
     /**
