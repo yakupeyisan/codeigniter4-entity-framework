@@ -848,12 +848,66 @@ trait JsonModeQueryTrait
             $sql = str_replace('[u].', '[' . $mainAlias . '].', $sql);
             $sql = str_replace('[U].', '[' . $mainAlias . '].', $sql);
 
+            // `InjectQuery` ile türetilen sanal kolonlar (Day/Time/DayName gibi) WHERE'de
+            // alias adıyla geçemez — SQL Server kolon takma adlarını WHERE'de çözümlemez.
+            // Bu yüzden parser'ın ürettiği `e0.Day` / `[e0].[Day]` referanslarını
+            // gerçek ifadeyle (`CONVERT(DATE, [e0].[EventTime])`) değiştiriyoruz.
+            $sql = $this->jsonRewriteInjectQueryReferences($sql, $mainAlias);
+
             return $this->jsonResolveNavigationTokens($sql, $refAliasByPath);
         } catch (\Throwable $e) {
             log_message('error', 'jsonParseCallableWhere: ' . $e->getMessage());
 
             throw $e;
         }
+    }
+
+    /**
+     * Ana entity'nin `#[InjectQuery]` property'lerine yapılan WHERE referanslarını
+     * gerçek SQL ifadesine çevirir. `e0.Day` / `[e0].[Day]` → `(CONVERT(DATE, [e0].[EventTime]))`.
+     *
+     * SELECT katmanı (`jsonAppendScalarSelects`) `... AS [Day]` üretir; ancak SQL Server
+     * column-alias'ları WHERE/JOIN klozlarında çözümleyemediği için filtreler
+     * (örn. AccessEvent.Day arasında BETWEEN) sanal kolonu doğrudan kullanırsa
+     * "Geçersiz sütun adı 'Day'" hatasını verir.
+     */
+    private function jsonRewriteInjectQueryReferences(string $sql, string $mainAlias): string
+    {
+        if ($sql === '') {
+            return $sql;
+        }
+        $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
+        $quotedAlias = $provider->escapeIdentifier($mainAlias);
+        $entityReflection = self::getCachedReflection($this->entityType);
+
+        foreach ($entityReflection->getProperties() as $property) {
+            $attrs = $property->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\InjectQuery::class);
+            if ($attrs === []) {
+                continue;
+            }
+            /** @var \Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\InjectQuery $injectAttr */
+            $injectAttr = $attrs[0]->newInstance();
+            $expression = trim((string) $injectAttr->expression);
+            if ($expression === '') {
+                continue;
+            }
+            $expression = str_replace('{alias}', $quotedAlias, $expression);
+            $propName = $property->getName();
+            $quotedProp = $provider->escapeIdentifier($propName);
+
+            // [e0].[Day] gibi escaped formu
+            $sql = str_replace($quotedAlias . '.' . $quotedProp, '(' . $expression . ')', $sql);
+
+            // e0.Day gibi unescaped formu (parser çıktısı tipik bu şekilde)
+            $unescaped = $mainAlias . '.' . $propName;
+            $sql = preg_replace(
+                '/(?<![\w\[])' . preg_quote($unescaped, '/') . '(?![\w\]])/',
+                '(' . $expression . ')',
+                $sql
+            ) ?? $sql;
+        }
+
+        return $sql;
     }
 
     /**
