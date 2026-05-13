@@ -257,8 +257,10 @@ class ExpressionParser
             // Remove any method calls or variable assignments that might have been captured from previous lines
             // Remove method calls like getQueryable(), toList(), etc. that are not part of the lambda expression
             $expression = preg_replace('/\b(getQueryable|toList|toArray|count|first|single|skip|take|include|thenInclude|orderBy|orderByDescending)\s*\([^)]*\)/i', '', $expression);
-            // Remove variable assignments that might have been captured
-            $expression = preg_replace('/\$[a-zA-Z_][a-zA-Z0-9_]*\s*=\s*[^;]+;/', '', $expression);
+            // Remove variable assignments that might have been captured (e.g. multi-line code preceding the lambda).
+            // Use negative lookbehind/lookahead so we do NOT match comparison operators (==, ===, !==, <=, >=) when
+            // a closure body like "$e->$key === $value" appears after the => arrow.
+            $expression = preg_replace('/\$[a-zA-Z_][a-zA-Z0-9_]*\s*(?<![=!<>])=(?!=)\s*[^;]+;/', '', $expression);
             // Remove any standalone method calls on variables that might have been captured
             $expression = preg_replace('/\$[a-zA-Z_][a-zA-Z0-9_]*\s*->\s*(getQueryable|toList|toArray|count|first|single|skip|take|include|thenInclude|orderBy|orderByDescending)\s*\([^)]*\)\s*;/', '', $expression);
             // Clean up any extra whitespace

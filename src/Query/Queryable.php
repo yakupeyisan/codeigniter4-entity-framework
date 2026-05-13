@@ -379,6 +379,31 @@ class Queryable implements IQueryable
         return $this->queryBuilder->toSql();
     }
 
+    public function toJson(): string
+    {
+        return $this->queryBuilder->toJson();
+    }
+
+    public function toJsonArray(): array
+    {
+        return $this->queryBuilder->toJsonArray();
+    }
+
+    public function firstJson(): ?string
+    {
+        return $this->queryBuilder->firstJson();
+    }
+
+    public function singleJson(): string
+    {
+        return $this->queryBuilder->singleJson();
+    }
+
+    public function toJsonSql(): string
+    {
+        return $this->queryBuilder->toJsonSql();
+    }
+
     /**
      * Analyze query execution plan
      */

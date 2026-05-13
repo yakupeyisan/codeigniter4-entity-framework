@@ -261,6 +261,31 @@ interface IQueryable
     public function toSql(): string;
 
     /**
+     * Execute on SQL Server with FOR JSON PATH; returns raw JSON (array payload as string).
+     */
+    public function toJson(): string;
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    public function toJsonArray(): array;
+
+    /**
+     * First row as JSON object string, or null if no rows.
+     */
+    public function firstJson(): ?string;
+
+    /**
+     * Exactly one row as JSON object string; throws if zero or more than one element.
+     */
+    public function singleJson(): string;
+
+    /**
+     * Compiled JSON-mode SQL (separate from classic toSql() cache keys).
+     */
+    public function toJsonSql(): string;
+
+    /**
      * Analyze query execution plan
      * Returns analysis with recommendations and warnings
      * 

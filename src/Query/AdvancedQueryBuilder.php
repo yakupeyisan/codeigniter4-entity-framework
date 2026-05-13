@@ -15,6 +15,8 @@ use ReflectionProperty;
  */
 class AdvancedQueryBuilder
 {
+    use JsonModeQueryTrait;
+
     private DbContext $context;
     private string $entityType;
     private BaseConnection $connection;
@@ -102,6 +104,16 @@ class AdvancedQueryBuilder
         $this->context = $context;
         $this->entityType = $entityType;
         $this->connection = $connection;
+    }
+
+    public function getContext(): DbContext
+    {
+        return $this->context;
+    }
+
+    public function getConnection(): BaseConnection
+    {
+        return $this->connection;
     }
 
     /**
@@ -7015,7 +7027,7 @@ class AdvancedQueryBuilder
         }
         
         log_message('debug', 'buildEfCoreStyleQuery: ORDER BY columns: ' . implode(', ', $orderByColumns));
-        
+        log_message('error', 'buildEfCoreStyleQuery: FINAL QUERY: ' . $finalQuery);
         return $finalQuery;
     }
 
@@ -9594,6 +9606,11 @@ class AdvancedQueryBuilder
             $quotedRefPk = $provider->escapeIdentifier($refPkColumn);
             $quotedRefCol = $provider->escapeIdentifier($refColumn);
             return "EXISTS (SELECT 1 FROM {$quotedRefTable} AS _r WHERE _r.{$quotedRefPk} = {$quotedMainAlias}.{$quotedMainFk} AND _r.{$quotedRefCol} IN ({$values}))";
+        }
+
+        // 4+ parts: e.g. Card filter on Employee.EmployeeDepartments.Department.DepartmentID (reference -> collection -> reference -> column)
+        if (count($pathParts) >= 4) {
+            return $this->buildNavigationPathConditionRecursive($pathParts, $values, null);
         }
 
         return null;
@@ -12528,9 +12545,127 @@ class AdvancedQueryBuilder
         if (count($pathParts) === 1) {
             return $this->buildReferenceNavigationCondition($pathParts[0], $columnName, $values, $builder);
         }
-        
+
+        // Pre-walk the chain to determine whether it is a pure-reference path (no collections).
+        // Pure-reference chains (e.g. PaymentOfVirtualPos.Employee.Kadro.ID) cannot rely on the
+        // legacy recursive descent because its leaf step calls buildReferenceNavigationCondition()
+        // which always resolves against the ROOT entity and therefore fails for deeply nested
+        // navigations. Instead, walk the chain and either:
+        //   - For builder-attached calls (CodeIgniter base builder used by count()): add chained
+        //     LEFT JOINs and emit a flat "[lastTable].[col] IN (...)" filter.
+        //   - For builder-less callers (raw SQL expanders): return null so the JSON pipeline's
+        //     alias-based resolver can handle it earlier.
+        $chain = [];
+        $currentEntity = $this->entityType;
+        $hasCollection = false;
+        foreach ($pathParts as $part) {
+            $navInfo = $this->getNavigationInfoForEntity($part, $currentEntity);
+            if (!$navInfo) {
+                $chain = null;
+                break;
+            }
+            $chain[] = ['part' => $part, 'navInfo' => $navInfo, 'fromEntity' => $currentEntity];
+            if ($navInfo['isCollection']) {
+                $hasCollection = true;
+            }
+            $currentEntity = $navInfo['entityType'];
+        }
+
+        if (is_array($chain) && !$hasCollection) {
+            $pureRefSql = $this->buildPureReferenceChainCondition($chain, $columnName, $values, $builder);
+            if ($pureRefSql !== null) {
+                return $pureRefSql;
+            }
+        }
+
         // Multiple parts - need to resolve recursively
         return $this->buildNavigationPathConditionRecursiveInternal($pathParts, $columnName, $values, $builder, $this->entityType, 0);
+    }
+
+    /**
+     * Build a flat WHERE condition for a pure-reference navigation chain (no collections).
+     * When a builder is provided (CodeIgniter base builder, used by count()), the method adds
+     * chained LEFT JOINs for each step in the path. When no builder is provided, returns null
+     * because the alias map is unavailable here (the JSON pipeline handles that case separately).
+     *
+     * @param array<int, array{part:string, navInfo:array, fromEntity:string}> $chain
+     */
+    private function buildPureReferenceChainCondition(array $chain, string $columnName, string $values, $builder): ?string
+    {
+        if ($builder === null) {
+            return null;
+        }
+        if (empty($chain)) {
+            return null;
+        }
+
+        $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
+
+        $parentEntity = $this->entityType;
+        $parentTable = $this->context->getTableName($this->entityType);
+        $accumulatedPath = '';
+
+        foreach ($chain as $step) {
+            $part = $step['part'];
+            $navInfo = $step['navInfo'];
+            $accumulatedPath = $accumulatedPath === '' ? $part : $accumulatedPath . '.' . $part;
+            $relatedEntity = $navInfo['entityType'];
+            $relatedTable = $this->context->getTableName($relatedEntity);
+
+            if (!isset($this->requiredJoins[$accumulatedPath])) {
+                $parentReflection = self::getCachedReflection($parentEntity);
+                $relatedReflection = self::getCachedReflection($relatedEntity);
+                $foreignKey = $navInfo['foreignKey'];
+
+                $quotedParentTable = $this->connection->escapeIdentifiers($parentTable);
+                $quotedRelatedTable = $this->connection->escapeIdentifiers($relatedTable);
+
+                $joinCondition = null;
+                if ($parentReflection->hasProperty($foreignKey)) {
+                    // Many-to-one: FK lives on parent entity.
+                    $fkColumn = $this->getColumnNameFromProperty($parentReflection, $foreignKey);
+                    $relatedPk = $this->getPrimaryKeyColumnName($relatedReflection);
+                    $quotedFk = $this->connection->escapeIdentifiers($fkColumn);
+                    $quotedPk = $this->connection->escapeIdentifiers($relatedPk);
+                    $joinCondition = "{$quotedParentTable}.{$quotedFk} = {$quotedRelatedTable}.{$quotedPk}";
+                } elseif ($relatedReflection->hasProperty($foreignKey)) {
+                    // One-to-one inverse / shared-PK 1:1: FK lives on related entity.
+                    $fkColumn = $this->getColumnNameFromProperty($relatedReflection, $foreignKey);
+                    $parentPk = $this->getPrimaryKeyColumnName($parentReflection);
+                    $quotedFk = $this->connection->escapeIdentifiers($fkColumn);
+                    $quotedPk = $this->connection->escapeIdentifiers($parentPk);
+                    $joinCondition = "{$quotedRelatedTable}.{$quotedFk} = {$quotedParentTable}.{$quotedPk}";
+                }
+
+                if ($joinCondition === null) {
+                    return null;
+                }
+
+                $builder->join($relatedTable, $joinCondition, 'LEFT');
+                $this->requiredJoins[$accumulatedPath] = [
+                    'table' => $relatedTable,
+                    'alias' => $relatedTable,
+                    'entityType' => $relatedEntity,
+                ];
+            }
+
+            $parentEntity = $relatedEntity;
+            $parentTable = $relatedTable;
+        }
+
+        $lastReflection = self::getCachedReflection($parentEntity);
+        if (!$lastReflection->hasProperty($columnName)) {
+            return null;
+        }
+        $columnRealName = $this->getColumnNameFromProperty($lastReflection, $columnName);
+        $quotedLastTable = $provider->escapeIdentifier($parentTable);
+        $quotedColumn = $provider->escapeIdentifier($columnRealName);
+
+        if ($values === '' || $values === '?') {
+            return "{$quotedLastTable}.{$quotedColumn} IN (?)";
+        }
+
+        return "{$quotedLastTable}.{$quotedColumn} IN ({$values})";
     }
     
     /**
@@ -12709,26 +12844,40 @@ class AdvancedQueryBuilder
     ): ?string {
         $collectionEntityType = $navInfo['entityType'];
         $collectionTableName = $this->context->getTableName($collectionEntityType);
-        
-        // Get main entity info
-        $mainEntityReflection = new \ReflectionClass($currentEntityType);
-        $mainPkColumn = $this->getPrimaryKeyColumnName($mainEntityReflection);
-        
-        // Get FK in collection entity pointing to main entity
+
+        // Get FK in collection entity pointing to its parent entity
         $collectionFkProperty = $navInfo['foreignKey'];
         $collectionEntityReflection = new \ReflectionClass($collectionEntityType);
         $collectionFkColumn = $this->getColumnNameFromProperty($collectionEntityReflection, $collectionFkProperty);
-        
+
+        // Prefer the root entity (main query entity) as the EXISTS outer side when it carries the same FK column.
+        // This matches the sibling "Collection -> Column" branch and keeps the EXISTS valid when the outer query
+        // does not include a JOIN to $currentEntityType (e.g. CodeIgniter base-builder COUNT queries).
+        $rootEntityType = $this->entityType;
+        $rootEntityReflection = new \ReflectionClass($rootEntityType);
+        $rootPkColumn = $this->getPrimaryKeyColumnName($rootEntityReflection);
+
+        if ($rootEntityType !== $currentEntityType && $rootEntityReflection->hasProperty($collectionFkProperty)) {
+            $mainEntityForExists = $rootEntityType;
+            $mainJoinColumn = $this->getColumnNameFromProperty($rootEntityReflection, $collectionFkProperty);
+        } else {
+            $mainEntityForExists = $currentEntityType;
+            $currentEntityReflection = $currentEntityType === $rootEntityType
+                ? $rootEntityReflection
+                : new \ReflectionClass($currentEntityType);
+            $mainJoinColumn = $this->getPrimaryKeyColumnName($currentEntityReflection);
+        }
+
         // Get main table alias
         if ($builder !== null) {
-            $mainTableAlias = $this->context->getTableName($currentEntityType);
+            $mainTableAlias = $this->context->getTableName($mainEntityForExists);
         } else {
             $mainTableAlias = $this->getTableAliasForParser();
         }
-        
+
         $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
         $quotedMainTable = $provider->escapeIdentifier($mainTableAlias);
-        $quotedMainPk = $provider->escapeIdentifier($mainPkColumn);
+        $quotedMainPk = $provider->escapeIdentifier($mainJoinColumn);
         $quotedCollectionTable = $provider->escapeIdentifier($collectionTableName);
         $quotedCollectionFk = $provider->escapeIdentifier($collectionFkColumn);
         
