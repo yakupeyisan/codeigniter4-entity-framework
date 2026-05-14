@@ -9540,7 +9540,24 @@ class AdvancedQueryBuilder
         // 3 parts: reference.reference.column
         // - Non-collection nested: Employee.Company.PdksCompanyID (JOIN Employee ref + nested table)
         // - Collection + scalar on junction row: Employee.EmployeeDepartments.DepartmentID (EXISTS EmployeeDepartments)
+        // - Collection + reference + column: EmployeeDepartments.Department.DepartmentID (EXISTS + JOIN)
+        //   Previously the branch below required the first segment to be a non-collection reference, so the
+        //   NAVIGATION_IN token was left unexpanded in JSON mode and leaked into SQL.
         if (count($pathParts) === 3) {
+            $firstNavInfo = $this->getNavigationInfo($pathParts[0]);
+            if ($firstNavInfo !== null && $firstNavInfo['isCollection']) {
+                $secondNavInfo = $this->getNavigationInfoForEntity($pathParts[1], $firstNavInfo['entityType']);
+                if ($secondNavInfo !== null && ! $secondNavInfo['isCollection']) {
+                    $leafReflection = new \ReflectionClass($secondNavInfo['entityType']);
+                    if ($leafReflection->hasProperty($pathParts[2])) {
+                        $recursiveSql = $this->buildNavigationPathConditionRecursive($pathParts, $values, null);
+                        if ($recursiveSql !== null && $recursiveSql !== '') {
+                            return $recursiveSql;
+                        }
+                    }
+                }
+            }
+
             $refNavInfo = $this->getNavigationInfo($pathParts[0]);
             if (!$refNavInfo || $refNavInfo['isCollection']) {
                 return null;
