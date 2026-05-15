@@ -187,7 +187,7 @@ trait JsonModeQueryTrait
             $tableName = $this->context->getTableName($this->entityType);
             $sql = $this->queryHints->applyToSql($sql, $driver, $tableName);
         }
-        log_message('error', 'executeJsonModeQuery: SQL: ' . $sql);
+        //log_message('error', 'executeJsonModeQuery: SQL: ' . $sql);
         $sqlExecStart = microtime(true);
         try {
             $query = $this->connection->query($sql);
