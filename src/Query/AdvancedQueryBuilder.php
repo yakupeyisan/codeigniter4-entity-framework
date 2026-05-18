@@ -7027,7 +7027,7 @@ class AdvancedQueryBuilder
         }
         
         log_message('debug', 'buildEfCoreStyleQuery: ORDER BY columns: ' . implode(', ', $orderByColumns));
-        log_message('error', 'buildEfCoreStyleQuery: FINAL QUERY: ' . $finalQuery);
+        //log_message('error', 'buildEfCoreStyleQuery: FINAL QUERY: ' . $finalQuery);
         return $finalQuery;
     }
 
