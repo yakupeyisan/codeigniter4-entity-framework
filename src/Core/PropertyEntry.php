@@ -26,7 +26,6 @@ class PropertyEntry
     {
         $entity = $this->entityEntry->getEntity();
         $reflection = new ReflectionProperty($entity, $this->propertyName);
-        $reflection->setAccessible(true);
         return $reflection->getValue($entity);
     }
 
@@ -50,7 +49,6 @@ class PropertyEntry
     {
         $entity = $this->entityEntry->getEntity();
         $reflection = new ReflectionProperty($entity, $this->propertyName);
-        $reflection->setAccessible(true);
         $reflection->setValue($entity, $value);
         
         if ($entity instanceof Entity && $entity->isTracking()) {

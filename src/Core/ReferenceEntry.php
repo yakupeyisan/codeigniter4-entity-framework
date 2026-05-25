@@ -73,7 +73,6 @@ class ReferenceEntry
     {
         $entity = $this->entityEntry->getEntity();
         $reflection = new \ReflectionProperty($entity, $this->propertyName);
-        $reflection->setAccessible(true);
         return $reflection->getValue($entity);
     }
 }

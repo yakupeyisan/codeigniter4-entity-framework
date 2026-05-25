@@ -10,21 +10,34 @@ use CodeIgniter\Database\BaseConnection;
  */
 class MigrationManager
 {
-    private BaseConnection $connection;
+    /** CI4 `migrations` tablosundan ayrı; şema çakışmasını önler. */
+    private const MIGRATIONS_TABLE = 'ef_migrations';
+
+    private const SQL_OBJECTS_TABLE = 'ef_sql_objects';
+
+    /** CI4 MigrationRunner ile çakışmaması için ayrı dizin (Forge yerine Connection bekler). */
+    public const MIGRATIONS_NAMESPACE = 'App\\Database\\EfMigrations';
+
+    private const MIGRATIONS_DIR = 'EfMigrations';
+
+    private ?BaseConnection $connection;
     private string $migrationsPath;
 
-    public function __construct(?BaseConnection $connection = null, ?string $migrationsPath = null)
+    /** @var array{method: string, phpFormat: string, mssqlDateFormat?: string}|null */
+    private ?array $resolvedDateFormat = null;
+
+    public function __construct(?BaseConnection $connection = null, ?string $migrationsPath = null, bool $requireConnection = true)
     {
-        if ($connection === null) {
-            // CodeIgniter 4 way to get database connection
-            $this->connection = \Config\Database::connect();
-        } else {
+        $this->migrationsPath = $migrationsPath ?? APPPATH . 'Database/' . self::MIGRATIONS_DIR . '/';
+
+        if ($connection !== null) {
             $this->connection = $connection;
+        } elseif ($requireConnection) {
+            $this->connection = \Config\Database::connect();
+            $this->ensureDatabaseExists();
+        } else {
+            $this->connection = null;
         }
-        $this->migrationsPath = $migrationsPath ?? APPPATH . 'Database/Migrations/';
-        
-        // Ensure database exists
-        $this->ensureDatabaseExists();
     }
     
     /**
@@ -105,6 +118,10 @@ class MigrationManager
             }
         }
 
+        if (! is_dir($this->migrationsPath)) {
+            mkdir($this->migrationsPath, 0755, true);
+        }
+
         file_put_contents($filePath, $content);
 
         return $fileName;
@@ -132,7 +149,7 @@ class MigrationManager
         return <<<PHP
 <?php
 
-namespace App\Database\Migrations;
+namespace App\Database\EfMigrations;
 
 use Yakupeyisan\CodeIgniter4\EntityFramework\Migrations\Migration;
 use Yakupeyisan\CodeIgniter4\EntityFramework\Migrations\MigrationBuilder;
@@ -170,6 +187,7 @@ PHP;
             return $code;
         }
         
+        $code = str_replace("\t", '    ', $code);
         $indent = str_repeat(' ', $spaces);
         $lines = explode("\n", $code);
         $indented = array_map(function($line) use ($indent) {
@@ -177,7 +195,7 @@ PHP;
             if (trim($line) === '') {
                 return $line;
             }
-            return $indent . $line;
+            return $indent . ltrim($line);
         }, $lines);
         return implode("\n", $indented);
     }
@@ -216,8 +234,7 @@ PHP;
             $generator = new MigrationGenerator($contextClass, $this->connection);
             $result = $generator->generateMigrationCode();
             
-            // Return null if generation failed (empty code)
-            if (empty($result['up']) || empty($result['down'])) {
+            if (trim($result['up'] ?? '') === '' && trim($result['down'] ?? '') === '') {
                 return null;
             }
             
@@ -230,10 +247,61 @@ PHP;
     }
 
     /**
+     * Şema zaten uygulanmış (CLI / önceki kurulum) ama ef_migrations kaydı yoksa yalnızca kayıt yazar.
+     *
+     * @return int Damgalanan migration sayısı
+     */
+    public function reconcileAppliedMigrationsIfSchemaPresent(): int
+    {
+        if (! $this->schemaLooksInitialized()) {
+            return 0;
+        }
+
+        $pending = $this->getPendingMigrations();
+        if ($pending === []) {
+            return 0;
+        }
+
+        $stamped = 0;
+        foreach ($pending as $migration) {
+            $this->stampMigrationAsApplied($migration);
+            $stamped++;
+        }
+
+        $this->refreshConnection();
+
+        return $stamped;
+    }
+
+    /**
+     * Migration kaydı + SQL nesne registry (up() çalıştırmadan).
+     */
+    public function stampMigrationAsApplied(array $migration): void
+    {
+        $this->recordMigration($migration);
+        $this->syncSqlObjectsRegistry($migration);
+    }
+
+    private function schemaLooksInitialized(): bool
+    {
+        $driver = strtolower($this->connection->getPlatform() ?? '');
+
+        if ($driver === 'sqlsrv' || $driver === 'sqlserver') {
+            return $this->sqlServerTableExists('settings')
+                && $this->sqlServerTableExists('Users');
+        }
+
+        return $this->connection->tableExists('settings')
+            && $this->connection->tableExists('Users');
+    }
+
+    /**
      * Update database (equivalent to Update-Database)
      */
     public function updateDatabase(?string $targetMigration = null): void
     {
+        $this->reconcileAppliedMigrationsIfSchemaPresent();
+
         $migrations = $this->getPendingMigrations();
         
         if ($targetMigration !== null) {
@@ -243,6 +311,8 @@ PHP;
         foreach ($migrations as $migration) {
             $this->runMigration($migration, 'up');
         }
+
+        $this->refreshConnection();
     }
 
     /**
@@ -301,9 +371,15 @@ PHP;
     {
         $allMigrations = $this->getAllMigrations();
         $appliedMigrations = $this->getAppliedMigrations();
-        $appliedNames = array_column($appliedMigrations, 'name');
+        $appliedKeys = array_map(
+            static fn (array $m): string => ($m['timestamp'] ?? '') . '_' . ($m['name'] ?? ''),
+            $appliedMigrations
+        );
 
-        return array_filter($allMigrations, fn($m) => !in_array($m['name'], $appliedNames));
+        return array_filter(
+            $allMigrations,
+            static fn (array $m): bool => ! in_array($m['timestamp'] . '_' . $m['name'], $appliedKeys, true)
+        );
     }
 
     /**
@@ -335,16 +411,23 @@ PHP;
      */
     public function getAppliedMigrations(): array
     {
-        // Check migrations table
-        if (!$this->connection->tableExists('migrations')) {
+        if (! $this->connection->tableExists(self::MIGRATIONS_TABLE)) {
             $this->createMigrationsTable();
+
             return [];
         }
 
-        $query = $this->connection->query("SELECT * FROM migrations ORDER BY timestamp DESC");
+        $query = $this->connection->query(
+            'SELECT [timestamp], [name] FROM [' . self::MIGRATIONS_TABLE . '] ORDER BY [timestamp] DESC'
+        );
         $results = $query->getResultArray();
 
-        return array_map(fn($r) => ['timestamp' => $r['timestamp'], 'name' => $r['name']], $results);
+        return array_map(static function (array $r): array {
+            return [
+                'timestamp' => $r['timestamp'] ?? $r['Timestamp'] ?? '',
+                'name'      => $r['name'] ?? $r['Name'] ?? '',
+            ];
+        }, $results);
     }
 
     /**
@@ -353,13 +436,15 @@ PHP;
     private function runMigration(array $migration, string $direction): void
     {
         require_once $migration['file'];
-        $className = 'App\\Database\\Migrations\\Migration_' . $migration['timestamp'] . '_' . $migration['name'];
+        $className = self::MIGRATIONS_NAMESPACE . '\\Migration_' . $migration['timestamp'] . '_' . $migration['name'];
         
         if (class_exists($className)) {
             $migrationInstance = new $className($this->connection);
             if ($direction === 'up') {
                 $migrationInstance->up();
-                $this->recordMigration($migration);
+                // Uzun migration / ODBC hata sonrası ölü oturumu at; ef_migrations + ef_sql_objects yazımı için
+                $this->refreshConnection();
+                $this->stampMigrationAsApplied($migration);
             } else {
                 $migrationInstance->down();
                 $this->removeMigrationRecord($migration);
@@ -372,14 +457,28 @@ PHP;
      */
     private function recordMigration(array $migration): void
     {
-        if (!$this->connection->tableExists('migrations')) {
+        if (! $this->connection->tableExists(self::MIGRATIONS_TABLE)) {
             $this->createMigrationsTable();
         }
 
-        $this->connection->table('migrations')->insert([
-            'timestamp' => $migration['timestamp'],
-            'name' => $migration['name'],
-            'applied_at' => date('Y-m-d H:i:s')
+        $driver = strtolower($this->connection->getPlatform() ?? '');
+        if ($driver === 'sqlsrv' || $driver === 'sqlserver') {
+            $resolved = MigrationDateFormatResolver::insertAppliedAt(
+                $this->connection,
+                self::MIGRATIONS_TABLE,
+                (string) $migration['timestamp'],
+                (string) $migration['name']
+            );
+            // insertAppliedAt içinde persistResolvedFormat + applyToConnection çağrılır
+            $this->resolvedDateFormat = $resolved;
+
+            return;
+        }
+
+        $this->connection->table(self::MIGRATIONS_TABLE)->insert([
+            'timestamp'  => $migration['timestamp'],
+            'name'       => $migration['name'],
+            'applied_at' => date('Y-m-d H:i:s'),
         ]);
     }
 
@@ -388,7 +487,7 @@ PHP;
      */
     private function removeMigrationRecord(array $migration): void
     {
-        $this->connection->table('migrations')
+        $this->connection->table(self::MIGRATIONS_TABLE)
             ->where('timestamp', $migration['timestamp'])
             ->where('name', $migration['name'])
             ->delete();
@@ -414,7 +513,7 @@ PHP;
                 'applied_at' => ['type' => 'DATETIME']
             ]);
             $forge->addKey('id', true);
-            $forge->createTable('migrations');
+            $forge->createTable(self::MIGRATIONS_TABLE);
         }
     }
     
@@ -423,14 +522,183 @@ PHP;
      */
     private function createMigrationsTableSqlServer(): void
     {
-        $sql = "CREATE TABLE [migrations] (
-            [id] INT IDENTITY(1,1) PRIMARY KEY,
-            [timestamp] VARCHAR(14) NOT NULL,
-            [name] VARCHAR(255) NOT NULL,
-            [applied_at] DATETIME NOT NULL
-        )";
-        
-        $this->connection->query($sql);
+        $table = self::MIGRATIONS_TABLE;
+        if (! $this->sqlServerTableExists($table)) {
+            $this->connection->query(
+                "CREATE TABLE [{$table}] (
+                [id] INT IDENTITY(1,1) PRIMARY KEY,
+                [timestamp] VARCHAR(14) NOT NULL,
+                [name] VARCHAR(255) NOT NULL,
+                [applied_at] DATETIME NOT NULL
+            )"
+            );
+        }
+
+        $this->ensureSqlObjectsTable();
+    }
+
+    private function ensureSqlObjectsTable(): void
+    {
+        $driver = strtolower($this->connection->getPlatform() ?? '');
+        if ($driver === 'sqlsrv' || $driver === 'sqlserver') {
+            if ($this->sqlServerTableExists(self::SQL_OBJECTS_TABLE)) {
+                return;
+            }
+
+            $table = self::SQL_OBJECTS_TABLE;
+            $this->connection->query(
+                "CREATE TABLE [{$table}] (
+                [id] INT IDENTITY(1,1) PRIMARY KEY,
+                [object_name] NVARCHAR(255) NOT NULL,
+                [object_type] NVARCHAR(32) NOT NULL,
+                [sql_hash] CHAR(64) NOT NULL,
+                [migration_timestamp] VARCHAR(14) NULL,
+                [migration_name] NVARCHAR(255) NULL,
+                [updated_at] DATETIME NOT NULL CONSTRAINT [DF_ef_sql_objects_updated_at] DEFAULT (GETDATE()),
+                CONSTRAINT [UQ_ef_sql_objects_name_type] UNIQUE ([object_name], [object_type])
+            )"
+            );
+
+            return;
+        }
+
+        if ($this->connection->tableExists(self::SQL_OBJECTS_TABLE)) {
+            return;
+        }
+
+        $forge = new \CodeIgniter\Database\Forge($this->connection);
+            $forge->addField([
+                'id'                  => ['type' => 'INT', 'auto_increment' => true],
+                'object_name'         => ['type' => 'VARCHAR', 'constraint' => 255],
+                'object_type'         => ['type' => 'VARCHAR', 'constraint' => 32],
+                'sql_hash'            => ['type' => 'CHAR', 'constraint' => 64],
+                'migration_timestamp' => ['type' => 'VARCHAR', 'constraint' => 14, 'null' => true],
+                'migration_name'      => ['type' => 'VARCHAR', 'constraint' => 255, 'null' => true],
+                'updated_at'          => ['type' => 'DATETIME'],
+            ]);
+            $forge->addKey('id', true);
+            $forge->addUniqueKey(['object_name', 'object_type']);
+            $forge->createTable(self::SQL_OBJECTS_TABLE);
+    }
+
+    private function sqlServerTableExists(string $tableName): bool
+    {
+        $row = $this->connection->query(
+            'SELECT OBJECT_ID(?, \'U\') AS oid',
+            [$tableName]
+        )->getRowArray();
+
+        return ! empty($row['oid']);
+    }
+
+    /**
+     * SQL Server ODBC "connection is broken" sonrası yeni oturum açar; CI4 paylaşımlı bağlantıyı günceller.
+     */
+    private function refreshConnection(): void
+    {
+        if ($this->connection === null) {
+            $this->connection = \Config\Database::connect();
+
+            return;
+        }
+
+        $group = $this->connection->DBGroup ?? 'default';
+
+        try {
+            if (method_exists($this->connection, 'reconnect')) {
+                $this->connection->reconnect();
+            } else {
+                $this->connection->close();
+                $this->connection->initialize();
+            }
+        } catch (\Throwable) {
+            try {
+                $this->connection->close();
+            } catch (\Throwable) {
+            }
+
+            $this->connection = \Config\Database::connect($group, false);
+            $this->connection->initialize();
+        }
+
+        $this->replaceSharedConnection($group, $this->connection);
+    }
+
+    private function replaceSharedConnection(string $group, BaseConnection $connection): void
+    {
+        if (! class_exists(\CodeIgniter\Database\Database::class)) {
+            return;
+        }
+
+        try {
+            $ref = new \ReflectionClass(\CodeIgniter\Database\Database::class);
+            if (! $ref->hasProperty('instances')) {
+                return;
+            }
+
+            $instances = $ref->getStaticPropertyValue('instances');
+            if (! is_array($instances)) {
+                $instances = [];
+            }
+            $instances[$group] = $connection;
+            $ref->setStaticPropertyValue('instances', $instances);
+        } catch (\Throwable $e) {
+            log_message('debug', 'MigrationManager::replaceSharedConnection: ' . $e->getMessage());
+        }
+    }
+
+    /**
+     * Upsert discovered #[GenerateQuery] hashes after a successful migration up.
+     */
+    private function syncSqlObjectsRegistry(array $migration): void
+    {
+        $this->ensureSqlObjectsTable();
+
+        $objects = ProgrammabilityDiscovery::discover();
+        $timestamp = (string) ($migration['timestamp'] ?? '');
+        $name = (string) ($migration['name'] ?? '');
+        $driver = strtolower($this->connection->getPlatform() ?? '');
+
+        $useSafeDatetime = ($driver === 'sqlsrv' || $driver === 'sqlserver');
+
+        foreach ($objects as $object) {
+            $existing = $this->connection->table(self::SQL_OBJECTS_TABLE)
+                ->where('object_name', $object['objectName'])
+                ->where('object_type', $object['objectType'])
+                ->get()
+                ->getRowArray();
+
+            if ($useSafeDatetime) {
+                MigrationDateFormatResolver::upsertSqlObjectRow(
+                    $this->connection,
+                    self::SQL_OBJECTS_TABLE,
+                    $object,
+                    $timestamp,
+                    $name,
+                    $existing !== null && $existing !== []
+                );
+
+                continue;
+            }
+
+            $row = [
+                'object_name'         => $object['objectName'],
+                'object_type'         => $object['objectType'],
+                'sql_hash'            => $object['sqlHash'],
+                'migration_timestamp' => $timestamp,
+                'migration_name'      => $name,
+                'updated_at'          => date('Y-m-d H:i:s'),
+            ];
+
+            if ($existing) {
+                $this->connection->table(self::SQL_OBJECTS_TABLE)
+                    ->where('object_name', $object['objectName'])
+                    ->where('object_type', $object['objectType'])
+                    ->update($row);
+            } else {
+                $this->connection->table(self::SQL_OBJECTS_TABLE)->insert($row);
+            }
+        }
     }
 
     /**

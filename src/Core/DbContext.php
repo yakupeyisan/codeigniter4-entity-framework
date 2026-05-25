@@ -275,7 +275,6 @@ abstract class DbContext
         // Find primary key property
         foreach ($reflection->getProperties() as $property) {
             if ($this->isPrimaryKey($reflection, $property->getName())) {
-                $property->setAccessible(true);
                 if ($property->isInitialized($entity)) {
                     return $property->getValue($entity);
                 }
@@ -288,7 +287,6 @@ abstract class DbContext
         foreach ($commonNames as $name) {
             if ($reflection->hasProperty($name)) {
                 $property = $reflection->getProperty($name);
-                $property->setAccessible(true);
                 if ($property->isInitialized($entity)) {
                     return $property->getValue($entity);
                 }
@@ -362,7 +360,6 @@ abstract class DbContext
                     continue;
                 }
 
-                $property->setAccessible(true);
                 $value = $property->getValue($entity);
 
                 // Skip navigation properties
@@ -435,7 +432,6 @@ abstract class DbContext
                     continue;
                 }
 
-                $property->setAccessible(true);
                 $value = $property->getValue($entity);
 
                 // Skip navigation properties (objects, arrays, and properties with InverseProperty attribute)
@@ -568,7 +564,6 @@ abstract class DbContext
                 continue;
             }
             
-            $property->setAccessible(true);
             
             // Check if property is initialized (for typed properties in PHP 7.4+)
             // Skip if not initialized and it's an auto-increment primary key
@@ -657,7 +652,6 @@ abstract class DbContext
                 }
                 
                 if ($primaryKeyProperty !== null) {
-                    $primaryKeyProperty->setAccessible(true);
                     $primaryKeyProperty->setValue($entity, $insertId);
                 }
             }
@@ -700,7 +694,6 @@ abstract class DbContext
                 continue;
             }
             
-            $property->setAccessible(true);
             
             // Check if property is initialized (for typed properties in PHP 7.4+)
             if (!$property->isInitialized($entity)) {
@@ -799,7 +792,6 @@ abstract class DbContext
             return 0; // No primary key found
         }
         
-        $idProperty->setAccessible(true);
         $id = $idProperty->getValue($entity);
         
         if ($id === null) {
@@ -1084,7 +1076,6 @@ abstract class DbContext
         
         $reflection = new \ReflectionClass($entities[0]);
         $fkProperty = $reflection->getProperty($foreignKey);
-        $fkProperty->setAccessible(true);
 
         foreach ($entities as $entity) {
             $fkValue = $fkProperty->getValue($entity);
@@ -1114,7 +1105,6 @@ abstract class DbContext
         $relatedReflection = new \ReflectionClass($relatedEntityType);
         $relatedPkName = $this->getPrimaryKeyName($relatedEntityType);
         $relatedPkProperty = $relatedReflection->getProperty($relatedPkName);
-        $relatedPkProperty->setAccessible(true);
 
         foreach ($relatedEntities as $relatedEntity) {
             $pkValue = $relatedPkProperty->getValue($relatedEntity);
@@ -1124,7 +1114,6 @@ abstract class DbContext
         // Set loaded values to entities
         $navReflection = new \ReflectionClass($entities[0]);
         $navProperty = $navReflection->getProperty($navigationProperty);
-        $navProperty->setAccessible(true);
 
         foreach ($entityMap as $fkValue => $entityList) {
             $relatedEntity = $relatedEntityMap[$fkValue] ?? null;
@@ -1154,7 +1143,6 @@ abstract class DbContext
             $columnName = $this->getColumnNameFromProperty($entityReflection, $property->getName());
             if ($columnName === $primaryKeyName) {
                 $pkProperty = $property;
-                $pkProperty->setAccessible(true);
                 break;
             }
         }
@@ -1195,7 +1183,6 @@ abstract class DbContext
         // Group related entities by foreign key
         $relatedReflection = new \ReflectionClass($relatedEntityType);
         $fkProperty = $relatedReflection->getProperty($foreignKey);
-        $fkProperty->setAccessible(true);
         
         $groupedEntities = [];
         foreach ($relatedEntities as $relatedEntity) {
@@ -1209,7 +1196,6 @@ abstract class DbContext
         // Set loaded collections to entities
         $navReflection = new \ReflectionClass($entities[0]);
         $navProperty = $navReflection->getProperty($navigationProperty);
-        $navProperty->setAccessible(true);
 
         foreach ($entityIdMap as $entityId => $entity) {
             $navProperty->setValue($entity, $groupedEntities[$entityId] ?? []);

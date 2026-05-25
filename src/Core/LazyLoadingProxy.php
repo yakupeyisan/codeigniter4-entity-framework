@@ -81,7 +81,6 @@ class LazyLoadingProxy
         }
 
         $fkProperty = $entityReflection->getProperty($this->foreignKey);
-        $fkProperty->setAccessible(true);
         $fkValue = $fkProperty->getValue($this->entity);
 
         if ($fkValue === null) {
@@ -120,7 +119,6 @@ class LazyLoadingProxy
             // Check if this property matches the primary key name (considering Column attribute)
             $columnName = $this->getColumnNameFromProperty($entityReflection, $propertyName);
             if ($columnName === $primaryKeyName) {
-                $property->setAccessible(true);
                 if ($property->isInitialized($this->entity)) {
                     $entityId = $property->getValue($this->entity);
                     break;
@@ -133,7 +131,6 @@ class LazyLoadingProxy
             foreach ($entityReflection->getProperties() as $property) {
                 $attributes = $property->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\Key::class);
                 if (!empty($attributes)) {
-                    $property->setAccessible(true);
                     if ($property->isInitialized($this->entity)) {
                         $entityId = $property->getValue($this->entity);
                         break;
@@ -148,7 +145,6 @@ class LazyLoadingProxy
             foreach ($commonNames as $name) {
                 if ($entityReflection->hasProperty($name)) {
                     $idProperty = $entityReflection->getProperty($name);
-                    $idProperty->setAccessible(true);
                     if ($idProperty->isInitialized($this->entity)) {
                         $entityId = $idProperty->getValue($this->entity);
                         break;
@@ -205,7 +201,6 @@ class LazyLoadingProxy
         $reflection = new ReflectionClass($this->entity);
         if ($reflection->hasProperty($this->navigationProperty)) {
             $property = $reflection->getProperty($this->navigationProperty);
-            $property->setAccessible(true);
             $property->setValue($this->entity, $value);
         }
     }

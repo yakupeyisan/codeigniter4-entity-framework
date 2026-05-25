@@ -221,7 +221,6 @@ class Queryable implements IQueryable
             $properties = $reflection->getProperties();
             
             foreach ($properties as $property) {
-                $property->setAccessible(true);
                 $name = $property->getName();
                 
                 // Skip entity framework fields
@@ -289,7 +288,6 @@ class Queryable implements IQueryable
                 continue;
             }
             
-            $property->setAccessible(true);
             
             // Check if property is initialized
             if (!$property->isInitialized($object)) {

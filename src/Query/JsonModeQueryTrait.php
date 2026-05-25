@@ -219,10 +219,74 @@ trait JsonModeQueryTrait
 
         $payload = $buffer !== '' ? $buffer : '[]';
         $decoded = json_decode($payload, true);
+        if (is_array($decoded) && $decoded !== [] && !empty($this->includes)) {
+            $decoded = $this->jsonDedupeRootRecordsByPrimaryKey($decoded);
+            $payload = json_encode($decoded, JSON_UNESCAPED_UNICODE);
+            if ($payload === false) {
+                $payload = '[]';
+            }
+        }
         $this->currentQueryStats['rowCount'] = is_array($decoded) ? count($decoded) : 0;
         $this->finalizeQueryStats();
 
         return $payload;
+    }
+
+    /**
+     * Reference-navigation JOINs in JSON mode can multiply root rows (same PK repeated).
+     * Classic EF-style materialization dedupes via entitiesMap; mirror that here.
+     *
+     * @param array<int, array<string, mixed>> $rows
+     * @return array<int, array<string, mixed>>
+     */
+    private function jsonDedupeRootRecordsByPrimaryKey(array $rows): array
+    {
+        $entityReflection = self::getCachedReflection($this->entityType);
+        $primaryKeyProperty = null;
+        foreach ($entityReflection->getProperties() as $property) {
+            if ($property->isStatic()) {
+                continue;
+            }
+            $keyAttributes = $property->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\Key::class);
+            if ($keyAttributes !== []) {
+                $primaryKeyProperty = $property->getName();
+                break;
+            }
+        }
+        if ($primaryKeyProperty === null) {
+            $commonNames = ['Id', $entityReflection->getShortName() . 'Id', $entityReflection->getShortName() . 'ID'];
+            foreach ($commonNames as $name) {
+                if ($entityReflection->hasProperty($name)) {
+                    $primaryKeyProperty = $name;
+                    break;
+                }
+            }
+        }
+        if ($primaryKeyProperty === null) {
+            return $rows;
+        }
+
+        $seen = [];
+        $deduped = [];
+        foreach ($rows as $row) {
+            if (!is_array($row)) {
+                $deduped[] = $row;
+                continue;
+            }
+            $id = $row[$primaryKeyProperty] ?? null;
+            if ($id === null) {
+                $deduped[] = $row;
+                continue;
+            }
+            $key = is_object($id) ? spl_object_hash($id) : (string) $id;
+            if (isset($seen[$key])) {
+                continue;
+            }
+            $seen[$key] = true;
+            $deduped[] = $row;
+        }
+
+        return $deduped;
     }
 
     private function buildJsonModeSql(): string
@@ -555,8 +619,8 @@ trait JsonModeQueryTrait
         if ($isTrueJoinPivot) {
             $joinTable = $this->context->getTableName($joinEntityType);
             $relatedTable = $this->context->getTableName($resolvedRelated);
-            $joinAlias = 'j' . substr(md5($fullNavPath), 0, 4);
-            $relAlias = 'r' . substr(md5($fullNavPath . 'r'), 0, 4);
+            $joinAlias = 'j' . substr(hash('sha256', $fullNavPath), 0, 4);
+            $relAlias = 'r' . substr(hash('sha256', $fullNavPath . 'r'), 0, 4);
             $quotedJoinTable = $provider->escapeIdentifier($joinTable);
             $quotedRelatedTable = $provider->escapeIdentifier($relatedTable);
             $quotedJoinAlias = $provider->escapeIdentifier($joinAlias);
@@ -637,7 +701,7 @@ trait JsonModeQueryTrait
         }
 
         $relatedTable = $this->context->getTableName($resolvedRelated);
-        $relAlias = 'r' . substr(md5($fullNavPath), 0, 5);
+        $relAlias = 'r' . substr(hash('sha256', $fullNavPath), 0, 5);
         $quotedRelatedTable = $provider->escapeIdentifier($relatedTable);
         $quotedRelAlias = $provider->escapeIdentifier($relAlias);
 
@@ -1022,7 +1086,7 @@ trait JsonModeQueryTrait
                 $relatedReflection = new ReflectionClass($navInfo['entityType']);
                 $relatedTable = $this->context->getTableName($navInfo['entityType']);
                 $quotedTable = $provider->escapeIdentifier($relatedTable);
-                $cx = 'w' . substr(md5($navigationProperty . $columnName . $start), 0, 6);
+                $cx = 'w' . substr(hash('sha256', $navigationProperty . $columnName . $start), 0, 6);
                 $quotedCx = $provider->escapeIdentifier($cx);
                 $fkProp = $navInfo['foreignKey'] ?? null;
                 if ($fkProp === null) {

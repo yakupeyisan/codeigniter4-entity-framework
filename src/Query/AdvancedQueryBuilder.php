@@ -208,7 +208,6 @@ class AdvancedQueryBuilder
         if (!isset(self::$propertyCache[$cacheKey])) {
             if ($reflection->hasProperty($propertyName)) {
                 $property = $reflection->getProperty($propertyName);
-                $property->setAccessible(true);
                 self::$propertyCache[$cacheKey] = $property;
             } else {
                 return null;
@@ -1380,7 +1379,7 @@ class AdvancedQueryBuilder
         }
         
         // Add to global statistics
-        $statsKey = md5($this->currentQueryStats['sql'] ?? '') . '_' . $this->currentQueryStats['entityType'];
+        $statsKey = hash('sha256', $this->currentQueryStats['sql'] ?? '') . '_' . $this->currentQueryStats['entityType'];
         if (!isset(self::$queryStats[$statsKey])) {
             self::$queryStats[$statsKey] = [
                 'query' => $this->currentQueryStats['sql'] ?? '',
@@ -1491,9 +1490,9 @@ class AdvancedQueryBuilder
                 if (isset($where['predicate']) && is_callable($where['predicate']) && !is_string($where['predicate'])) {
                     try {
                         $reflection = new \ReflectionFunction($where['predicate']);
-                        $whereHash['predicateHash'] = md5($reflection->getFileName() . ':' . $reflection->getStartLine() . '-' . $reflection->getEndLine());
+                        $whereHash['predicateHash'] = hash('sha256', $reflection->getFileName() . ':' . $reflection->getStartLine() . '-' . $reflection->getEndLine());
                     } catch (\Exception $e) {
-                        $whereHash['predicateHash'] = md5(serialize($where['predicate']));
+                        $whereHash['predicateHash'] = hash('sha256', serialize($where['predicate']));
                     }
                 }
                 $wheresHash[] = $whereHash;
@@ -1509,12 +1508,12 @@ class AdvancedQueryBuilder
                 try {
                     $reflection = new \ReflectionFunction($orderBy['selector']);
                     $orderBysHash[] = [
-                        'selectorHash' => md5($reflection->getFileName() . ':' . $reflection->getStartLine() . '-' . $reflection->getEndLine()),
+                        'selectorHash' => hash('sha256', $reflection->getFileName() . ':' . $reflection->getStartLine() . '-' . $reflection->getEndLine()),
                         'direction' => $orderBy['direction'] ?? 'ASC'
                     ];
                 } catch (\Exception $e) {
                     $orderBysHash[] = [
-                        'selectorHash' => md5(serialize($orderBy['selector'])),
+                        'selectorHash' => hash('sha256', serialize($orderBy['selector'])),
                         'direction' => $orderBy['direction'] ?? 'ASC'
                     ];
                 }
@@ -2593,7 +2592,6 @@ class AdvancedQueryBuilder
                     continue;
                 }
                 $property = $reflection->getProperty($resolvedName);
-                $property->setAccessible(true);
                 
                 // Type conversion
                 $type = $this->getPropertyType($property);
@@ -2904,9 +2902,17 @@ class AdvancedQueryBuilder
                 }
             }
             
-            // Try to get variable values from calling scope using eval (dangerous but necessary)
-            // Actually, we can't safely do this. Instead, we'll let the user pass variables explicitly
-            // For now, log what we found
+            // Captured values come from ReflectionFunction::getStaticVariables() (use (...) / arrow fn).
+            // Parent-scope variables cannot be read safely; callers must bind them explicitly.
+            foreach ($useVarNames as $useVarName) {
+                if (!isset($variableValues[$useVarName])) {
+                    log_message(
+                        'warning',
+                        'WHERE predicate references $' . $useVarName
+                        . ' without a captured value; bind it with use ($' . $useVarName . ') or an arrow function.'
+                    );
+                }
+            }
             log_message('debug', 'Use variable names found: ' . json_encode($useVarNames));
             log_message('debug', 'Variable values extracted: ' . json_encode($variableValues));
             
@@ -4103,7 +4109,6 @@ class AdvancedQueryBuilder
             }
 
             $navProperty = $entityReflection->getProperty($navigationProperty);
-            $navProperty->setAccessible(true);
             
             // Get property type from docblock or type hint
             $docComment = $navProperty->getDocComment();
@@ -4234,7 +4239,6 @@ class AdvancedQueryBuilder
         foreach ($entities as $entity) {
             $reflection = new ReflectionClass($entity);
                 $property = $reflection->getProperty($foreignKey);
-                $property->setAccessible(true);
                 $value = $property->getValue($entity);
                 if ($value !== null) {
                     $foreignKeyValues[] = $value;
@@ -4269,7 +4273,6 @@ class AdvancedQueryBuilder
         foreach ($relatedEntities as $relatedEntity) {
             $reflection = new ReflectionClass($relatedEntity);
             $idProperty = $reflection->getProperty('Id');
-            $idProperty->setAccessible(true);
             $id = $idProperty->getValue($relatedEntity);
             $grouped[$id] = $relatedEntity;
         }
@@ -4278,12 +4281,10 @@ class AdvancedQueryBuilder
         foreach ($entities as $entity) {
                 $entityRef = new ReflectionClass($entity);
                 $fkProperty = $entityRef->getProperty($foreignKey);
-            $fkProperty->setAccessible(true);
             $fkValue = $fkProperty->getValue($entity);
             
             if (isset($grouped[$fkValue])) {
                     $navProperty = $entityRef->getProperty($navigationProperty);
-                $navProperty->setAccessible(true);
                 $navProperty->setValue($entity, $grouped[$fkValue]);
                 }
             }
@@ -4295,7 +4296,6 @@ class AdvancedQueryBuilder
             foreach ($entities as $entity) {
                 $entityRef = new ReflectionClass($entity);
                 $idProperty = $entityRef->getProperty('Id');
-                $idProperty->setAccessible(true);
                 $id = $idProperty->getValue($entity);
                 if ($id !== null) {
                     $entityIds[] = $id;
@@ -4341,7 +4341,6 @@ class AdvancedQueryBuilder
             foreach ($relatedEntities as $relatedEntity) {
                 $reflection = new ReflectionClass($relatedEntity);
                 $fkProperty = $reflection->getProperty($foreignKey);
-                $fkProperty->setAccessible(true);
                 $fkValue = $fkProperty->getValue($relatedEntity);
                 
                 if ($fkValue !== null) {
@@ -4353,17 +4352,14 @@ class AdvancedQueryBuilder
             foreach ($entities as $entity) {
                 $entityRef = new ReflectionClass($entity);
                 $idProperty = $entityRef->getProperty('Id');
-                $idProperty->setAccessible(true);
                 $id = $idProperty->getValue($entity);
                 
                 if (isset($grouped[$id])) {
                     $navProperty = $entityRef->getProperty($navigationProperty);
-                    $navProperty->setAccessible(true);
                     $navProperty->setValue($entity, $grouped[$id]);
                 } else {
                     // Set to null if no related entity found
                     $navProperty = $entityRef->getProperty($navigationProperty);
-                    $navProperty->setAccessible(true);
                     $navProperty->setValue($entity, null);
                 }
             }
@@ -4381,7 +4377,6 @@ class AdvancedQueryBuilder
         foreach ($entities as $entity) {
             $entityRef = new ReflectionClass($entity);
             $idProperty = $entityRef->getProperty('Id');
-            $idProperty->setAccessible(true);
             $id = $idProperty->getValue($entity);
             if ($id !== null) {
                 $entityIds[] = $id;
@@ -4420,7 +4415,6 @@ class AdvancedQueryBuilder
         foreach ($relatedEntities as $relatedEntity) {
             $reflection = new ReflectionClass($relatedEntity);
             $fkProperty = $reflection->getProperty($foreignKey);
-            $fkProperty->setAccessible(true);
             $fkValue = $fkProperty->getValue($relatedEntity);
             
             if ($fkValue !== null) {
@@ -4435,17 +4429,14 @@ class AdvancedQueryBuilder
         foreach ($entities as $entity) {
             $entityRef = new ReflectionClass($entity);
             $idProperty = $entityRef->getProperty('Id');
-            $idProperty->setAccessible(true);
             $id = $idProperty->getValue($entity);
             
             if (isset($grouped[$id])) {
                 $navProperty = $entityRef->getProperty($navigationProperty);
-                $navProperty->setAccessible(true);
                 $navProperty->setValue($entity, $grouped[$id]);
             } else {
                 // Initialize empty array if no related entities
                 $navProperty = $entityRef->getProperty($navigationProperty);
-                $navProperty->setAccessible(true);
                 $navProperty->setValue($entity, []);
             }
         }
@@ -4460,7 +4451,6 @@ class AdvancedQueryBuilder
         $parentEntities = [];
         $entityReflection = self::getCachedReflection($this->entityType);
         $parentNavProperty = $entityReflection->getProperty($parentNavigation);
-        $parentNavProperty->setAccessible(true);
 
         foreach ($entities as $entity) {
             $parentValue = $parentNavProperty->getValue($entity);
@@ -4491,7 +4481,6 @@ class AdvancedQueryBuilder
         }
 
         $navProperty = $parentReflection->getProperty($navigationProperty);
-        $navProperty->setAccessible(true);
         
         // Get docblock to determine if collection or reference
         $docComment = $navProperty->getDocComment();
@@ -4564,7 +4553,6 @@ class AdvancedQueryBuilder
             $row = $this->entityToArray($entity);
             $reflection = new ReflectionClass($entity);
             $idProperty = $reflection->getProperty('Id');
-            $idProperty->setAccessible(true);
             $id = $idProperty->getValue($entity);
             
             // Remove Id from update data
@@ -4609,7 +4597,6 @@ class AdvancedQueryBuilder
                 continue;
             }
             
-            $property->setAccessible(true);
             $value = $property->getValue($entity);
             
             // Skip navigation properties
@@ -7625,7 +7612,6 @@ class AdvancedQueryBuilder
         }
         
         $navProperty = $entityReflection->getProperty($navigationProperty);
-        $navProperty->setAccessible(true);
         $docComment = $navProperty->getDocComment();
         
         $relatedEntityType = null;
@@ -11086,7 +11072,6 @@ class AdvancedQueryBuilder
                         continue; // Skip nested navigations here, they'll be handled later
                     }
                     $navProperty = $entityReflection->getProperty($navPath);
-                    $navProperty->setAccessible(true);
                     $navProperty->setValue($entity, null);
                 }
                 foreach ($collectionNavInfo as $navPath => $info) {
@@ -11096,7 +11081,6 @@ class AdvancedQueryBuilder
                         continue; // Skip nested collections here
                     }
                     $navProperty = $entityReflection->getProperty($navPath);
-                    $navProperty->setAccessible(true);
                     $navProperty->setValue($entity, []);
                 }
                 
@@ -11119,7 +11103,6 @@ class AdvancedQueryBuilder
                 }
                 
                 $navProperty = $entityReflection->getProperty($navPath);
-                $navProperty->setAccessible(true);
                 
                 // Check if navigation is already set
                 if ($navProperty->getValue($entity) !== null) {
@@ -11286,7 +11269,6 @@ class AdvancedQueryBuilder
                         // Check if this is a nested navigation for the current reference navigation
                         if (isset($nestedInfo['parentPath']) && $nestedInfo['parentPath'] === $navPath) {
                             $nestedNavProperty = $refEntityReflection->getProperty(str_replace($navPath . '.', '', $nestedNavPath));
-                            $nestedNavProperty->setAccessible(true);
                             
                             // Check if nested navigation is already set
                             if ($nestedNavProperty->getValue($refEntity) !== null) {
@@ -11376,7 +11358,6 @@ class AdvancedQueryBuilder
                         }
                         
                         $parentNavProperty = $currentEntityReflection->getProperty($parentPart);
-                        $parentNavProperty->setAccessible(true);
                         $parentEntity = $parentNavProperty->getValue($parentEntity);
                         
                         if ($parentEntity === null) {
@@ -11401,7 +11382,6 @@ class AdvancedQueryBuilder
                 }
                 
                 $nestedNavProperty = $parentEntityReflection->getProperty($property);
-                $nestedNavProperty->setAccessible(true);
                 
                 // Check if already set
                 if ($nestedNavProperty->getValue($parentEntity) !== null) {
@@ -11467,7 +11447,6 @@ class AdvancedQueryBuilder
                         }
                         
                         $partProp = $currentReflection->getProperty($part);
-                        $partProp->setAccessible(true);
                         $currentEntity = $partProp->getValue($currentEntity);
                         
                         if ($currentEntity === null) {
@@ -11514,7 +11493,6 @@ class AdvancedQueryBuilder
                     $navProperty = $entityReflection->getProperty($navPath);
                 }
                 
-                $navProperty->setAccessible(true);
                 $collection = $navProperty->getValue($targetEntity);
                 if ($collection === null) {
                     $collection = [];
@@ -11643,7 +11621,6 @@ class AdvancedQueryBuilder
                         if (!isset($idPropertyCache[$itemClass])) {
                             $itemReflection = new ReflectionClass($itemClass);
                             $idProperty = $itemReflection->getProperty($this->getPrimaryKeyColumnName($itemReflection));
-                            $idProperty->setAccessible(true);
                             $idPropertyCache[$itemClass] = $idProperty;
                         }
                         $idProperty = $idPropertyCache[$itemClass];
@@ -11826,7 +11803,6 @@ class AdvancedQueryBuilder
                                             // Create related entity and set it to collection item's navigation property
                                             $navPropEntity = $this->mapRowToEntity($navPropData, $navPropReflection);
                                             $navPropProperty = $collectionItemReflection->getProperty($prop->getName());
-                                            $navPropProperty->setAccessible(true);
                                             $navPropProperty->setValue($collectionItem, $navPropEntity);
                                             
                                             // Check for thenIncludes for this reference navigation within collection
@@ -11959,7 +11935,6 @@ class AdvancedQueryBuilder
                                 
                                 if ($joinEntityReflection->hasProperty($relatedNavPropertyName)) {
                                     $relatedNavProperty = $joinEntityReflection->getProperty($relatedNavPropertyName);
-                                    $relatedNavProperty->setAccessible(true);
                                     $relatedNavProperty->setValue($joinEntity, $relatedEntity);
                                 }
                                 
@@ -12000,7 +11975,6 @@ class AdvancedQueryBuilder
                 }
                 if ($entityReflection->hasProperty($navPath)) {
                     $navProperty = $entityReflection->getProperty($navPath);
-                    $navProperty->setAccessible(true);
                     $collection = $navProperty->getValue($entity);
                 }
             }
@@ -12030,7 +12004,6 @@ class AdvancedQueryBuilder
             if (!$thenNavInfo['isCollection']) {
                 // Reference navigation: e.g., Department in UserDepartment
                 $navProperty = $relatedEntityReflection->getProperty($thenIncludeNav);
-                $navProperty->setAccessible(true);
                 
                 // The related entity data should already be in the row with prefix from parent subquery
                 // For example, if parent is s0 (UserDepartments), Department columns are s0_Id0, s0_Name
@@ -12044,7 +12017,6 @@ class AdvancedQueryBuilder
             }
             
             $navProperty = $relatedEntityReflection->getProperty($thenIncludeNav);
-            $navProperty->setAccessible(true);
             $collection = $navProperty->getValue($relatedEntity) ?? [];
             
             // Nested subquery alias (e.g., s1 for AccessGroupReaders within AccessGroup)
@@ -12119,7 +12091,6 @@ class AdvancedQueryBuilder
                         }
                     }
                     $idProperty = $itemReflection->getProperty($idPropertyName);
-                    $idProperty->setAccessible(true);
                     $itemId = $idProperty->getValue($item);
                     if ($itemId == $nestedCollectionId) {
                         $exists = true;
@@ -12268,7 +12239,6 @@ class AdvancedQueryBuilder
                                 // Create related entity and set it to nested entity's navigation property
                                 $navPropEntity = $this->mapRowToEntity($navPropData, $navPropReflection);
                                 $navPropProperty = $nestedEntityReflection->getProperty($navPropName);
-                                $navPropProperty->setAccessible(true);
                                 $navPropProperty->setValue($nestedEntity, $navPropEntity);
                                 
                                 log_message('debug', "parseNestedCollections: Set '{$navPropName}' reference navigation property in nested entity '{$nestedEntityType}'");
@@ -12351,7 +12321,6 @@ class AdvancedQueryBuilder
                             
                             if ($nestedJoinEntityReflection->hasProperty($nestedRelatedNavPropertyName)) {
                                 $nestedRelatedNavProperty = $nestedJoinEntityReflection->getProperty($nestedRelatedNavPropertyName);
-                                $nestedRelatedNavProperty->setAccessible(true);
                                 $nestedRelatedNavProperty->setValue($nestedJoinEntity, $nestedRelatedEntity);
                             }
                             
@@ -12398,7 +12367,6 @@ class AdvancedQueryBuilder
             $columnName = $this->getColumnNameFromProperty($entityReflection, $property->getName());
             [$hasColumn, $value] = $this->getRowValueInsensitive($row, $columnName);
             if ($hasColumn) {
-                $property->setAccessible(true);
                 
                 // Check if property has type and if null is allowed
                 $isNullable = false;

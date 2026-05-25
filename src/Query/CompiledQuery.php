@@ -90,11 +90,11 @@ class CompiledQuery
         
         if ($file && $start && $end) {
             // Use file location and line numbers as cache key
-            return md5($file . ':' . $start . ':' . $end);
+            return hash('sha256', $file . ':' . $start . ':' . $end);
         }
         
         // Fallback: use function name or generate random key
-        return md5(serialize($queryBuilder));
+        return hash('sha256', serialize($queryBuilder));
     }
 
     /**

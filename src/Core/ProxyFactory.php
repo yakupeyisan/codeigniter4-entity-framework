@@ -30,7 +30,6 @@ class ProxyFactory
         }
 
         $navProperty = $entityReflection->getProperty($navigationProperty);
-        $navProperty->setAccessible(true);
         
         // Check if already loaded
         $currentValue = $navProperty->getValue($entity);
@@ -211,7 +210,6 @@ class ProxyFactory
         $reflection = new ReflectionClass($entity);
         if ($reflection->hasProperty($propertyName)) {
             $property = $reflection->getProperty($propertyName);
-            $property->setAccessible(true);
             
             // Check if property already has a value (loaded via Include)
             $currentValue = $property->getValue($entity);

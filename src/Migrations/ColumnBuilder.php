@@ -21,6 +21,34 @@ class ColumnBuilder
         ];
         return $this;
     }
+
+    /**
+     * Add bigint column (SQL Server BIGINT)
+     */
+    public function bigInteger(string $name): self
+    {
+        $this->fields[$name] = [
+            'type' => 'BIGINT',
+            'auto_increment' => false,
+            'null' => true,
+        ];
+
+        return $this;
+    }
+
+    /**
+     * Add SQL Server TIME column
+     */
+    public function time(string $name, int $precision = 0): self
+    {
+        $this->fields[$name] = [
+            'type' => 'TIME(' . $precision . ')',
+            'auto_increment' => false,
+            'null' => true,
+        ];
+
+        return $this;
+    }
     
     /**
      * Set as primary key
@@ -163,6 +191,32 @@ class ColumnBuilder
             'type' => 'TIMESTAMP',
             'null' => true
         ];
+        return $this;
+    }
+
+    /**
+     * SQL Server UNIQUEIDENTIFIER (GUID)
+     */
+    public function uniqueidentifier(string $name): self
+    {
+        $this->fields[$name] = [
+            'type' => 'UNIQUEIDENTIFIER',
+            'null' => true,
+        ];
+
+        return $this;
+    }
+
+    /**
+     * DEFAULT NEWID() for the last column (SQL Server GUID PK).
+     */
+    public function defaultNewId(): self
+    {
+        $lastKey = array_key_last($this->fields);
+        if ($lastKey !== null) {
+            $this->fields[$lastKey]['default_newid'] = true;
+        }
+
         return $this;
     }
 

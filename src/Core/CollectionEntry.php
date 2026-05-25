@@ -41,7 +41,6 @@ class CollectionEntry
     {
         $entity = $this->entityEntry->getEntity();
         $reflection = new \ReflectionProperty($entity, $this->propertyName);
-        $reflection->setAccessible(true);
         $value = $reflection->getValue($entity);
         return is_array($value) ? $value : [];
     }

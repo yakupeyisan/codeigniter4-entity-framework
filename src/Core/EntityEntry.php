@@ -118,7 +118,6 @@ class EntityEntry
             throw new $exceptionClass("Cannot reload entity: Primary key not found for {$entityType}");
         }
         
-        $primaryKeyProperty->setAccessible(true);
         $id = $primaryKeyProperty->getValue($this->entity);
         
         if ($id === null) {
@@ -149,7 +148,6 @@ class EntityEntry
                 continue;
             }
             
-            $property->setAccessible(true);
             
             // Skip internal tracking properties
             $excludedProperties = [

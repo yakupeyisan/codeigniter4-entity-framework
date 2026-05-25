@@ -84,7 +84,7 @@ class QueryCache
             'takeCount' => $queryState['takeCount'] ?? null,
         ];
         
-        return md5(serialize($keyData));
+        return hash('sha256', serialize($keyData));
     }
 
     /**

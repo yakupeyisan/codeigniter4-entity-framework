@@ -103,7 +103,6 @@ abstract class Entity implements \JsonSerializable
         $reflection = new \ReflectionClass($this);
         foreach ($reflection->getProperties() as $property) {
             if (!$property->isStatic()) {
-                $property->setAccessible(true);
                 // Check if property is initialized before accessing it
                 // This prevents "must not be accessed before initialization" errors for typed properties
                 if ($property->isInitialized($this)) {
@@ -265,7 +264,6 @@ abstract class Entity implements \JsonSerializable
         $reflection = new \ReflectionClass($this);
         if ($reflection->hasProperty($name)) {
             $property = $reflection->getProperty($name);
-            $property->setAccessible(true);
             return $property->getValue($this) !== null;
         }
 
@@ -304,9 +302,7 @@ abstract class Entity implements \JsonSerializable
             if (in_array($propertyName, $excludedProperties)) {
                 continue;
             }
-            
-            $property->setAccessible(true);
-            
+
             // Check if property is initialized (for typed properties)
             if (!$property->isInitialized($this)) {
                 // For nullable properties, use null; for non-nullable, skip

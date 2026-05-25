@@ -130,6 +130,22 @@ class MigrationBuilder
     }
 
     /**
+     * Execute raw SQL for views, functions, sequences (from GenerateQuery attributes).
+     */
+    public function executeSql(string $sql, string $objectType, string $objectName, string $schema = 'dbo'): self
+    {
+        $this->operations[] = [
+            'type' => 'executeSql',
+            'sql' => $sql,
+            'objectType' => $objectType,
+            'objectName' => $objectName,
+            'schema' => $schema,
+        ];
+
+        return $this;
+    }
+
+    /**
      * Execute operations
      */
     public function execute(): void
@@ -195,7 +211,28 @@ class MigrationBuilder
                     $this->connection->query("ALTER TABLE `{$operation['table']}` DROP FOREIGN KEY `{$operation['name']}`");
                 }
                 break;
+            case 'executeSql':
+                $this->executeExecuteSql($operation);
+                break;
         }
+    }
+
+    private function executeExecuteSql(array $operation): void
+    {
+        $driver = strtolower($this->connection->getPlatform() ?? '');
+        if ($driver !== 'sqlsrv' && $driver !== 'sqlserver') {
+            $this->connection->query($operation['sql']);
+
+            return;
+        }
+
+        $executor = new SqlBatchExecutor($this->connection);
+        $executor->execute(
+            $operation['sql'],
+            $operation['objectType'] ?? 'function',
+            $operation['objectName'] ?? '',
+            true
+        );
     }
 
     /**
@@ -256,7 +293,7 @@ class MigrationBuilder
         $primaryKeys = [];
         
         foreach ($fields as $fieldName => $fieldConfig) {
-            $type = $fieldConfig['type'] ?? 'INT';
+            $type = $this->mapSqlServerColumnType($fieldConfig['type'] ?? 'INT');
             $isPrimary = isset($fieldConfig['primary_key']) && $fieldConfig['primary_key'];
             $isAutoIncrement = isset($fieldConfig['auto_increment']) && $fieldConfig['auto_increment'];
             $isNull = isset($fieldConfig['null']) ? $fieldConfig['null'] : true;
@@ -264,8 +301,8 @@ class MigrationBuilder
             
             $columnDef = "[{$fieldName}] {$type}";
             
-            // IDENTITY columns must be NOT NULL in SQL Server
-            if ($isAutoIncrement && $isPrimary) {
+            // IDENTITY only on numeric PK columns (never on string/uniqueidentifier)
+            if ($isAutoIncrement && $isPrimary && $this->sqlServerTypeSupportsIdentity($type)) {
                 $columnDef .= " IDENTITY(1,1) NOT NULL";
             } else {
                 if (!$isNull) {
@@ -275,8 +312,13 @@ class MigrationBuilder
                 }
             }
             
-            if ($default !== null) {
-                if (is_string($default)) {
+            if (! empty($fieldConfig['default_newid'])) {
+                $columnDef .= ' DEFAULT NEWID()';
+            } elseif ($default !== null && $default !== '') {
+                $isDateTime = preg_match('/^DATETIME/i', $type) === 1;
+                if ($isDateTime && is_string($default) && trim($default) === '') {
+                    // Skip invalid empty-string default on DATETIME (SQL Server conversion error).
+                } elseif (is_string($default)) {
                     $columnDef .= " DEFAULT '{$default}'";
                 } else {
                     $columnDef .= " DEFAULT {$default}";
@@ -291,6 +333,13 @@ class MigrationBuilder
         }
         
         $tableName = $operation['name'];
+
+        if ($this->sqlServerTableExists($tableName)) {
+            log_message('info', "Migration: table [{$tableName}] already exists, skipping CREATE.");
+
+            return;
+        }
+
         $sql = "CREATE TABLE [{$tableName}] (\n    " . implode(",\n    ", $columns);
         
         if (!empty($primaryKeys)) {
@@ -360,99 +409,116 @@ class MigrationBuilder
         $referencedTable = $operation['referencedTable'];
         $referencedColumns = $operation['referencedColumns'];
         $onDelete = $operation['onDelete'];
-        
-        // Check if foreign key already exists - use more specific query with schema
-        $checkSql = "SELECT COUNT(*) as cnt FROM sys.foreign_keys fk 
-                     INNER JOIN sys.tables t ON fk.parent_object_id = t.object_id 
-                     WHERE fk.name = N'{$name}' AND t.name = N'{$table}'";
-        $result = $this->connection->query($checkSql)->getRow();
-        if ($result && $result->cnt > 0) {
-            log_message('debug', "Foreign key [{$name}] already exists on table [{$table}], skipping...");
+
+        if ($this->sqlServerForeignKeyExists($name, $table)) {
+            log_message('info', "Migration: FK [{$name}] on [{$table}] already exists, skipping.");
+
             return;
         }
-        
-        // Map onDelete values to SQL Server syntax
+
         $onDeleteMap = [
             'CASCADE' => 'CASCADE',
             'SET NULL' => 'SET NULL',
             'RESTRICT' => 'NO ACTION',
-            'NO ACTION' => 'NO ACTION'
+            'NO ACTION' => 'NO ACTION',
         ];
         $onDeleteSql = $onDeleteMap[$onDelete] ?? 'NO ACTION';
-        
-        // Build column lists
+
         $columnList = implode(', ', array_map(fn($col) => "[{$col}]", $columns));
         $referencedColumnList = implode(', ', array_map(fn($col) => "[{$col}]", $referencedColumns));
-        
+
         $sql = "ALTER TABLE [{$table}] " .
                "ADD CONSTRAINT [{$name}] " .
                "FOREIGN KEY ({$columnList}) " .
                "REFERENCES [{$referencedTable}] ({$referencedColumnList}) " .
                "ON DELETE {$onDeleteSql}";
-        
-        log_message('debug', "Creating foreign key: {$sql}");
-        
+
         try {
-            // Execute the query and check result
-            $result = $this->connection->query($sql);
-            
-            // Check if query was successful
-            if ($result === false) {
-                $error = $this->connection->error();
-                log_message('error', "Query returned false for foreign key [{$name}]: " . json_encode($error));
-                throw new \RuntimeException("Failed to execute foreign key creation query");
+            $this->connection->query($sql);
+        } catch (\Throwable $e) {
+            if ($this->isSqlServerAlreadyExistsError($e) || $this->sqlServerForeignKeyExists($name, $table)) {
+                log_message('info', "Migration: FK [{$name}] already exists (caught), skipping.");
+
+                return;
             }
-            
-            log_message('debug', "Foreign key [{$name}] query executed successfully");
-            
-            // Force commit for SQL Server (DDL statements auto-commit, but let's be sure)
-            $this->connection->transCommit();
-            
-            // Wait a bit for SQL Server to commit (if needed)
-            usleep(100000); // 100ms
-            
-            // Verify foreign key was created - use more specific query with current database context
-            $dbName = $this->connection->getDatabase();
-            $verifySql = "SELECT COUNT(*) as cnt 
-                          FROM [{$dbName}].sys.foreign_keys fk 
-                          INNER JOIN [{$dbName}].sys.tables t ON fk.parent_object_id = t.object_id 
-                          WHERE fk.name = N'{$name}' AND t.name = N'{$table}'";
-            $verifyResult = $this->connection->query($verifySql)->getRow();
-            
-            log_message('debug', "Verification query for [{$name}]: {$verifySql}");
-            log_message('debug', "Verification result: " . json_encode($verifyResult));
-            log_message('debug', "Current database: {$dbName}");
-            
-            if ($verifyResult && $verifyResult->cnt > 0) {
-                log_message('debug', "Foreign key [{$name}] verified in database [{$dbName}]");
-            } else {
-                log_message('error', "Foreign key [{$name}] was not found in database [{$dbName}] after creation!");
-                
-                // Try to get more info about the table
-                $tableCheckSql = "SELECT OBJECT_ID(N'{$table}') as table_id, SCHEMA_NAME(schema_id) as schema_name, name 
-                                  FROM sys.tables WHERE name = N'{$table}'";
-                $tableResult = $this->connection->query($tableCheckSql)->getRow();
-                log_message('error', "Table [{$table}] info: " . json_encode($tableResult));
-                
-                // List all foreign keys on this table
-                $allFkSql = "SELECT fk.name, t.name as table_name, SCHEMA_NAME(t.schema_id) as schema_name 
-                             FROM sys.foreign_keys fk 
-                             INNER JOIN sys.tables t ON fk.parent_object_id = t.object_id 
-                             WHERE t.name = N'{$table}'";
-                $allFkResult = $this->connection->query($allFkSql)->getResultArray();
-                log_message('error', "All foreign keys on table [{$table}]: " . json_encode($allFkResult));
-                
-                // Also check if the constraint exists with a different name
-                $constraintSql = "SELECT name, type_desc FROM sys.objects WHERE parent_object_id = OBJECT_ID(N'{$table}') AND type = 'F'";
-                $constraintResult = $this->connection->query($constraintSql)->getResultArray();
-                log_message('error', "All constraints (type F) on table [{$table}]: " . json_encode($constraintResult));
-            }
-        } catch (\Exception $e) {
+
             log_message('error', "Failed to create foreign key [{$name}]: " . $e->getMessage());
             log_message('error', "SQL: {$sql}");
-            log_message('error', "Stack trace: " . $e->getTraceAsString());
+
             throw $e;
         }
+    }
+
+    private function sqlServerForeignKeyExists(string $name, string $table): bool
+    {
+        $sql = "SELECT COUNT(*) AS cnt
+                FROM sys.foreign_keys fk
+                INNER JOIN sys.tables t ON fk.parent_object_id = t.object_id
+                WHERE fk.name = ? AND t.name = ?";
+
+        $row = $this->connection->query($sql, [$name, $table])->getRowArray();
+
+        return $this->sqlServerQueryCount($row) > 0;
+    }
+
+    private function sqlServerQueryCount(?array $row): int
+    {
+        if ($row === null) {
+            return 0;
+        }
+
+        return (int) ($row['cnt'] ?? $row['CNT'] ?? 0);
+    }
+
+    private function isSqlServerAlreadyExistsError(\Throwable $e): bool
+    {
+        $msg = strtolower($e->getMessage());
+
+        return str_contains($msg, 'already exists')
+            || str_contains($msg, 'zaten var')
+            || str_contains($msg, 'there is already');
+    }
+
+    private function sqlServerTableExists(string $tableName): bool
+    {
+        $row = $this->connection->query(
+            'SELECT OBJECT_ID(?, \'U\') AS oid',
+            [$tableName]
+        )->getRowArray();
+
+        return ! empty($row['oid']);
+    }
+
+    /**
+     * SQL Server: TINYINT(1) / BOOLEAN → BIT; TINYINT(n) → TINYINT (width not allowed).
+     */
+    private function mapSqlServerColumnType(string $type): string
+    {
+        $normalized = strtoupper(trim($type));
+
+        if ($normalized === 'TINYINT(1)' || $normalized === 'BOOLEAN' || $normalized === 'BOOL') {
+            return 'BIT';
+        }
+
+        if (preg_match('/^TINYINT\s*\(\s*\d+\s*\)$/i', $type)) {
+            return 'TINYINT';
+        }
+
+        if (preg_match('/^TIME(\(\d+\))?$/i', $normalized, $matches)) {
+            return isset($matches[1]) ? strtoupper($type) : 'TIME(0)';
+        }
+
+        return $type;
+    }
+
+    private function sqlServerTypeSupportsIdentity(string $type): bool
+    {
+        $normalized = strtoupper(preg_replace('/\s+/', '', $type));
+
+        return (bool) preg_match(
+            '/^(TINYINT|SMALLINT|INT|INTEGER|BIGINT|DECIMAL|NUMERIC)(\(|$)/',
+            $normalized
+        );
     }
 }
 

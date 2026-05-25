@@ -21,6 +21,12 @@ class MigrationGenerator
     private array $existingTables = [];
     private array $existingColumns = [];
 
+    /** @var list<array{objectName: string, objectType: string, schema: string, sql: string, deployOrder: int, sqlHash: string, sourceClass: string}> */
+    private array $programmabilityObjects = [];
+
+    /** @var array<string, string> key "type:name" => sql_hash */
+    private array $knownSqlObjectHashes = [];
+
     public function __construct(string $contextClass, ?BaseConnection $connection = null)
     {
         $this->contextClass = $contextClass;
@@ -309,6 +315,9 @@ class MigrationGenerator
             
             // Also analyze onModelCreating to get entities configured there
             $this->analyzeOnModelCreating($reflection, $useStatements);
+
+            // Include lookup/reference entities not exposed as DbSet on ApplicationDbContext
+            $this->discoverAllEntityClasses();
             
             error_log("Total entities after analysis: " . count($this->entities));
         } catch (\Exception $e) {
@@ -318,6 +327,9 @@ class MigrationGenerator
         
         // Also analyze onModelCreating to get Fluent API configurations
         $this->analyzeFluentApi();
+
+        $this->programmabilityObjects = ProgrammabilityDiscovery::discover();
+        $this->loadKnownSqlObjectHashes();
     }
     
     /**
@@ -411,6 +423,74 @@ class MigrationGenerator
     }
 
     /**
+     * Discover entity classes under App/Entities not registered as DbSet on ApplicationDbContext.
+     */
+    private function discoverAllEntityClasses(): void
+    {
+        if (! defined('APPPATH')) {
+            return;
+        }
+
+        $root = APPPATH . 'Entities';
+        if (! is_dir($root)) {
+            return;
+        }
+
+        $entityBase = \Yakupeyisan\CodeIgniter4\EntityFramework\Core\Entity::class;
+        $iterator = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($root, \FilesystemIterator::SKIP_DOTS)
+        );
+
+        foreach ($iterator as $file) {
+            if (! $file->isFile() || $file->getExtension() !== 'php') {
+                continue;
+            }
+
+            $class = $this->resolveClassNameFromEntityFile($file->getPathname());
+            if ($class === null || ! class_exists($class)) {
+                continue;
+            }
+
+            try {
+                if (ProgrammabilityDiscovery::shouldSkipTableMigration($class)) {
+                    continue;
+                }
+
+                $reflection = new ReflectionClass($class);
+                if ($reflection->isAbstract() || ! $reflection->isSubclassOf($entityBase)) {
+                    continue;
+                }
+
+                $tableName = $this->getTableName($reflection);
+                if ($tableName === null || isset($this->entities[$tableName])) {
+                    continue;
+                }
+
+                $this->analyzeEntity($class);
+            } catch (\Throwable $e) {
+                error_log('discoverAllEntityClasses: skip ' . ($class ?? $file->getPathname()) . ': ' . $e->getMessage());
+            }
+        }
+    }
+
+    private function resolveClassNameFromEntityFile(string $path): ?string
+    {
+        $content = @file_get_contents($path);
+        if ($content === false) {
+            return null;
+        }
+
+        if (! preg_match('/namespace\s+([^;]+);/', $content, $nsMatch)) {
+            return null;
+        }
+        if (! preg_match('/\bclass\s+(\w+)/', $content, $classMatch)) {
+            return null;
+        }
+
+        return trim($nsMatch[1]) . '\\' . trim($classMatch[1]);
+    }
+
+    /**
      * Get method body as string (simplified - reads from file)
      */
     private function getMethodBody(ReflectionMethod $method): string
@@ -466,6 +546,9 @@ class MigrationGenerator
             error_log("Entity class does not exist: {$entityClass}");
             return;
         }
+        if (ProgrammabilityDiscovery::shouldSkipTableMigration($entityClass)) {
+            return;
+        }
         try {
             $reflection = new ReflectionClass($entityClass);
             
@@ -490,8 +573,7 @@ class MigrationGenerator
             $properties = $reflection->getProperties(ReflectionProperty::IS_PUBLIC);
             
             foreach ($properties as $property) {
-                // Skip navigation properties (they are objects or arrays)
-                if ($this->isNavigationProperty($property)) {
+                if ($this->isNavigationProperty($property) || $this->isNotMappedProperty($property)) {
                     continue;
                 }
                 try {
@@ -504,13 +586,13 @@ class MigrationGenerator
                             $entityInfo['primaryKey'] = $columnInfo['name'];
                         }
                         
-                        // Check if it's a foreign key
-                        if ($columnInfo['isForeignKey']) {
+                        // Check if it's a foreign key (skip reverse FK on principal PK / IDENTITY)
+                        if ($columnInfo['isForeignKey'] && ! $this->shouldSkipForeignKeyMigration($columnInfo)) {
                             $entityInfo['foreignKeys'][] = [
                                 'column' => $columnInfo['name'],
                                 'referencedTable' => $columnInfo['referencedTable'] ?? null,
-                                'referencedColumn' => $columnInfo['referencedColumn'] ?? 'Id',
-                                'onDelete' => $columnInfo['onDelete'] ?? 'CASCADE'
+                                'referencedColumn' => $columnInfo['referencedColumn'] ?? $columnInfo['name'],
+                                'onDelete' => $columnInfo['onDelete'] ?? 'NO ACTION',
                             ];
                         }
                     }
@@ -528,11 +610,15 @@ class MigrationGenerator
                 $entityInfo['indexes'] = [];
             }
 
-            // Get audit fields
+            // Get audit fields (skip if entity already declares them)
             try {
+                $existingColumnNames = array_column($entityInfo['columns'], 'name');
                 $auditFields = $this->getAuditFields($reflection);
                 foreach ($auditFields as $field) {
-                    $entityInfo['columns'][] = $field;
+                    if (! in_array($field['name'], $existingColumnNames, true)) {
+                        $entityInfo['columns'][] = $field;
+                        $existingColumnNames[] = $field['name'];
+                    }
                 }
             } catch (\Exception $e) {
                 // Skip audit fields if analysis fails
@@ -602,6 +688,33 @@ class MigrationGenerator
         return false;
     }
 
+    private function isNotMappedProperty(ReflectionProperty $property): bool
+    {
+        return $property->getAttributes(
+            \Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\NotMapped::class
+        ) !== [];
+    }
+
+    /**
+     * Principal PK üzerindeki yanlış ForeignKey attribute'larını migration'a yansıtma.
+     * Bağımlı uç (PaymentOfVirtualPos.PaymentId) korunur; IDENTITY PK (Payments.Id) atlanır.
+     */
+    private function shouldSkipForeignKeyMigration(array $columnInfo): bool
+    {
+        if ($columnInfo['isPrimaryKey'] === true
+            && $columnInfo['isAutoIncrement'] === true) {
+            return true;
+        }
+
+        // Alternate-key joins (TagCode, DeviceSerial, …): legacy DB has no FK constraints.
+        $name = $columnInfo['name'] ?? '';
+        if ($name !== '' && ! preg_match('/Id$/i', $name)) {
+            return true;
+        }
+
+        return false;
+    }
+
     /**
      * Analyze property to get column information
      */
@@ -617,7 +730,7 @@ class MigrationGenerator
             'isForeignKey' => false,
             'referencedTable' => null,
             'referencedColumn' => 'Id',
-            'onDelete' => 'CASCADE',
+            'onDelete' => 'NO ACTION',
             'isNullable' => true
         ];
 
@@ -651,7 +764,8 @@ class MigrationGenerator
                     
                 case 'Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\DatabaseGenerated':
                     $option = $args[0] ?? $args['option'] ?? \Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\DatabaseGenerated::IDENTITY;
-                    if ($option === \Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\DatabaseGenerated::IDENTITY) {
+                    if ($option === \Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\DatabaseGenerated::IDENTITY
+                        && $columnInfo['type'] === 'integer') {
                         $columnInfo['isAutoIncrement'] = true;
                     }
                     break;
@@ -662,14 +776,25 @@ class MigrationGenerator
                     }
                     if (isset($args[1])) {
                         // Parse column type from VARCHAR(255) format
-                        $columnType = $args[1];
-                        if (preg_match('/VARCHAR\((\d+)\)/', $columnType, $matches)) {
+                        $columnType = trim($args[1]);
+                        if (preg_match('/VARCHAR\((\d+)\)/i', $columnType, $matches)) {
                             $columnInfo['type'] = 'string';
-                            $columnInfo['maxLength'] = (int)$matches[1];
-                        } elseif (preg_match('/INT/', $columnType)) {
-                            $columnInfo['type'] = 'integer';
-                        } elseif (preg_match('/DATETIME/', $columnType)) {
+                            $columnInfo['maxLength'] = (int) $matches[1];
+                        } elseif (preg_match('/^DATETIME/i', $columnType)) {
                             $columnInfo['type'] = 'datetime';
+                        } elseif (preg_match('/^DATE/i', $columnType)) {
+                            $columnInfo['type'] = 'date';
+                        } elseif (preg_match('/^BIGINT/i', $columnType)) {
+                            $columnInfo['type'] = 'bigInteger';
+                        } elseif (preg_match('/^TIME(\((\d+)\))?$/i', $columnType, $timeMatch)) {
+                            $columnInfo['type'] = 'time';
+                            $columnInfo['timePrecision'] = isset($timeMatch[2]) ? (int) $timeMatch[2] : 0;
+                        } elseif (preg_match('/^INT/i', $columnType)) {
+                            $columnInfo['type'] = 'integer';
+                        } elseif (preg_match('/^UNIQUEIDENTIFIER/i', $columnType)) {
+                            $columnInfo['type'] = 'uniqueidentifier';
+                        } elseif (preg_match('/^BIT/i', $columnType)) {
+                            $columnInfo['type'] = 'boolean';
                         }
                     }
                     break;
@@ -685,10 +810,13 @@ class MigrationGenerator
                     
                 case 'Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\ForeignKey':
                     $columnInfo['isForeignKey'] = true;
-                    // Try to infer referenced table from navigation property name
                     $navProp = $args[0] ?? null;
                     if ($navProp) {
-                        $columnInfo['referencedTable'] = $this->inferTableNameFromNavigation($navProp);
+                        $columnInfo['referencedTable'] = $this->resolveTableFromNavigationProperty(
+                            $property,
+                            $navProp,
+                            $columnInfo['name']
+                        );
                     }
                     break;
             }
@@ -698,12 +826,73 @@ class MigrationGenerator
     }
 
     /**
-     * Infer table name from navigation property name
+     * Navigation property / FK attribute üzerinden gerçek tablo adını entity tipinden çözümler.
+     */
+    private function resolveTableFromNavigationProperty(
+        ReflectionProperty $fkProperty,
+        string $navigationProperty,
+        string $columnName
+    ): ?string {
+        $declaringClass = $fkProperty->getDeclaringClass();
+        if ($declaringClass === false) {
+            return $this->inferTableNameFromNavigation($navigationProperty);
+        }
+
+        $candidates = array_unique(array_filter([
+            $navigationProperty,
+            preg_match('/^(.*)Id$/i', $columnName, $m) ? $m[1] : null,
+        ]));
+
+        foreach ($candidates as $navName) {
+            if (! $declaringClass->hasProperty($navName)) {
+                continue;
+            }
+
+            $navProperty = $declaringClass->getProperty($navName);
+            $entityClass = $this->getNavigationPropertyEntityClass($navProperty);
+            if ($entityClass === null) {
+                continue;
+            }
+
+            try {
+                $tableName = $this->getTableName(new ReflectionClass($entityClass));
+                if ($tableName !== null && $tableName !== '') {
+                    return $tableName;
+                }
+            } catch (\Throwable $e) {
+                continue;
+            }
+        }
+
+        return $this->inferTableNameFromNavigation($navigationProperty);
+    }
+
+    private function getNavigationPropertyEntityClass(ReflectionProperty $navProperty): ?string
+    {
+        $type = $navProperty->getType();
+        if ($type instanceof \ReflectionUnionType) {
+            foreach ($type->getTypes() as $unionType) {
+                if ($unionType instanceof \ReflectionNamedType && ! $unionType->isBuiltin()) {
+                    $type = $unionType;
+                    break;
+                }
+            }
+        }
+
+        if (! $type instanceof \ReflectionNamedType || $type->isBuiltin()) {
+            return null;
+        }
+
+        $className = $type->getName();
+
+        return class_exists($className) ? $className : null;
+    }
+
+    /**
+     * Infer table name from navigation property name (fallback)
      */
     private function inferTableNameFromNavigation(string $navigationProperty): ?string
     {
-        // Simple inference: Company -> Companies, User -> Users
-        // This is a basic implementation, can be improved
         $className = ucfirst($navigationProperty);
         if (substr($className, -1) === 'y') {
             return substr($className, 0, -1) . 'ies';
@@ -809,26 +998,22 @@ class MigrationGenerator
      */
     private function generateUpCode(): string
     {
-        if (empty($this->entities)) {
-            return '';
-        }
-        
-        $code = "";
-        
-        // Sort entities by dependencies (tables without foreign keys first)
-        $sortedEntities = $this->sortEntitiesByDependencies();
-        
-        foreach ($sortedEntities as $tableName => $entityInfo) {
-            // Only generate code for new tables or tables with changes
-            if (!$this->tableExists($tableName)) {
-                // New table - create it
-                $code .= $this->generateTableCreationCode($tableName, $entityInfo);
-            } else {
-                // Existing table - check for new columns, indexes, foreign keys
-                $code .= $this->generateTableAlterationCode($tableName, $entityInfo);
+        $code = '';
+
+        if (! empty($this->entities)) {
+            $sortedEntities = $this->sortEntitiesByDependencies();
+
+            foreach ($sortedEntities as $tableName => $entityInfo) {
+                if (! $this->tableExists($tableName)) {
+                    $code .= $this->generateTableCreationCode($tableName, $entityInfo);
+                } else {
+                    $code .= $this->generateTableAlterationCode($tableName, $entityInfo);
+                }
             }
         }
-        
+
+        $code .= $this->generateProgrammabilityUpCode();
+
         return $code;
     }
 
@@ -906,17 +1091,20 @@ class MigrationGenerator
             $code .= "\$builder->createIndex('{$tableName}', '{$index['name']}', {$columnsStr}, {$uniqueStr});\n";
         }
         
-        // Add foreign keys
+        // Add foreign keys (SQL Server: aynı hedef tabloya birden fazla CASCADE yolu olamaz)
+        $fkRefCounts = [];
+        foreach ($entityInfo['foreignKeys'] as $fk) {
+            $ref = $fk['referencedTable'] ?? '';
+            if ($ref !== '') {
+                $fkRefCounts[$ref] = ($fkRefCounts[$ref] ?? 0) + 1;
+            }
+        }
         foreach ($entityInfo['foreignKeys'] as $fk) {
             if ($fk['referencedTable']) {
-                $code .= "\$builder->addForeignKey(\n";
-                $code .= "    '{$tableName}',\n";
-                $code .= "    'FK_{$tableName}_{$fk['referencedTable']}',\n";
-                $code .= "    ['{$fk['column']}'],\n";
-                $code .= "    '{$fk['referencedTable']}',\n";
-                $code .= "    ['{$fk['referencedColumn']}'],\n";
-                $code .= "    '{$fk['onDelete']}'\n";
-                $code .= ");\n";
+                if (($fkRefCounts[$fk['referencedTable']] ?? 0) > 1) {
+                    $fk['onDelete'] = 'NO ACTION';
+                }
+                $code .= $this->generateForeignKeyCode($tableName, $fk);
             }
         }
         
@@ -955,6 +1143,9 @@ class MigrationGenerator
                         break;
                     case 'datetime':
                         $columnType = 'DATETIME';
+                        break;
+                    case 'date':
+                        $columnType = 'DATE';
                         break;
                     case 'float':
                         $columnType = 'FLOAT';
@@ -1003,14 +1194,7 @@ class MigrationGenerator
                     $code .= "// {$tableName} table alterations\n";
                     $hasChanges = true;
                 }
-                $code .= "\$builder->addForeignKey(\n";
-                $code .= "    '{$tableName}',\n";
-                $code .= "    'FK_{$tableName}_{$fk['referencedTable']}',\n";
-                $code .= "    ['{$fk['column']}'],\n";
-                $code .= "    '{$fk['referencedTable']}',\n";
-                $code .= "    ['{$fk['referencedColumn']}'],\n";
-                $code .= "    '{$fk['onDelete']}'\n";
-                $code .= ");\n";
+                $code .= $this->generateForeignKeyCode($tableName, $fk);
             }
         }
         
@@ -1019,6 +1203,76 @@ class MigrationGenerator
         }
         
         return $code;
+    }
+
+    /**
+     * FK hedef tablosunun gerçek PK sütununu entity analizinden çözümler.
+     */
+    private function generateForeignKeyCode(string $tableName, array $fk): string
+    {
+        $refTable = $this->resolveReferencedTableName($fk['referencedTable']);
+        $refColumn = $this->resolveReferencedColumn($refTable, $fk['column'] ?? null, $fk['referencedColumn'] ?? null);
+
+        $constraintName = 'FK_' . $tableName . '_' . $fk['column'];
+
+        $code = "\$builder->addForeignKey(\n";
+        $code .= "    '{$tableName}',\n";
+        $code .= "    '{$constraintName}',\n";
+        $code .= "    ['{$fk['column']}'],\n";
+        $code .= "    '{$refTable}',\n";
+        $code .= "    ['{$refColumn}'],\n";
+        $code .= "    '{$fk['onDelete']}'\n";
+        $code .= ");\n";
+
+        return $code;
+    }
+
+    private function resolveReferencedTableName(?string $referencedTable): ?string
+    {
+        if ($referencedTable === null || $referencedTable === '') {
+            return $referencedTable;
+        }
+
+        if (isset($this->entities[$referencedTable])) {
+            return $referencedTable;
+        }
+
+        if (str_ends_with($referencedTable, 'ies')) {
+            $candidate = substr($referencedTable, 0, -3) . 'y';
+            if (isset($this->entities[$candidate])) {
+                return $candidate;
+            }
+        }
+
+        if (str_ends_with($referencedTable, 's')) {
+            $candidate = substr($referencedTable, 0, -1);
+            if (isset($this->entities[$candidate])) {
+                return $candidate;
+            }
+        }
+
+        return $referencedTable;
+    }
+
+    private function resolveReferencedColumn(?string $referencedTable, ?string $localColumn, ?string $fallback = null): string
+    {
+        $table = $this->resolveReferencedTableName($referencedTable);
+        $candidates = array_values(array_unique(array_filter([$fallback, $localColumn, 'Id'])));
+
+        if ($table !== null && isset($this->entities[$table])) {
+            $columnNames = array_column($this->entities[$table]['columns'], 'name');
+            foreach ($candidates as $candidate) {
+                if ($candidate !== null && $candidate !== '' && in_array($candidate, $columnNames, true)) {
+                    return $candidate;
+                }
+            }
+
+            if (! empty($this->entities[$table]['primaryKey'])) {
+                return $this->entities[$table]['primaryKey'];
+            }
+        }
+
+        return $fallback ?? $localColumn ?? 'Id';
     }
 
     /**
@@ -1032,6 +1286,13 @@ class MigrationGenerator
             case 'integer':
                 $code .= "integer('{$column['name']}')";
                 break;
+            case 'bigInteger':
+                $code .= "bigInteger('{$column['name']}')";
+                break;
+            case 'time':
+                $precision = $column['timePrecision'] ?? 0;
+                $code .= "time('{$column['name']}', {$precision})";
+                break;
             case 'string':
                 $maxLength = $column['maxLength'] ?? 255;
                 $code .= "string('{$column['name']}', {$maxLength})";
@@ -1039,11 +1300,17 @@ class MigrationGenerator
             case 'datetime':
                 $code .= "datetime('{$column['name']}')";
                 break;
+            case 'date':
+                $code .= "date('{$column['name']}')";
+                break;
             case 'float':
                 $code .= "float('{$column['name']}')";
                 break;
             case 'boolean':
                 $code .= "boolean('{$column['name']}')";
+                break;
+            case 'uniqueidentifier':
+                $code .= "uniqueidentifier('{$column['name']}')";
                 break;
             default:
                 $code .= "string('{$column['name']}', 255)";
@@ -1053,8 +1320,12 @@ class MigrationGenerator
             $code .= "->primaryKey()";
         }
         
-        if ($column['isAutoIncrement']) {
+        if ($column['isAutoIncrement'] && $column['type'] === 'integer') {
             $code .= "->autoIncrement()";
+        }
+
+        if ($column['type'] === 'uniqueidentifier' && $column['isPrimaryKey']) {
+            $code .= "->defaultNewId()";
         }
         
         // Primary key'ler her zaman not null olmalı
@@ -1076,15 +1347,14 @@ class MigrationGenerator
      */
     private function generateDownCode(): string
     {
+        $code = $this->generateProgrammabilityDownCode();
+
         if (empty($this->entities)) {
-            return '';
+            return $code;
         }
-        
-        $code = "";
-        
-        // Reverse order (drop tables in reverse dependency order)
+
         $sortedEntities = array_reverse($this->sortEntitiesByDependencies(), true);
-        
+
         $code .= "// Rollback changes (drop new tables, remove alterations)\n";
         foreach ($sortedEntities as $tableName => $entityInfo) {
             if (!$this->tableExists($tableName)) {
@@ -1122,7 +1392,7 @@ class MigrationGenerator
             // Remove foreign keys first (if they were added)
             foreach (array_reverse($entityInfo['foreignKeys']) as $fk) {
                 if ($fk['referencedTable']) {
-                    $code .= "\$builder->dropForeignKey('{$tableName}', 'FK_{$tableName}_{$fk['referencedTable']}');\n";
+                    $code .= "\$builder->dropForeignKey('{$tableName}', 'FK_{$tableName}_{$fk['column']}');\n";
                 }
             }
             
@@ -1142,6 +1412,118 @@ class MigrationGenerator
         }
         
         return $code;
+    }
+
+    private function loadKnownSqlObjectHashes(): void
+    {
+        $this->knownSqlObjectHashes = [];
+
+        if ($this->connection === null) {
+            return;
+        }
+
+        try {
+            if (! $this->connection->tableExists('ef_sql_objects')) {
+                return;
+            }
+
+            $rows = $this->connection->query(
+                'SELECT [object_type], [object_name], [sql_hash] FROM [ef_sql_objects]'
+            )->getResultArray();
+
+            foreach ($rows as $row) {
+                $type = (string) ($row['object_type'] ?? $row['OBJECT_TYPE'] ?? '');
+                $name = (string) ($row['object_name'] ?? $row['OBJECT_NAME'] ?? '');
+                $hash = (string) ($row['sql_hash'] ?? $row['SQL_HASH'] ?? '');
+                $this->knownSqlObjectHashes[$type . ':' . $name] = $hash;
+            }
+        } catch (\Throwable $e) {
+            error_log('loadKnownSqlObjectHashes: ' . $e->getMessage());
+        }
+    }
+
+    private function shouldEmitProgrammabilityObject(array $object): bool
+    {
+        if ($this->knownSqlObjectHashes === []) {
+            return true;
+        }
+
+        $key = $object['objectType'] . ':' . $object['objectName'];
+
+        return ($this->knownSqlObjectHashes[$key] ?? '') !== $object['sqlHash'];
+    }
+
+    private function generateProgrammabilityUpCode(): string
+    {
+        $toEmit = array_filter(
+            $this->programmabilityObjects,
+            fn (array $o) => $this->shouldEmitProgrammabilityObject($o)
+        );
+
+        if ($toEmit === []) {
+            return '';
+        }
+
+        $code = "\n        // SQL programmability (views, functions, sequences)\n";
+
+        foreach ($toEmit as $object) {
+            $delimiter = $this->heredocDelimiter($object['objectName']);
+            $sql = str_replace("\t", '    ', $object['sql']);
+            $escaped = str_replace("'", "\\'", $object['objectName']);
+            $type = $object['objectType'];
+            $schema = $object['schema'];
+
+            $code .= "        \$builder->executeSql(<<<'{$delimiter}'\n";
+            $code .= $sql . "\n";
+            $code .= "{$delimiter}, '{$type}', '{$escaped}', '{$schema}');\n";
+        }
+
+        $code .= "\n";
+
+        return $code;
+    }
+
+    private function generateProgrammabilityDownCode(): string
+    {
+        $toEmit = array_filter(
+            $this->programmabilityObjects,
+            fn (array $o) => $this->shouldEmitProgrammabilityObject($o)
+        );
+
+        if ($toEmit === []) {
+            return '';
+        }
+
+        $code = "\n        // Drop SQL programmability objects (rollback)\n";
+        $reversed = array_reverse($toEmit);
+
+        foreach ($reversed as $object) {
+            $drop = SqlBatchExecutor::dropStatement(
+                $object['objectType'],
+                $object['schema'],
+                $object['objectName']
+            );
+            foreach (explode(';', $drop) as $stmt) {
+                $stmt = trim($stmt);
+                if ($stmt !== '') {
+                    $code .= "        \$builder->executeSql(" . var_export($stmt, true) . ", "
+                        . var_export($object['objectType'], true) . ", "
+                        . var_export($object['objectName'], true) . ", "
+                        . var_export($object['schema'], true) . ");\n";
+                }
+            }
+        }
+
+        $code .= "\n";
+
+        return $code;
+    }
+
+    private function heredocDelimiter(string $objectName): string
+    {
+        $safe = preg_replace('/[^a-zA-Z0-9_]/', '_', $objectName) ?? 'SQL';
+
+        return 'GQSQL_' . $safe;
     }
 }
 

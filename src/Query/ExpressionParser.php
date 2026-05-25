@@ -1598,10 +1598,11 @@ class ExpressionParser
                     return $columnAttr->name;
                 }
             }
+
+            return $propertyName;
         }
-        
-        // Default: use property name as-is (or convert to snake_case if needed)
-        return $propertyName;
+
+        throw new \InvalidArgumentException('Invalid field name: ' . $propertyName);
     }
 
     /**
