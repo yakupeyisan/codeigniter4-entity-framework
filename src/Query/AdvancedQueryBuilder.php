@@ -3036,10 +3036,22 @@ class AdvancedQueryBuilder
                 // Check if SQL condition is a navigation property path (NAVIGATION:...)
                 // Format: NAVIGATION:NavigationProperty.Column SQL_OPERATOR
                 if (strpos($sqlCondition, 'NAVIGATION:') === 0) {
+                    if (preg_match('/^NAVIGATION:([^\s]+)\s+(.+)$/is', $sqlCondition, $navMatches)) {
+                        $mainAlias = $this->getTableAliasForParser();
+                        $resolved = $this->resolveNavigationTokenSql(
+                            $navMatches[1],
+                            trim($navMatches[2]),
+                            $mainAlias
+                        );
+                        if ($resolved !== null) {
+                            $sqlCondition = $resolved;
+                        }
+                    }
+
                     // Extract navigation property path and SQL expression
                     // Format: NAVIGATION:CustomField.CustomField01 LIKE CONCAT('%', '4006', '%')
                     $parts = explode(':', $sqlCondition, 2);
-                    if (count($parts) >= 2) {
+                    if (count($parts) >= 2 && strpos($sqlCondition, 'NAVIGATION:') === 0) {
                         $navExpression = $parts[1]; // e.g., "CustomField.CustomField01 LIKE CONCAT('%', '4006', '%')"
                         
                         // Parse navigation property path and SQL expression
@@ -3422,13 +3434,23 @@ class AdvancedQueryBuilder
                     // Extract navigation property path and SQL expression
                     // Format: NAVIGATION:CollectionProperty.ReferenceProperty.Column SQL_OPERATOR
                     if (preg_match('/NAVIGATION:([^\s]+)\s+(.+)$/', $sqlCondition, $navMatches)) {
+                        $mainAlias = $this->getTableAliasForParser();
+                        $resolved = $this->resolveNavigationTokenSql(
+                            $navMatches[1],
+                            trim($navMatches[2]),
+                            $mainAlias
+                        );
+                        if ($resolved !== null) {
+                            $sqlCondition = $resolved;
+                        }
+
                         $navPath = $navMatches[1]; // e.g., "EmployeeDepartments.Department.DepartmentName"
                         $sqlOperator = $navMatches[2]; // e.g., "LIKE CONCAT('Ferh', '%')"
                         
-                        $pathParts = explode('.', $navPath);
+                        $pathParts = $this->stripRedundantRootEntityFromPathParts(explode('.', $navPath));
                         
                         // Handle nested collection navigation property (3+ parts)
-                        if (count($pathParts) >= 3) {
+                        if (strpos($sqlCondition, 'NAVIGATION:') === 0 && count($pathParts) >= 3) {
                             $collectionProperty = $pathParts[0]; // e.g., "EmployeeDepartments"
                             $referenceProperty = $pathParts[1]; // e.g., "Department"
                             $columnName = $pathParts[2]; // e.g., "DepartmentName"
@@ -3942,10 +3964,19 @@ class AdvancedQueryBuilder
                     // Format: NAVIGATION:CollectionProperty.Property SQL_OPERATOR
                     // Handle both simple operators (= 86) and complex ones (IS NULL, IS NOT NULL)
                     if (preg_match('/NAVIGATION:([^\s]+)\s+(.+)$/', trim($sqlCondition), $navMatches)) {
+                        $mainAlias = $this->getTableAliasForParser();
+                        $resolved = $this->resolveNavigationTokenSql(
+                            $navMatches[1],
+                            trim($navMatches[2]),
+                            $mainAlias
+                        );
+                        if ($resolved !== null) {
+                            $sqlCondition = $resolved;
+                        } elseif (strpos($sqlCondition, 'NAVIGATION:') !== false) {
                         $navPath = $navMatches[1]; // e.g., "ReaderAccessCards.ReaderID" or "Employee.DeletedAt"
                         $sqlOperator = trim($navMatches[2]); // e.g., "= 86" or "IS NULL"
                         
-                        $pathParts = explode('.', $navPath);
+                        $pathParts = $this->stripRedundantRootEntityFromPathParts(explode('.', $navPath));
                         
                         // Handle navigation property (2 parts: NavigationProperty.Property)
                         if (count($pathParts) === 2) {
@@ -3995,6 +4026,7 @@ class AdvancedQueryBuilder
                                     log_message('debug', 'applyNavigationWhereToSql - converted NAVIGATION: prefix to reference navigation: ' . $sqlCondition);
                                 }
                             }
+                        }
                         }
                     }
                 }
@@ -9427,10 +9459,18 @@ class AdvancedQueryBuilder
                     // Extract navigation property path and SQL expression
                     // Format: NAVIGATION:NavigationProperty.Property SQL_OPERATOR
                     if (preg_match('/NAVIGATION:([^\s]+)\s+(.+)$/', $sqlCondition, $navMatches)) {
-                        $navPath = $navMatches[1]; // e.g., "ReaderAccessCards.ReaderID"
-                        $sqlOperator = $navMatches[2]; // e.g., "= 86"
-                        
-                        $pathParts = explode('.', $navPath);
+                        $mainAlias = $this->getTableAliasForParser();
+                        $resolved = $this->resolveNavigationTokenSql(
+                            $navMatches[1],
+                            trim($navMatches[2]),
+                            $mainAlias,
+                            $referenceNavAliases
+                        );
+                        if ($resolved !== null) {
+                            $sqlCondition = $resolved;
+                        } elseif (strpos($sqlCondition, 'NAVIGATION:') !== false) {
+                        $sqlOperator = trim($navMatches[2]);
+                        $pathParts = $this->stripRedundantRootEntityFromPathParts(explode('.', $navMatches[1]));
                         
                         // Handle navigation property (2 parts: NavigationProperty.Property)
                         if (count($pathParts) === 2) {
@@ -9485,6 +9525,7 @@ class AdvancedQueryBuilder
                                     log_message('debug', 'convertNavigationWhereToSql - converted NAVIGATION: prefix to reference navigation: ' . $sqlCondition);
                                 }
                             }
+                        }
                         }
                     }
                 }
@@ -9670,13 +9711,18 @@ class AdvancedQueryBuilder
 
         $navPath = $navMatches[1];
         $sqlOperator = trim($navMatches[2]);
-        $pathParts = explode('.', $navPath);
+        $resolved = $this->resolveNavigationTokenSql($navPath, $sqlOperator, $mainAlias);
+        if ($resolved !== null) {
+            return $isNotWrapped ? "NOT ({$resolved})" : $resolved;
+        }
+
+        $pathParts = $this->stripRedundantRootEntityFromPathParts(explode('.', $navPath));
         $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
         $quotedMainAlias = $provider->escapeIdentifier($mainAlias);
 
         $expanded = null;
 
-        // 2 parts: reference.column (e.g. Employee.Name)
+        // 2 parts: reference.column (e.g. Company.PdksCompanyName)
         if (count($pathParts) === 2) {
             $navInfo = $this->getNavigationInfo($pathParts[0]);
             if ($navInfo && !$navInfo['isCollection']) {
@@ -9810,6 +9856,18 @@ class AdvancedQueryBuilder
                 // Check if SQL condition is a navigation property path (NAVIGATION:...)
                 // Format: NAVIGATION:NavigationProperty.Column SQL_OPERATOR
                 if (strpos($sqlCondition, 'NAVIGATION:') === 0) {
+                    if (preg_match('/^NAVIGATION:([^\s]+)\s+(.+)$/is', $sqlCondition, $navMatches)) {
+                        $resolved = $this->resolveNavigationTokenSql(
+                            $navMatches[1],
+                            trim($navMatches[2]),
+                            $alias,
+                            $referenceNavAliases
+                        );
+                        if ($resolved !== null) {
+                            return $resolved;
+                        }
+                    }
+
                     // Extract navigation property path and SQL expression
                     // Format: NAVIGATION:CustomField.CustomField01 LIKE CONCAT('%', '4006', '%')
                     $parts = explode(':', $sqlCondition, 2);
@@ -12480,6 +12538,76 @@ class AdvancedQueryBuilder
             }
         }
         
+        return null;
+    }
+
+    /**
+     * Convert NAVIGATION:path OPERATOR to executable SQL.
+     * Strips redundant root entity prefix (e.g. Employee.Name while querying Employee -> Name on main alias).
+     *
+     * @param array<string, string> $referenceNavAliases Join aliases from buildEfCoreStyleQuery
+     */
+    private function resolveNavigationTokenSql(
+        string $navPath,
+        string $sqlOperator,
+        string $mainAlias,
+        array $referenceNavAliases = []
+    ): ?string {
+        $pathParts = $this->stripRedundantRootEntityFromPathParts(explode('.', $navPath));
+        $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
+        $quotedMainAlias = $provider->escapeIdentifier($mainAlias);
+
+        if (count($pathParts) === 1) {
+            $propertyName = $pathParts[0];
+            $entityReflection = new \ReflectionClass($this->entityType);
+            if (!$entityReflection->hasProperty($propertyName)) {
+                return null;
+            }
+            $columnName = $this->getColumnNameFromProperty($entityReflection, $propertyName);
+            $quotedColumn = $provider->escapeIdentifier($columnName);
+
+            return "{$quotedMainAlias}.{$quotedColumn} {$sqlOperator}";
+        }
+
+        if (count($pathParts) === 2) {
+            $navigationProperty = $pathParts[0];
+            $columnName = $pathParts[1];
+            $navInfo = $this->getNavigationInfo($navigationProperty);
+            if ($navInfo === null) {
+                return null;
+            }
+
+            if ($navInfo['isCollection']) {
+                $collectionTableName = $this->context->getTableName($navInfo['entityType']);
+                $mainEntityReflection = new \ReflectionClass($this->entityType);
+                $mainPkColumn = $this->getPrimaryKeyColumnName($mainEntityReflection);
+                $collectionEntityReflection = new \ReflectionClass($navInfo['entityType']);
+                $collectionFkColumn = $this->getColumnNameFromProperty(
+                    $collectionEntityReflection,
+                    $navInfo['foreignKey']
+                );
+                $filterColumnName = $this->getColumnNameFromProperty($collectionEntityReflection, $columnName);
+                $quotedMainPk = $provider->escapeIdentifier($mainPkColumn);
+                $quotedCollectionTable = $provider->escapeIdentifier($collectionTableName);
+                $quotedCollectionFk = $provider->escapeIdentifier($collectionFkColumn);
+                $quotedFilterColumn = $provider->escapeIdentifier($filterColumnName);
+
+                return "EXISTS (SELECT 1 FROM {$quotedCollectionTable} WHERE {$quotedCollectionTable}.{$quotedCollectionFk} = {$quotedMainAlias}.{$quotedMainPk} AND {$quotedCollectionTable}.{$quotedFilterColumn} {$sqlOperator})";
+            }
+
+            $joinAlias = $referenceNavAliases[$navigationProperty]
+                ?? ($this->requiredJoins[$navigationProperty]['alias'] ?? null);
+            if ($joinAlias === null) {
+                $joinAlias = $this->context->getTableName($navInfo['entityType']);
+            }
+            $refEntityReflection = new \ReflectionClass($navInfo['entityType']);
+            $refColumnName = $this->getColumnNameFromProperty($refEntityReflection, $columnName);
+            $quotedJoinAlias = $provider->escapeIdentifier($joinAlias);
+            $quotedRefColumn = $provider->escapeIdentifier($refColumnName);
+
+            return "{$quotedJoinAlias}.{$quotedRefColumn} {$sqlOperator}";
+        }
+
         return null;
     }
 
