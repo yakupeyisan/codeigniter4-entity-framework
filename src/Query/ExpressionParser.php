@@ -485,6 +485,13 @@ class ExpressionParser
             log_message('debug', "parseExpression - in result: {$sql}");
             return $sql;
         }
+
+        // Logical OR/AND before comparisons so "$x->A === null || $x->A === ''" is not split on the first ===
+        $sql = $this->parseLogicalOperators($expression);
+        if ($sql !== null) {
+            log_message('debug', "parseExpression - logical result: {$sql}");
+            return $sql;
+        }
         
         // Handle comparison operators (before arithmetic, because === has higher precedence than -)
         $sql = $this->parseComparison($expression);
@@ -499,13 +506,6 @@ class ExpressionParser
             $result = $this->parsePropertyAccess($expression);
             log_message('debug', "parseExpression - property access result: {$result}");
             return $result;
-        }
-        
-        // Handle logical operators (AND, OR)
-        $sql = $this->parseLogicalOperators($expression);
-        if ($sql !== null) {
-            log_message('debug', "parseExpression - logical result: {$sql}");
-            return $sql;
         }
         
         // Handle arithmetic operations (+, -, *, /, %) - but only if not part of comparison
