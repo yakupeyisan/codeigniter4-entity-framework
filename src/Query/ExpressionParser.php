@@ -1303,22 +1303,14 @@ class ExpressionParser
             return $result;
         }
         
-        // Check for navigation property pattern: $var->NavProp->Property
-        // Example: $p->CafeteriaEvent->CafeteriaAccountId or $x->CafeteriaEvent->CafeteriaAccountId
-        // Also handle cases where there might be comparison operators: $x->NavProp->Property == value
+        // Check for navigation property pattern: $var->Nav->Ref->Column (2+ segments after entity var)
         // This MUST be checked BEFORE removing the variable prefix to ensure we catch navigation properties
-        // Pattern matches: $var->NavProp->Property (with or without trailing comparison operators)
         $trimmedExpression = trim($expression);
-        // Match navigation property pattern: $var->NavProp->Property
-        // Use a simpler pattern that just matches the navigation property part, ignoring what comes after
-        if (preg_match('/^\$[a-zA-Z_][a-zA-Z0-9_]*->([A-Za-z_][A-Za-z0-9_]*)->([A-Za-z_][A-Za-z0-9_]*)/', $trimmedExpression, $navMatches)) {
-            $navigationProperty = $navMatches[1]; // e.g., "CafeteriaEvent" or "Employee"
-            $property = $navMatches[2]; // e.g., "CafeteriaAccountId" or "DeletedAt"
-            
-            log_message('debug', "parsePropertyAccess - navigation property detected: {$navigationProperty}.{$property} from expression: {$expression}");
-            
-            // Return in NAVIGATION: format for AdvancedQueryBuilder to handle
-            return "NAVIGATION:{$navigationProperty}.{$property}";
+        if (preg_match('/^\$[a-zA-Z_][a-zA-Z0-9_]*->((?:[A-Za-z_][A-Za-z0-9_]*->)+[A-Za-z_][A-Za-z0-9_]*)/', $trimmedExpression, $navMatches)) {
+            $navPath = str_replace('->', '.', $navMatches[1]);
+            log_message('debug', "parsePropertyAccess - navigation path detected: {$navPath} from expression: {$expression}");
+
+            return "NAVIGATION:{$navPath}";
         }
         
         // Extract variable name and normalize to $x if it's the lambda parameter

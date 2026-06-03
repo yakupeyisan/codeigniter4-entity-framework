@@ -919,7 +919,7 @@ class AdvancedQueryBuilder
             } else {
                 $paths = $this->detectNavigationPaths($whereToApply);
                 if (! empty($paths)) {
-                    $this->applyNavigationWhereToSql($builder, $whereToApply, $paths);
+                    $this->applyNavigationWhereToSql($builder, $whereToApply, $paths, $isOr);
                 } else {
                     $this->applyWhere($builder, $whereToApply, $isOr);
                 }
@@ -2848,7 +2848,7 @@ class AdvancedQueryBuilder
         }
         
         try {
-            $parser = new ExpressionParser($this->entityType, $this->getTableAliasForParser(), $this->context);
+            $parser = new ExpressionParser($this->entityType, $this->getTableAliasForParser($builder), $this->context);
             
             // Try to extract variable values from closure
             $reflection = new \ReflectionFunction($predicate);
@@ -2954,7 +2954,7 @@ class AdvancedQueryBuilder
                         $columnName = $this->getColumnNameFromProperty($entityReflection, $fieldName);
                         
                         // Get table alias
-                        $tableAlias = $this->getTableAliasForParser();
+                        $tableAlias = $this->getTableAliasForParser($builder);
                         $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
                         $quotedAlias = $provider->escapeIdentifier($tableAlias);
                         $quotedColumn = $provider->escapeIdentifier($columnName);
@@ -2999,7 +2999,7 @@ class AdvancedQueryBuilder
                         $columnName = $this->getColumnNameFromProperty($entityReflection, $fieldName);
                         
                         // Get table alias
-                        $tableAlias = $this->getTableAliasForParser();
+                        $tableAlias = $this->getTableAliasForParser($builder);
                         $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
                         $quotedAlias = $provider->escapeIdentifier($tableAlias);
                         $quotedColumn = $provider->escapeIdentifier($columnName);
@@ -3037,14 +3037,17 @@ class AdvancedQueryBuilder
                 // Format: NAVIGATION:NavigationProperty.Column SQL_OPERATOR
                 if (strpos($sqlCondition, 'NAVIGATION:') === 0) {
                     if (preg_match('/^NAVIGATION:([^\s]+)\s+(.+)$/is', $sqlCondition, $navMatches)) {
-                        $mainAlias = $this->getTableAliasForParser();
-                        $resolved = $this->resolveNavigationTokenSql(
+                        $referenceNavAliases = (property_exists($this, 'referenceNavAliases') && is_array($this->referenceNavAliases))
+                            ? $this->referenceNavAliases
+                            : [];
+                        $converted = $this->convertNavigationConditionToSql(
                             $navMatches[1],
                             trim($navMatches[2]),
-                            $mainAlias
+                            $builder,
+                            $referenceNavAliases
                         );
-                        if ($resolved !== null) {
-                            $sqlCondition = $resolved;
+                        if ($converted !== null) {
+                            $sqlCondition = $converted;
                         }
                     }
 
@@ -3295,7 +3298,7 @@ class AdvancedQueryBuilder
                                                 $mainTableAlias = $this->context->getTableName($this->entityType);
                                             } else {
                                                 // In buildEfCoreStyleQuery, use getTableAliasForParser
-                                                $mainTableAlias = $this->getTableAliasForParser();
+                                                $mainTableAlias = $this->getTableAliasForParser($builder);
                                             }
                                             
                                             $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
@@ -3345,7 +3348,7 @@ class AdvancedQueryBuilder
                                             $mainTableAlias = $this->context->getTableName($this->entityType);
                                         } else {
                                             // In buildEfCoreStyleQuery, use getTableAliasForParser
-                                            $mainTableAlias = $this->getTableAliasForParser();
+                                            $mainTableAlias = $this->getTableAliasForParser($builder);
                                         }
                                         
                                         $collectionTableName = $this->context->getTableName($collectionEntityType);
@@ -3417,139 +3420,25 @@ class AdvancedQueryBuilder
                 log_message('debug', 'Parameter map: ' . json_encode($parameterMap));
                 log_message('debug', 'Variable values: ' . json_encode($variableValues));
                 
-                // Replace parser alias [u] with actual table name for simple query builder
-                // ExpressionParser uses 'u' as alias, but simple query builder uses table name
-                if ($builder !== null) {
-                    $mainTableName = $this->context->getTableName($this->entityType);
-                    $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
-                    $quotedTableName = $provider->escapeIdentifier($mainTableName);
-                    // Replace [u] with [TableName] in the SQL condition
-                    $sqlCondition = preg_replace('/\[u\]/i', $quotedTableName, $sqlCondition);
-                    // Also handle unquoted u. patterns
-                    $sqlCondition = preg_replace('/\bu\./i', $mainTableName . '.', $sqlCondition);
-                }
-                
-                // Check if SQL condition contains NAVIGATION: prefix and convert it
                 if (strpos($sqlCondition, 'NAVIGATION:') !== false) {
-                    // Extract navigation property path and SQL expression
-                    // Format: NAVIGATION:CollectionProperty.ReferenceProperty.Column SQL_OPERATOR
-                    if (preg_match('/NAVIGATION:([^\s]+)\s+(.+)$/', $sqlCondition, $navMatches)) {
-                        $mainAlias = $this->getTableAliasForParser();
-                        $resolved = $this->resolveNavigationTokenSql(
+                    if (preg_match('/NAVIGATION:([^\s]+)\s+(.+)$/is', trim($sqlCondition), $navMatches)) {
+                        $referenceNavAliases = (property_exists($this, 'referenceNavAliases') && is_array($this->referenceNavAliases))
+                            ? $this->referenceNavAliases
+                            : [];
+                        $converted = $this->convertNavigationConditionToSql(
                             $navMatches[1],
                             trim($navMatches[2]),
-                            $mainAlias
+                            $builder,
+                            $referenceNavAliases
                         );
-                        if ($resolved !== null) {
-                            $sqlCondition = $resolved;
-                        }
-
-                        $navPath = $navMatches[1]; // e.g., "EmployeeDepartments.Department.DepartmentName"
-                        $sqlOperator = $navMatches[2]; // e.g., "LIKE CONCAT('Ferh', '%')"
-                        
-                        $pathParts = $this->stripRedundantRootEntityFromPathParts(explode('.', $navPath));
-                        
-                        // Handle nested collection navigation property (3+ parts)
-                        if (strpos($sqlCondition, 'NAVIGATION:') === 0 && count($pathParts) >= 3) {
-                            $collectionProperty = $pathParts[0]; // e.g., "EmployeeDepartments"
-                            $referenceProperty = $pathParts[1]; // e.g., "Department"
-                            $columnName = $pathParts[2]; // e.g., "DepartmentName"
-                            
-                            // Get navigation info for collection property
-                            $navInfo = $this->getNavigationInfo($collectionProperty);
-                            if ($navInfo && $navInfo['isCollection']) {
-                                // Get navigation info for reference property within collection entity
-                                $collectionEntityType = $navInfo['entityType'];
-                                $refNavInfo = $this->getNavigationInfoForEntity($referenceProperty, $collectionEntityType);
-                                
-                                if ($refNavInfo && !$refNavInfo['isCollection']) {
-                                    // Build EXISTS subquery
-                                    $collectionTableName = $this->context->getTableName($collectionEntityType);
-                                    $refTableName = $this->context->getTableName($refNavInfo['entityType']);
-                                    
-                                    // Get primary key column of main entity
-                                    $mainEntityReflection = new \ReflectionClass($this->entityType);
-                                    $mainPkColumn = $this->getPrimaryKeyColumnName($mainEntityReflection);
-                                    
-                                    // Get foreign key column in collection entity (points to main entity)
-                                    $collectionFkProperty = $navInfo['foreignKey'];
-                                    $collectionEntityReflection = new \ReflectionClass($collectionEntityType);
-                                    $collectionFkColumn = $this->getColumnNameFromProperty($collectionEntityReflection, $collectionFkProperty);
-                                    
-                                    // Get foreign key property in collection entity (points to reference entity)
-                                    $refFkProperty = $refNavInfo['foreignKey'];
-                                    // Get column name for FK in collection entity
-                                    $refFkColumn = $this->getColumnNameFromProperty($collectionEntityReflection, $refFkProperty);
-                                    
-                                    // Get primary key column of reference entity
-                                    $refEntityReflection = new \ReflectionClass($refNavInfo['entityType']);
-                                    $refPkColumn = $this->getPrimaryKeyColumnName($refEntityReflection);
-                                    
-                                    // Get column name from reference entity for the filter column
-                                    $refColumnName = $this->getColumnNameFromProperty($refEntityReflection, $columnName);
-                                    
-                                    $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
-                                    $mainTableAlias = $this->getTableAliasForParser();
-                                    $quotedMainTable = $provider->escapeIdentifier($mainTableAlias);
-                                    $quotedMainPk = $provider->escapeIdentifier($mainPkColumn);
-                                    $quotedCollectionTable = $provider->escapeIdentifier($collectionTableName);
-                                    $quotedCollectionFk = $provider->escapeIdentifier($collectionFkColumn);
-                                    $quotedRefTable = $provider->escapeIdentifier($refTableName);
-                                    $quotedRefFk = $provider->escapeIdentifier($refFkColumn);
-                                    $quotedRefPk = $provider->escapeIdentifier($refPkColumn);
-                                    $quotedRefColumn = $provider->escapeIdentifier($refColumnName);
-                                    
-                                    // Generate short aliases for collection and reference tables
-                                    $collectionAlias = strtolower(substr($collectionProperty, 0, 2)); // e.g., "ed" for "EmployeeDepartments"
-                                    $refAlias = strtolower(substr($referenceProperty, 0, 1)); // e.g., "d" for "Department"
-                                    $quotedCollectionAlias = $provider->escapeIdentifier($collectionAlias);
-                                    $quotedRefAlias = $provider->escapeIdentifier($refAlias);
-                                    
-                                    // Build EXISTS subquery with LIKE/other operators
-                                    // Join: collectionEntity.FK = referenceEntity.PK
-                                    $sqlCondition = "EXISTS (SELECT 1 FROM {$quotedCollectionTable} AS {$quotedCollectionAlias} INNER JOIN {$quotedRefTable} AS {$quotedRefAlias} ON {$quotedCollectionAlias}.{$quotedRefFk} = {$quotedRefAlias}.{$quotedRefPk} WHERE {$quotedCollectionAlias}.{$quotedCollectionFk} = {$quotedMainTable}.{$quotedMainPk} AND {$quotedRefAlias}.{$quotedRefColumn} {$sqlOperator})";
-                                    
-                                    log_message('debug', 'Converted NAVIGATION: prefix to EXISTS subquery: ' . $sqlCondition);
-                                }
-                            }
-                        }
-                        // Handle simple reference navigation property (2 parts)
-                        elseif (count($pathParts) === 2) {
-                            $navigationProperty = $pathParts[0]; // e.g., "CustomField"
-                            $columnName = $pathParts[1]; // e.g., "CustomField01"
-                            
-                            // Get navigation info for reference navigation property
-                            $navInfo = $this->getNavigationInfo($navigationProperty);
-                            if ($navInfo && !$navInfo['isCollection']) {
-                                $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
-                                
-                                // Try to get alias from referenceNavAliases if available (set in buildEfCoreStyleQuery)
-                                $joinAlias = null;
-                                if (property_exists($this, 'referenceNavAliases') && isset($this->referenceNavAliases) && isset($this->referenceNavAliases[$navigationProperty])) {
-                                    $joinAlias = $this->referenceNavAliases[$navigationProperty];
-                                } else {
-                                    // For simple query builder, use the table name directly
-                                    // In CodeIgniter query builder, JOINs use the table name as the identifier
-                                    $refTableName = $this->context->getTableName($navInfo['entityType']);
-                                    // Use table name as identifier (matches what's used in JOINs)
-                                    $joinAlias = $refTableName;
-                                }
-                                
-                                // Get column name from reference entity
-                                $refEntityReflection = new \ReflectionClass($navInfo['entityType']);
-                                $refColumnName = $this->getColumnNameFromProperty($refEntityReflection, $columnName);
-                                
-                                $quotedJoinAlias = $provider->escapeIdentifier($joinAlias);
-                                $quotedRefColumn = $provider->escapeIdentifier($refColumnName);
-                                
-                                // Build SQL condition using JOIN alias
-                                $sqlCondition = "{$quotedJoinAlias}.{$quotedRefColumn} {$sqlOperator}";
-                                
-                                log_message('debug', 'Converted NAVIGATION: prefix to reference navigation: ' . $sqlCondition);
-                            }
+                        if ($converted !== null) {
+                            $sqlCondition = $converted;
+                            log_message('debug', 'applySimpleWhereWithParser - converted NAVIGATION: ' . $sqlCondition);
                         }
                     }
                 }
+
+                $sqlCondition = $this->normalizeParserAliasForBuilder($sqlCondition, $builder);
                 
                 // Only apply if we have a valid condition (not empty after cleanup)
                 // Check if condition is not just whitespace, -> operators, or just parentheses
@@ -3607,7 +3496,7 @@ class AdvancedQueryBuilder
                     // Replace NotMapped+InjectQuery column references (e.g. Day, Time, DayName) with their SQL expressions
                     // so COUNT and other simple WHERE paths work (main query already does this in buildEfCoreStyleQuery)
                     $entityReflection = new ReflectionClass($this->entityType);
-                    $mainAlias = $this->getTableAliasForParser();
+                    $mainAlias = $this->getTableAliasForParser($builder);
                     $sqlCondition = $this->replaceInjectQueryColumnsInWhere($sqlCondition, $entityReflection, $mainAlias);
                     
                     // Apply the parsed SQL condition
@@ -3673,10 +3562,15 @@ class AdvancedQueryBuilder
     }
 
     /**
-     * Get table alias for current entity (for ExpressionParser)
+     * Get table alias for current entity (for ExpressionParser).
+     * When a CodeIgniter base builder is used (count/aggregate), the main table has no "u" alias.
      */
-    private function getTableAliasForParser(): string
+    private function getTableAliasForParser($builder = null): string
     {
+        if ($builder !== null) {
+            return $this->context->getTableName($this->entityType);
+        }
+
         // When using CodeIgniter's base builder (no explicit alias), use the table name.
         // For advanced scenarios (raw joins, includes, masking) aliases are handled separately.
         if ($this->useRawSql || !empty($this->rawJoins)) {
@@ -3695,6 +3589,22 @@ class AdvancedQueryBuilder
         }
 
         return $this->context->getTableName($this->entityType);
+    }
+
+    /**
+     * Replace parser alias [u] / u. with the real main table name for CI4 base-builder queries.
+     */
+    private function normalizeParserAliasForBuilder(string $sqlCondition, $builder): string
+    {
+        if ($builder === null) {
+            return $sqlCondition;
+        }
+        $mainTableName = $this->context->getTableName($this->entityType);
+        $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
+        $quotedTableName = $provider->escapeIdentifier($mainTableName);
+        $sqlCondition = preg_replace('/\[u\]/i', $quotedTableName, $sqlCondition);
+
+        return preg_replace('/\bu\./i', $mainTableName . '.', $sqlCondition);
     }
 
     /**
@@ -3887,7 +3797,7 @@ class AdvancedQueryBuilder
         // Use ExpressionParser to parse navigation property where conditions
         // This handles variables, null, and other complex expressions
         try {
-            $parser = new ExpressionParser($this->entityType, $this->getTableAliasForParser(), $this->context);
+            $parser = new ExpressionParser($this->entityType, $this->getTableAliasForParser($builder), $this->context);
             
             // Try to extract variable values from closure
             $reflection = new \ReflectionFunction($predicate);
@@ -3958,78 +3868,21 @@ class AdvancedQueryBuilder
             if ($sqlCondition) {
                 log_message('debug', "applyNavigationWhereToSql - parsed SQL condition: {$sqlCondition}");
                 
-                // Check if SQL condition contains NAVIGATION: prefix and convert it
                 if (strpos($sqlCondition, 'NAVIGATION:') !== false) {
-                    // Extract navigation property path and SQL expression
-                    // Format: NAVIGATION:CollectionProperty.Property SQL_OPERATOR
-                    // Handle both simple operators (= 86) and complex ones (IS NULL, IS NOT NULL)
-                    if (preg_match('/NAVIGATION:([^\s]+)\s+(.+)$/', trim($sqlCondition), $navMatches)) {
-                        $mainAlias = $this->getTableAliasForParser();
-                        $resolved = $this->resolveNavigationTokenSql(
+                    if (preg_match('/NAVIGATION:([^\s]+)\s+(.+)$/is', trim($sqlCondition), $navMatches)) {
+                        $converted = $this->convertNavigationConditionToSql(
                             $navMatches[1],
                             trim($navMatches[2]),
-                            $mainAlias
+                            $builder
                         );
-                        if ($resolved !== null) {
-                            $sqlCondition = $resolved;
-                        } elseif (strpos($sqlCondition, 'NAVIGATION:') !== false) {
-                        $navPath = $navMatches[1]; // e.g., "ReaderAccessCards.ReaderID" or "Employee.DeletedAt"
-                        $sqlOperator = trim($navMatches[2]); // e.g., "= 86" or "IS NULL"
-                        
-                        $pathParts = $this->stripRedundantRootEntityFromPathParts(explode('.', $navPath));
-                        
-                        // Handle navigation property (2 parts: NavigationProperty.Property)
-                        if (count($pathParts) === 2) {
-                            $navigationProperty = $pathParts[0]; // e.g., "ReaderAccessCards" or "CustomField"
-                            $columnName = $pathParts[1]; // e.g., "ReaderID" or "CustomField01"
-                            
-                            // Get navigation info for navigation property
-                            $navInfo = $this->getNavigationInfo($navigationProperty);
-                            if ($navInfo) {
-                                if ($navInfo['isCollection']) {
-                                    // For count() method, use JOIN table name directly (JOIN already added)
-                                    // This is more efficient than EXISTS subquery for count operations
-                                    $collectionTableName = $this->context->getTableName($navInfo['entityType']);
-                                    
-                                    // Get column name from collection entity for the filter column
-                                    $collectionEntityReflection = new \ReflectionClass($navInfo['entityType']);
-                                    $filterColumnName = $this->getColumnNameFromProperty($collectionEntityReflection, $columnName);
-                                    
-                                    $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
-                                    
-                                    // Use table name as identifier (CodeIgniter Query Builder uses table name directly)
-                                    $quotedCollectionTable = $provider->escapeIdentifier($collectionTableName);
-                                    $quotedFilterColumn = $provider->escapeIdentifier($filterColumnName);
-                                    
-                                    // Build WHERE condition using JOIN table name directly
-                                    $sqlCondition = "{$quotedCollectionTable}.{$quotedFilterColumn} {$sqlOperator}";
-                                    
-                                    log_message('debug', 'applyNavigationWhereToSql - converted NAVIGATION: prefix to JOIN table filter: ' . $sqlCondition);
-                                } else {
-                                    // Reference navigation property - use JOIN alias
-                                    $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
-                                    
-                                    // For count() method, use table name as identifier
-                                    $refTableName = $this->context->getTableName($navInfo['entityType']);
-                                    $joinAlias = $refTableName;
-                                    
-                                    // Get column name from reference entity
-                                    $refEntityReflection = new \ReflectionClass($navInfo['entityType']);
-                                    $refColumnName = $this->getColumnNameFromProperty($refEntityReflection, $columnName);
-                                    
-                                    $quotedJoinAlias = $provider->escapeIdentifier($joinAlias);
-                                    $quotedRefColumn = $provider->escapeIdentifier($refColumnName);
-                                    
-                                    // Build SQL condition using JOIN alias
-                                    $sqlCondition = "{$quotedJoinAlias}.{$quotedRefColumn} {$sqlOperator}";
-                                    
-                                    log_message('debug', 'applyNavigationWhereToSql - converted NAVIGATION: prefix to reference navigation: ' . $sqlCondition);
-                                }
-                            }
-                        }
+                        if ($converted !== null) {
+                            $sqlCondition = $converted;
+                            log_message('debug', 'applyNavigationWhereToSql - converted NAVIGATION: ' . $sqlCondition);
                         }
                     }
                 }
+
+                $sqlCondition = $this->normalizeParserAliasForBuilder($sqlCondition, $builder);
                 
                 // Apply the WHERE condition with OR logic support
                 // The SQL condition should now be in valid SQL format
@@ -12609,6 +12462,126 @@ class AdvancedQueryBuilder
         }
 
         return null;
+    }
+
+    /**
+     * Convert NAVIGATION:path OPERATOR to executable SQL (count builder and EF-style queries).
+     *
+     * @param array<string, string> $referenceNavAliases Join aliases from buildEfCoreStyleQuery
+     */
+    private function convertNavigationConditionToSql(
+        string $navPath,
+        string $sqlOperator,
+        $builder = null,
+        array $referenceNavAliases = []
+    ): ?string {
+        $mainAlias = $this->getTableAliasForParser($builder);
+        $resolved = $this->resolveNavigationTokenSql($navPath, $sqlOperator, $mainAlias, $referenceNavAliases);
+        if ($resolved !== null) {
+            return $resolved;
+        }
+
+        $pathParts = $this->stripRedundantRootEntityFromPathParts(explode('.', $navPath));
+        if (count($pathParts) >= 3) {
+            return $this->buildCollectionReferenceExistsCondition($pathParts, $sqlOperator, $mainAlias);
+        }
+
+        if (count($pathParts) === 2) {
+            $navigationProperty = $pathParts[0];
+            $columnName = $pathParts[1];
+            $navInfo = $this->getNavigationInfo($navigationProperty);
+            if ($navInfo === null) {
+                return null;
+            }
+
+            $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
+
+            if ($navInfo['isCollection']) {
+                if ($builder !== null) {
+                    $collectionTableName = $this->context->getTableName($navInfo['entityType']);
+                    $collectionEntityReflection = new \ReflectionClass($navInfo['entityType']);
+                    $filterColumnName = $this->getColumnNameFromProperty($collectionEntityReflection, $columnName);
+                    $quotedCollectionTable = $provider->escapeIdentifier($collectionTableName);
+                    $quotedFilterColumn = $provider->escapeIdentifier($filterColumnName);
+
+                    return "{$quotedCollectionTable}.{$quotedFilterColumn} {$sqlOperator}";
+                }
+
+                return $this->resolveNavigationTokenSql($navPath, $sqlOperator, $mainAlias, $referenceNavAliases);
+            }
+
+            $joinAlias = $referenceNavAliases[$navigationProperty]
+                ?? ($this->requiredJoins[$navigationProperty]['alias'] ?? $this->context->getTableName($navInfo['entityType']));
+            $refEntityReflection = new \ReflectionClass($navInfo['entityType']);
+            $refColumnName = $this->getColumnNameFromProperty($refEntityReflection, $columnName);
+            $quotedJoinAlias = $provider->escapeIdentifier($joinAlias);
+            $quotedRefColumn = $provider->escapeIdentifier($refColumnName);
+
+            return "{$quotedJoinAlias}.{$quotedRefColumn} {$sqlOperator}";
+        }
+
+        return null;
+    }
+
+    /**
+     * EXISTS subquery for Collection.Reference.Column filters (e.g. EmployeeAccessGroups.AccessGroup.AccessGroupName).
+     *
+     * @param string[] $pathParts [collectionNav, referenceNav, columnName, ...]
+     */
+    private function buildCollectionReferenceExistsCondition(array $pathParts, string $sqlOperator, string $mainTableAlias): ?string
+    {
+        if (count($pathParts) < 3) {
+            return null;
+        }
+
+        $collectionProperty = $pathParts[0];
+        $referenceProperty = $pathParts[1];
+        $columnName = $pathParts[2];
+
+        $navInfo = $this->getNavigationInfo($collectionProperty);
+        if ($navInfo === null || ! $navInfo['isCollection']) {
+            return null;
+        }
+
+        $collectionEntityType = $navInfo['entityType'];
+        $refNavInfo = $this->getNavigationInfoForEntity($referenceProperty, $collectionEntityType);
+        if ($refNavInfo === null || $refNavInfo['isCollection']) {
+            return null;
+        }
+
+        $collectionTableName = $this->context->getTableName($collectionEntityType);
+        $refTableName = $this->context->getTableName($refNavInfo['entityType']);
+
+        $mainEntityReflection = new \ReflectionClass($this->entityType);
+        $mainPkColumn = $this->getPrimaryKeyColumnName($mainEntityReflection);
+
+        $collectionFkProperty = $navInfo['foreignKey'];
+        $collectionEntityReflection = new \ReflectionClass($collectionEntityType);
+        $collectionFkColumn = $this->getColumnNameFromProperty($collectionEntityReflection, $collectionFkProperty);
+
+        $refFkProperty = $refNavInfo['foreignKey'];
+        $refFkColumn = $this->getColumnNameFromProperty($collectionEntityReflection, $refFkProperty);
+
+        $refEntityReflection = new \ReflectionClass($refNavInfo['entityType']);
+        $refPkColumn = $this->getPrimaryKeyColumnName($refEntityReflection);
+        $refColumnName = $this->getColumnNameFromProperty($refEntityReflection, $columnName);
+
+        $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
+        $quotedMainTable = $provider->escapeIdentifier($mainTableAlias);
+        $quotedMainPk = $provider->escapeIdentifier($mainPkColumn);
+        $quotedCollectionTable = $provider->escapeIdentifier($collectionTableName);
+        $quotedCollectionFk = $provider->escapeIdentifier($collectionFkColumn);
+        $quotedRefTable = $provider->escapeIdentifier($refTableName);
+        $quotedRefFk = $provider->escapeIdentifier($refFkColumn);
+        $quotedRefPk = $provider->escapeIdentifier($refPkColumn);
+        $quotedRefColumn = $provider->escapeIdentifier($refColumnName);
+
+        $collectionAlias = strtolower(substr($collectionProperty, 0, 2));
+        $refAlias = strtolower(substr($referenceProperty, 0, 1));
+        $quotedCollectionAlias = $provider->escapeIdentifier($collectionAlias);
+        $quotedRefAlias = $provider->escapeIdentifier($refAlias);
+
+        return "EXISTS (SELECT 1 FROM {$quotedCollectionTable} AS {$quotedCollectionAlias} INNER JOIN {$quotedRefTable} AS {$quotedRefAlias} ON {$quotedCollectionAlias}.{$quotedRefFk} = {$quotedRefAlias}.{$quotedRefPk} WHERE {$quotedCollectionAlias}.{$quotedCollectionFk} = {$quotedMainTable}.{$quotedMainPk} AND {$quotedRefAlias}.{$quotedRefColumn} {$sqlOperator})";
     }
 
     /**
