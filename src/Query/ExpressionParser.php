@@ -247,6 +247,14 @@ class ExpressionParser
      */
     public function extractExpression(string $code): string
     {
+        // function ($e) use (...) { return $e->$field === $value; } — => use(...) içinde yakalanmasın
+        if (preg_match('/return\s+(.+?);/s', $code, $matches)) {
+            $expression = trim($matches[1]);
+            $expression = preg_replace('/\s*->(where|and|or|not)\s*\(.*$/i', '', $expression);
+
+            return trim($expression);
+        }
+
         // Remove function declaration and get expression
         // Pattern: fn($x) => $x->Property === value
         // Also handle incomplete expressions like: fn($x) => $x->Property === (int
@@ -450,13 +458,11 @@ class ExpressionParser
             return '(' . $this->parseExpression($matches[1]) . ')';
         }
         
-        // Handle type casting first: (int)$id, (string)$value, etc.
-        // Match: (int)$id, (string)$value, (float)$num, (bool)$flag
-        if (preg_match('/^\((\w+)\)\s*\$?([a-zA-Z_][a-zA-Z0-9_]*)/', $expression, $castMatches)) {
+        // Handle type casting first: (int)$id, (string)$value, etc. (yalnızca geçerli PHP cast — (for)mattedValue gibi yanlış eşleşmeyi önler)
+        if (preg_match('/^\((int|string|float|bool)\)\s*(\$[a-zA-Z_][a-zA-Z0-9_]*)/i', $expression, $castMatches)) {
             $type = $castMatches[1];
-            $value = '$' . $castMatches[2];
+            $value = $castMatches[2];
             log_message('debug', "parseExpression - type casting detected: ({$type}){$value}");
-            // Parse the value (ignore the cast, SQL will handle it)
             return $this->parseExpression($value);
         }
         
@@ -533,15 +539,15 @@ class ExpressionParser
      */
     private function parseLogicalOperators(string $expression): ?string
     {
-        // Handle AND (&& or and)
-        if (preg_match('/^(.+?)\s*(?:&&|and)\s*(.+)$/i', $expression, $matches)) {
+        // Handle AND (&& or word and) — \band\b: $formattedValue içindeki "for" vb. eşleşmesin
+        if (preg_match('/^(.+?)\s*(?:&&|\band\b)\s*(.+)$/i', $expression, $matches)) {
             $left = $this->parseExpression(trim($matches[1]));
             $right = $this->parseExpression(trim($matches[2]));
             return "({$left} AND {$right})";
         }
         
-        // Handle OR (|| or or)
-        if (preg_match('/^(.+?)\s*(?:\|\||or)\s*(.+)$/i', $expression, $matches)) {
+        // Handle OR (|| or word or) — \bor\b: $formattedValue → $f + mattedValue hatasını önler
+        if (preg_match('/^(.+?)\s*(?:\|\||\bor\b)\s*(.+)$/i', $expression, $matches)) {
             $left = $this->parseExpression(trim($matches[1]));
             $right = $this->parseExpression(trim($matches[2]));
             return "({$left} OR {$right})";
@@ -653,11 +659,10 @@ class ExpressionParser
             
             // Parse right side (value)
             // Handle type casting first: (int)$id, (string)$value, etc.
-            if (preg_match('/^\((\w+)\)\s*\$?([a-zA-Z_][a-zA-Z0-9_]*)/', $right, $castMatches)) {
+            if (preg_match('/^\((int|string|float|bool)\)\s*(\$[a-zA-Z_][a-zA-Z0-9_]*)/i', $right, $castMatches)) {
                 $type = $castMatches[1];
-                $varName = '$' . $castMatches[2];
+                $varName = $castMatches[2];
                 log_message('debug', "parseComparison - type casting detected on right side: ({$type}){$varName}");
-                // Parse the value (ignore the cast, SQL will handle it)
                 $rightSql = $this->parseValue($varName);
             } elseif (preg_match('/^\$[a-zA-Z_][a-zA-Z0-9_]*->/', $right)) {
                 // Check if right side is a property access too (for comparisons like $e->Id === $e->OtherId)
@@ -723,12 +728,10 @@ class ExpressionParser
                 log_message('debug', "parseComparison - leftSql: {$leftSql}");
                 
                 // Parse right side (value)
-                // Handle type casting first: (int)$id, (string)$value, etc.
-                if (preg_match('/^\((\w+)\)\s*\$?([a-zA-Z_][a-zA-Z0-9_]*)/', $right, $castMatches)) {
+                if (preg_match('/^\((int|string|float|bool)\)\s*(\$[a-zA-Z_][a-zA-Z0-9_]*)/i', $right, $castMatches)) {
                     $type = $castMatches[1];
-                    $varName = '$' . $castMatches[2];
+                    $varName = $castMatches[2];
                     log_message('debug', "parseComparison - type casting detected on right side: ({$type}){$varName}");
-                    // Parse the value (ignore the cast, SQL will handle it)
                     $rightSql = $this->parseValue($varName);
                 } elseif (preg_match('/^\$[a-zA-Z_][a-zA-Z0-9_]*->/', $right)) {
                     // Check if right side is a property access too (for comparisons like $e->Id === $e->OtherId)
@@ -1513,7 +1516,7 @@ class ExpressionParser
         
         // Handle variables - try to get value from variableValues map
         if (preg_match('/^\$([a-zA-Z_][a-zA-Z0-9_]*)$/', $value, $varMatches)) {
-            $varName = $varMatches[1];
+            $varName = $this->resolveClosureVariableName($varMatches[1]);
             
             log_message('debug', "parseValue - variable: \${$varName}, variableValues: " . json_encode(array_keys($this->variableValues)));
             
@@ -1559,6 +1562,34 @@ class ExpressionParser
         // Default: treat as string
         $value = str_replace("'", "''", $value);
         return "'{$value}'";
+    }
+
+    /**
+     * Closure use değişkeni kısmi yakalandığında (ör. $for ← $formattedValue) tek aday varsa tam adı seç.
+     */
+    private function resolveClosureVariableName(string $varName): string
+    {
+        if (isset($this->variableValues[$varName])) {
+            return $varName;
+        }
+
+        $candidates = [];
+        foreach (array_keys($this->variableValues) as $key) {
+            if (str_starts_with($key, $varName)) {
+                $candidates[] = $key;
+            }
+        }
+
+        if ($candidates === []) {
+            return $varName;
+        }
+
+        usort($candidates, static fn (string $a, string $b): int => strlen($b) <=> strlen($a));
+        if ($candidates[0] !== $varName) {
+            log_message('debug', "resolveClosureVariableName: \${$varName} → \${$candidates[0]}");
+        }
+
+        return $candidates[0];
     }
 
     /**
