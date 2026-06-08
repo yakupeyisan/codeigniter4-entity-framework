@@ -886,6 +886,19 @@ class AdvancedQueryBuilder
             }
         }
 
+        // count() callers use applyIncludes() so navigation filters (e.g. Employee.Name) have JOINs.
+        if (! empty($this->includes) && is_array($this->includes)) {
+            foreach ($this->includes as $include) {
+                if (! is_array($include)) {
+                    continue;
+                }
+                $navPath = $include['path'] ?? $include['navigation'] ?? null;
+                if (is_string($navPath) && $navPath !== '' && ! in_array($navPath, $allNavigationPaths, true)) {
+                    $allNavigationPaths[] = $navPath;
+                }
+            }
+        }
+
         foreach ($allNavigationPaths as $path) {
             $this->addJoinForNavigationPath($builder, $path);
         }
@@ -3665,7 +3678,56 @@ class AdvancedQueryBuilder
                 log_message('debug', "No navigation paths detected in predicate");
             }
         }
+
+        // Grid filters from BaseManager::applyAdvancedFilter use dynamic paths:
+        // fn($e) use ($field, $formattedValue) => $e->$field->contains($formattedValue)
+        // where $field = "Employee.Name" (dot path, not $e->Employee->Name).
+        $staticVariables = $reflection->getStaticVariables();
+        if (isset($staticVariables['field']) && is_string($staticVariables['field']) && strpos($staticVariables['field'], '.') !== false) {
+            foreach ($this->collectReferenceNavigationPathsFromDotPath($staticVariables['field']) as $navProp) {
+                if (! in_array($navProp, $paths, true)) {
+                    $paths[] = $navProp;
+                }
+            }
+            log_message('debug', 'detectNavigationPaths - paths from static field "' . $staticVariables['field'] . '": ' . implode(', ', $paths));
+        }
         
+        return $paths;
+    }
+
+    /**
+     * Walk a dot-separated filter field (e.g. "Employee.Name", "Employee.Company.PdksCompanyName")
+     * and return root-level reference navigation properties that need JOINs on the main entity.
+     *
+     * @return list<string>
+     */
+    private function collectReferenceNavigationPathsFromDotPath(string $fieldPath): array
+    {
+        $parts = $this->stripRedundantRootEntityFromPathParts(explode('.', $fieldPath));
+        if (count($parts) < 2) {
+            return [];
+        }
+
+        $paths = [];
+        $currentEntityType = $this->entityType;
+
+        // Last segment is the column/property; preceding segments are navigation hops.
+        for ($i = 0, $limit = count($parts) - 1; $i < $limit; $i++) {
+            $segment = $parts[$i];
+            $navInfo = $this->getNavigationInfoForEntity($segment, $currentEntityType);
+            if ($navInfo === null) {
+                break;
+            }
+            if ($navInfo['isCollection']) {
+                // Collection filters are resolved via EXISTS/subquery, not a flat JOIN here.
+                break;
+            }
+            if ($i === 0 && ! in_array($segment, $paths, true)) {
+                $paths[] = $segment;
+            }
+            $currentEntityType = $navInfo['entityType'];
+        }
+
         return $paths;
     }
     
