@@ -856,6 +856,9 @@ class AdvancedQueryBuilder
         $tableName = $this->context->getTableName($this->entityType);
         $builder = $this->connection->table($tableName);
 
+        // Fresh join tracking for this COUNT builder (metadata from prior EF-style queries must not skip JOINs).
+        $this->requiredJoins = [];
+
         // First pass: Detect all navigation property paths
         $allNavigationPaths = [];
         foreach ($this->wheres as $whereItem) {
@@ -3053,13 +3056,15 @@ class AdvancedQueryBuilder
                         $referenceNavAliases = (property_exists($this, 'referenceNavAliases') && is_array($this->referenceNavAliases))
                             ? $this->referenceNavAliases
                             : [];
+                        $navDotPath = $navMatches[1];
                         $converted = $this->convertNavigationConditionToSql(
-                            $navMatches[1],
+                            $navDotPath,
                             trim($navMatches[2]),
                             $builder,
                             $referenceNavAliases
                         );
                         if ($converted !== null) {
+                            $this->ensureJoinsForNavigationDotPath($builder, $navDotPath);
                             $sqlCondition = $converted;
                         }
                     }
@@ -3438,13 +3443,15 @@ class AdvancedQueryBuilder
                         $referenceNavAliases = (property_exists($this, 'referenceNavAliases') && is_array($this->referenceNavAliases))
                             ? $this->referenceNavAliases
                             : [];
+                        $navDotPath = $navMatches[1];
                         $converted = $this->convertNavigationConditionToSql(
-                            $navMatches[1],
+                            $navDotPath,
                             trim($navMatches[2]),
                             $builder,
                             $referenceNavAliases
                         );
                         if ($converted !== null) {
+                            $this->ensureJoinsForNavigationDotPath($builder, $navDotPath);
                             $sqlCondition = $converted;
                             log_message('debug', 'applySimpleWhereWithParser - converted NAVIGATION: ' . $sqlCondition);
                         }
@@ -3730,6 +3737,20 @@ class AdvancedQueryBuilder
 
         return $paths;
     }
+
+    /**
+     * Ensure LEFT JOINs exist on a CodeIgniter base builder for a dot-separated navigation path
+     * (e.g. "Employee.Name" -> JOIN Employee). Used by count() after NAVIGATION: is converted to SQL.
+     */
+    private function ensureJoinsForNavigationDotPath($builder, string $navDotPath): void
+    {
+        if ($builder === null || $navDotPath === '') {
+            return;
+        }
+        foreach ($this->collectReferenceNavigationPathsFromDotPath($navDotPath) as $navigationProperty) {
+            $this->addJoinForNavigationPath($builder, $navigationProperty);
+        }
+    }
     
     /**
      * Add JOIN for navigation property path
@@ -3932,12 +3953,14 @@ class AdvancedQueryBuilder
                 
                 if (strpos($sqlCondition, 'NAVIGATION:') !== false) {
                     if (preg_match('/NAVIGATION:([^\s]+)\s+(.+)$/is', trim($sqlCondition), $navMatches)) {
+                        $navDotPath = $navMatches[1];
                         $converted = $this->convertNavigationConditionToSql(
-                            $navMatches[1],
+                            $navDotPath,
                             trim($navMatches[2]),
                             $builder
                         );
                         if ($converted !== null) {
+                            $this->ensureJoinsForNavigationDotPath($builder, $navDotPath);
                             $sqlCondition = $converted;
                             log_message('debug', 'applyNavigationWhereToSql - converted NAVIGATION: ' . $sqlCondition);
                         }
