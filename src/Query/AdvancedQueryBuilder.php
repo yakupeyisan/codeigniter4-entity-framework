@@ -889,18 +889,9 @@ class AdvancedQueryBuilder
             }
         }
 
-        // count() callers use applyIncludes() so navigation filters (e.g. Employee.Name) have JOINs.
-        if (! empty($this->includes) && is_array($this->includes)) {
-            foreach ($this->includes as $include) {
-                if (! is_array($include)) {
-                    continue;
-                }
-                $navPath = $include['path'] ?? $include['navigation'] ?? null;
-                if (is_string($navPath) && $navPath !== '' && ! in_array($navPath, $allNavigationPaths, true)) {
-                    $allNavigationPaths[] = $navPath;
-                }
-            }
-        }
+        // Do NOT add every applyIncludes() path here — eager-load includes (e.g. Employee.Authorization +
+        // Employee.WebClientAuthorization) often target the same table twice and break COUNT on SQL Server.
+        // WHERE-driven paths above + ensureJoinsForNavigationDotPath() cover filter fields like Employee.Name.
 
         foreach ($allNavigationPaths as $path) {
             $this->addJoinForNavigationPath($builder, $path);
