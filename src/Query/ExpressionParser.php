@@ -410,7 +410,7 @@ class ExpressionParser
                     log_message('debug', "parseExpression - null comparison (!==) result: {$propertySql} IS NOT NULL");
                     return "{$propertySql} IS NOT NULL";
                 }
-                if (preg_match('/^NAVIGATION:/', $propertySql)) {
+                if (preg_match('/^NAVIGATION:(?!IN:)/i', $propertySql)) {
                     log_message('debug', "parseExpression - null comparison (!==) with navigation result: {$propertySql} IS NOT NULL");
                     return "{$propertySql} IS NOT NULL";
                 }
@@ -424,7 +424,7 @@ class ExpressionParser
                     log_message('debug', "parseExpression - null comparison (!=) result: {$propertySql} IS NOT NULL");
                     return "{$propertySql} IS NOT NULL";
                 }
-                if (preg_match('/^NAVIGATION:/', $propertySql)) {
+                if (preg_match('/^NAVIGATION:(?!IN:)/i', $propertySql)) {
                     log_message('debug', "parseExpression - null comparison (!=) with navigation result: {$propertySql} IS NOT NULL");
                     return "{$propertySql} IS NOT NULL";
                 }
@@ -439,7 +439,7 @@ class ExpressionParser
                     log_message('debug', "parseExpression - null comparison (===) result: {$propertySql} IS NULL");
                     return "{$propertySql} IS NULL";
                 }
-                if (preg_match('/^NAVIGATION:/', $propertySql)) {
+                if (preg_match('/^NAVIGATION:(?!IN:)/i', $propertySql)) {
                     log_message('debug', "parseExpression - null comparison (===) with navigation result: {$propertySql} IS NULL");
                     return "{$propertySql} IS NULL";
                 }
@@ -454,7 +454,7 @@ class ExpressionParser
                     log_message('debug', "parseExpression - null comparison (==) result: {$propertySql} IS NULL");
                     return "{$propertySql} IS NULL";
                 }
-                if (preg_match('/^NAVIGATION:/', $propertySql)) {
+                if (preg_match('/^NAVIGATION:(?!IN:)/i', $propertySql)) {
                     log_message('debug', "parseExpression - null comparison (==) with navigation result: {$propertySql} IS NULL");
                     return "{$propertySql} IS NULL";
                 }
@@ -618,7 +618,7 @@ class ExpressionParser
                 }
                 // Check if it's a navigation property format (NAVIGATION:NavProp.Property)
                 // This will be handled by AdvancedQueryBuilder
-                if (preg_match('/^NAVIGATION:/', $propertySql)) {
+                if (preg_match('/^NAVIGATION:(?!IN:)/i', $propertySql)) {
                     return "{$propertySql} IS NULL";
                 }
             }
@@ -635,7 +635,7 @@ class ExpressionParser
                 }
                 // Check if it's a navigation property format (NAVIGATION:NavProp.Property)
                 // This will be handled by AdvancedQueryBuilder
-                if (preg_match('/^NAVIGATION:/', $propertySql)) {
+                if (preg_match('/^NAVIGATION:(?!IN:)/i', $propertySql)) {
                     return "{$propertySql} IS NOT NULL";
                 }
             }

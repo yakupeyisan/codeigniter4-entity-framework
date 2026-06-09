@@ -3040,9 +3040,26 @@ class AdvancedQueryBuilder
             log_message('debug', 'Parsed SQL condition (before cleanup): ' . $sqlCondition);
             
             if (!empty($sqlCondition)) {
+                $sqlCondition = trim($sqlCondition);
+
+                // count()/aggregate use CI BaseBuilder — expand NAVIGATION_IN via EXISTS before join-based fallbacks.
+                $expandedNavigationIn = $this->tryExpandNavigationInSqlCondition($sqlCondition, $builder);
+                if ($expandedNavigationIn !== null) {
+                    $sqlCondition = $expandedNavigationIn;
+                    if ($builder !== null) {
+                        if ($isOr) {
+                            $builder->orWhere($sqlCondition, null, false);
+                        } else {
+                            $builder->where($sqlCondition, null, false);
+                        }
+                        log_message('debug', 'applySimpleWhereWithParser - expanded NAVIGATION_IN: ' . $sqlCondition);
+                    }
+                    return;
+                }
+
                 // Check if SQL condition is a navigation property path (NAVIGATION:...)
                 // Format: NAVIGATION:NavigationProperty.Column SQL_OPERATOR
-                if (strpos($sqlCondition, 'NAVIGATION:') === 0) {
+                if ($this->isNavigationTokenCondition($sqlCondition)) {
                     if (preg_match('/^NAVIGATION:([^\s]+)\s+(.+)$/is', $sqlCondition, $navMatches)) {
                         $referenceNavAliases = (property_exists($this, 'referenceNavAliases') && is_array($this->referenceNavAliases))
                             ? $this->referenceNavAliases
@@ -3063,7 +3080,7 @@ class AdvancedQueryBuilder
                     // Extract navigation property path and SQL expression
                     // Format: NAVIGATION:CustomField.CustomField01 LIKE CONCAT('%', '4006', '%')
                     $parts = explode(':', $sqlCondition, 2);
-                    if (count($parts) >= 2 && strpos($sqlCondition, 'NAVIGATION:') === 0) {
+                    if (count($parts) >= 2 && $this->isNavigationTokenCondition($sqlCondition)) {
                         $navExpression = $parts[1]; // e.g., "CustomField.CustomField01 LIKE CONCAT('%', '4006', '%')"
                         
                         // Parse navigation property path and SQL expression
@@ -3116,7 +3133,7 @@ class AdvancedQueryBuilder
                     }
                 }
                 // Check if SQL condition is a navigation property path (NAVIGATION_IN:...)
-                elseif (strpos($sqlCondition, 'NAVIGATION_IN:') === 0) {
+                elseif (strpos($sqlCondition, 'NAVIGATION_IN:') !== false) {
                     // Extract navigation property path and values
                     // Format: NAVIGATION_IN:CollectionProperty.ReferenceProperty.Column:value1,value2,...
                     $parts = explode(':', $sqlCondition, 3);
@@ -3429,7 +3446,7 @@ class AdvancedQueryBuilder
                 log_message('debug', 'Parameter map: ' . json_encode($parameterMap));
                 log_message('debug', 'Variable values: ' . json_encode($variableValues));
                 
-                if (strpos($sqlCondition, 'NAVIGATION:') !== false) {
+                if ($this->isNavigationTokenCondition($sqlCondition)) {
                     if (preg_match('/NAVIGATION:([^\s]+)\s+(.+)$/is', trim($sqlCondition), $navMatches)) {
                         $referenceNavAliases = (property_exists($this, 'referenceNavAliases') && is_array($this->referenceNavAliases))
                             ? $this->referenceNavAliases
@@ -3447,6 +3464,14 @@ class AdvancedQueryBuilder
                             log_message('debug', 'applySimpleWhereWithParser - converted NAVIGATION: ' . $sqlCondition);
                         }
                     }
+                }
+
+                $expandedNavigationIn = $this->tryExpandNavigationInSqlCondition($sqlCondition, $builder);
+                if ($expandedNavigationIn !== null) {
+                    $sqlCondition = $expandedNavigationIn;
+                } elseif (strpos($sqlCondition, 'NAVIGATION_IN:') !== false) {
+                    log_message('error', 'applySimpleWhereWithParser - unexpanded NAVIGATION_IN token: ' . $sqlCondition);
+                    $sqlCondition = '1=0';
                 }
 
                 $sqlCondition = $this->normalizeParserAliasForBuilder($sqlCondition, $builder);
@@ -3942,7 +3967,12 @@ class AdvancedQueryBuilder
             if ($sqlCondition) {
                 log_message('debug', "applyNavigationWhereToSql - parsed SQL condition: {$sqlCondition}");
                 
-                if (strpos($sqlCondition, 'NAVIGATION:') !== false) {
+                $sqlCondition = trim($sqlCondition);
+
+                $expandedNavigationIn = $this->tryExpandNavigationInSqlCondition($sqlCondition, $builder);
+                if ($expandedNavigationIn !== null) {
+                    $sqlCondition = $expandedNavigationIn;
+                } elseif ($this->isNavigationTokenCondition($sqlCondition)) {
                     if (preg_match('/NAVIGATION:([^\s]+)\s+(.+)$/is', trim($sqlCondition), $navMatches)) {
                         $navDotPath = $navMatches[1];
                         $converted = $this->convertNavigationConditionToSql(
@@ -3962,7 +3992,9 @@ class AdvancedQueryBuilder
                 
                 // Apply the WHERE condition with OR logic support
                 // The SQL condition should now be in valid SQL format
-                if ($sqlCondition && strpos($sqlCondition, 'NAVIGATION:') === false) {
+                if ($sqlCondition
+                    && strpos($sqlCondition, 'NAVIGATION_IN:') === false
+                    && ! $this->isNavigationTokenCondition($sqlCondition)) {
                     if ($isOr) {
                         $builder->orWhere($sqlCondition, null, false);
                         log_message('debug', 'applyNavigationWhereToSql - OR WHERE clause applied: ' . $sqlCondition);
@@ -9469,6 +9501,35 @@ class AdvancedQueryBuilder
             log_message('error', "convertNavigationWhereToSql - error: " . $e->getMessage());
             return null;
         }
+    }
+
+    /**
+     * True when $sqlCondition is a NAVIGATION: token (not NAVIGATION_IN:).
+     */
+    private function isNavigationTokenCondition(string $sqlCondition): bool
+    {
+        return preg_match('/^NAVIGATION:(?!IN:)/i', trim($sqlCondition)) === 1;
+    }
+
+    /**
+     * Expand NAVIGATION_IN tokens for count()/aggregate CI BaseBuilder queries.
+     */
+    private function tryExpandNavigationInSqlCondition(string $sqlCondition, $builder): ?string
+    {
+        if (strpos($sqlCondition, 'NAVIGATION_IN:') === false) {
+            return null;
+        }
+
+        $mainAlias = $this->getTableAliasForParser($builder);
+        $expanded = $this->expandNavigationInTokensForRawSql(trim($sqlCondition), $mainAlias);
+        if ($expanded !== null && strpos($expanded, 'NAVIGATION_IN:') === false) {
+            // Parser noise: "NAVIGATION_IN:path:1 IS NULL" — token expands but " IS NULL" can remain.
+            $expanded = preg_replace('/^(.+?\))\s+IS\s+NULL\s*$/is', '$1', $expanded) ?? $expanded;
+
+            return $expanded;
+        }
+
+        return null;
     }
 
     /**
