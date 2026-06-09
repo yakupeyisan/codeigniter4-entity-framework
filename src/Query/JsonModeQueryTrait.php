@@ -323,6 +323,11 @@ trait JsonModeQueryTrait
             );
         }
 
+        // WHERE-driven reference JOINs can add Employee.* before sibling includes (CardType, …)
+        // while deferred thenIncludes append Employee.CustomField.* later. SQL Server FOR JSON PATH
+        // requires all columns sharing the same dot-path prefix to be consecutive (error 13601).
+        $selectParts = $this->jsonSortSelectPartsForJsonPath($selectParts);
+
         $whereSql = $this->jsonBuildWhereClause($mainAlias, $refAliasByPath);
         $orderSql = $this->jsonBuildOrderByClause($mainAlias, $refAliasByPath);
         $offsetFetch = $this->jsonBuildOffsetFetchClause($provider);
@@ -1197,6 +1202,62 @@ trait JsonModeQueryTrait
         }
         if ($offset > 0) {
             throw new \InvalidArgumentException('JSON mode: skip without take is not supported on SQL Server; set take().');
+        }
+
+        return '';
+    }
+
+    /**
+     * Group SELECT columns by their FOR JSON PATH root prefix so nested paths are not interrupted.
+     *
+     * @param list<string> $selectParts
+     * @return list<string>
+     */
+    private function jsonSortSelectPartsForJsonPath(array $selectParts): array
+    {
+        if (count($selectParts) < 2) {
+            return $selectParts;
+        }
+
+        $decorated = [];
+        foreach ($selectParts as $index => $part) {
+            $alias = $this->jsonExtractSelectJsonAlias($part);
+            $groupKey = $alias === '' || !str_contains($alias, '.')
+                ? ''
+                : explode('.', $alias, 2)[0];
+            $decorated[] = [
+                'part' => $part,
+                'groupKey' => $groupKey,
+                'alias' => $alias,
+                'index' => $index,
+            ];
+        }
+
+        usort($decorated, static function (array $a, array $b): int {
+            if ($a['groupKey'] === '' && $b['groupKey'] !== '') {
+                return -1;
+            }
+            if ($a['groupKey'] !== '' && $b['groupKey'] === '') {
+                return 1;
+            }
+            if ($a['groupKey'] !== $b['groupKey']) {
+                return strcmp($a['groupKey'], $b['groupKey']);
+            }
+            $aliasCmp = strcmp($a['alias'], $b['alias']);
+            if ($aliasCmp !== 0) {
+                return $aliasCmp;
+            }
+
+            return $a['index'] <=> $b['index'];
+        });
+
+        return array_map(static fn(array $row): string => $row['part'], $decorated);
+    }
+
+    private function jsonExtractSelectJsonAlias(string $selectPart): string
+    {
+        if (preg_match('/\sAS\s+\[([^\]]+)\]\s*$/i', $selectPart, $matches)) {
+            return $matches[1];
         }
 
         return '';
