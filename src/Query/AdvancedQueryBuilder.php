@@ -870,6 +870,19 @@ class AdvancedQueryBuilder
             }
 
             $where = is_array($whereItem) ? $whereItem['predicate'] : $whereItem;
+            $rawSql = is_array($whereItem) && isset($whereItem['rawSql']) ? $whereItem['rawSql'] : null;
+
+            if (is_string($rawSql) && str_contains($rawSql, '.')) {
+                if (preg_match_all('/\b([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+)\b/', $rawSql, $rawMatches)) {
+                    foreach (array_unique($rawMatches[1]) as $dotPath) {
+                        foreach ($this->collectReferenceNavigationPathsFromDotPath($dotPath) as $path) {
+                            if (! in_array($path, $allNavigationPaths, true)) {
+                                $allNavigationPaths[] = $path;
+                            }
+                        }
+                    }
+                }
+            }
 
             if ($where === null) {
                 continue;
@@ -922,6 +935,7 @@ class AdvancedQueryBuilder
             log_message('debug', "count(): Processing where item #{$index}, isOr=" . ($isOr ? 'true' : 'false') . ", type=" . (is_string($whereToApply) ? 'raw SQL' : 'callable'));
 
             if (is_string($whereToApply)) {
+                $whereToApply = $this->expandRawSqlNavigationWhereForCount($whereToApply, $builder);
                 $this->applyWhere($builder, $whereToApply, $isOr);
             } else {
                 $paths = $this->detectNavigationPaths($whereToApply);
@@ -3735,6 +3749,7 @@ class AdvancedQueryBuilder
         $currentEntityType = $this->entityType;
 
         // Last segment is the column/property; preceding segments are navigation hops.
+        $cumulative = '';
         for ($i = 0, $limit = count($parts) - 1; $i < $limit; $i++) {
             $segment = $parts[$i];
             $navInfo = $this->getNavigationInfoForEntity($segment, $currentEntityType);
@@ -3745,13 +3760,43 @@ class AdvancedQueryBuilder
                 // Collection filters are resolved via EXISTS/subquery, not a flat JOIN here.
                 break;
             }
-            if ($i === 0 && ! in_array($segment, $paths, true)) {
-                $paths[] = $segment;
+            $cumulative = $cumulative === '' ? $segment : $cumulative . '.' . $segment;
+            if (! in_array($cumulative, $paths, true)) {
+                $paths[] = $cumulative;
             }
             $currentEntityType = $navInfo['entityType'];
         }
 
         return $paths;
+    }
+
+    /**
+     * isEmpty/isNotEmpty ham SQL'inde geçen navigation path'lerini COUNT/aggregate builder için çözümler.
+     */
+    private function expandRawSqlNavigationWhereForCount(string $rawSql, $builder): string
+    {
+        if (! str_contains($rawSql, '.')) {
+            return $rawSql;
+        }
+
+        if (preg_match_all('/\b([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+)\b/', $rawSql, $matches)) {
+            foreach (array_unique($matches[1]) as $dotPath) {
+                foreach ($this->collectReferenceNavigationPathsFromDotPath($dotPath) as $navPath) {
+                    $this->addJoinForNavigationPath($builder, $navPath);
+                }
+            }
+        }
+
+        $mainAlias = $this->getTableAliasForParser($builder);
+        $refAliasByPath = [];
+        foreach ($this->requiredJoins as $path => $info) {
+            $refAliasByPath[$path] = $info['alias'] ?? $info['table'];
+        }
+
+        $sql = $this->jsonRewriteRawSqlMainTableRefs($rawSql, $mainAlias);
+        $sql = $this->rewriteNavigationEmptyNotEmptyConditions($sql, $mainAlias, $refAliasByPath);
+
+        return $this->jsonRewriteRawSqlNavigationRefs($sql, $mainAlias, $refAliasByPath);
     }
 
     /**
@@ -3773,115 +3818,125 @@ class AdvancedQueryBuilder
      */
     private function addJoinForNavigationPath($builder, string $navigationProperty): void
     {
-        // Check if join already added
+        if (str_contains($navigationProperty, '.')) {
+            $parts = explode('.', $navigationProperty);
+            $parentEntityType = $this->entityType;
+            $parentTableAlias = $this->context->getTableName($this->entityType);
+            $cumPath = '';
+            foreach ($parts as $part) {
+                $cumPath = $cumPath === '' ? $part : $cumPath . '.' . $part;
+                if (isset($this->requiredJoins[$cumPath])) {
+                    $parentTableAlias = $this->requiredJoins[$cumPath]['alias'] ?? $this->requiredJoins[$cumPath]['table'];
+                    $parentEntityType = $this->requiredJoins[$cumPath]['entityType'];
+                    continue;
+                }
+                $this->addJoinFromParentEntity($builder, $part, $parentEntityType, $parentTableAlias, $cumPath);
+                if (! isset($this->requiredJoins[$cumPath])) {
+                    return;
+                }
+                $parentTableAlias = $this->requiredJoins[$cumPath]['alias'] ?? $this->requiredJoins[$cumPath]['table'];
+                $parentEntityType = $this->requiredJoins[$cumPath]['entityType'];
+            }
+
+            return;
+        }
+
         $joinKey = $navigationProperty;
         if (isset($this->requiredJoins[$joinKey])) {
             log_message('debug', "addJoinForNavigationPath - join already added for '{$navigationProperty}'");
             return;
         }
-        
-        log_message('debug', "addJoinForNavigationPath - adding JOIN for '{$navigationProperty}'");
-        
-        $entityReflection = self::getCachedReflection($this->entityType);
-        
-        if (!$entityReflection->hasProperty($navigationProperty)) {
-            log_message('debug', "addJoinForNavigationPath - property '{$navigationProperty}' not found in entity");
+
+        $this->addJoinFromParentEntity(
+            $builder,
+            $navigationProperty,
+            $this->entityType,
+            $this->context->getTableName($this->entityType),
+            $joinKey
+        );
+    }
+
+    /**
+     * Parent entity/tablodan tek navigation segment join eder (COUNT / aggregate builder).
+     */
+    private function addJoinFromParentEntity(
+        $builder,
+        string $navigationProperty,
+        string $parentEntityType,
+        string $parentTableAlias,
+        string $joinKey
+    ): void {
+        if (isset($this->requiredJoins[$joinKey])) {
             return;
         }
-        
-        // Get navigation info using getNavigationInfo (which correctly parses @var annotations)
-        $navInfo = $this->getNavigationInfo($navigationProperty);
-        if ($navInfo === null) {
-            log_message('debug', "addJoinForNavigationPath - navigation info is null for '{$navigationProperty}'");
+
+        log_message('debug', "addJoinFromParentEntity - '{$joinKey}' on {$parentEntityType}");
+
+        $entityReflection = self::getCachedReflection($parentEntityType);
+        if (! $entityReflection->hasProperty($navigationProperty)) {
+            log_message('debug', "addJoinFromParentEntity - property '{$navigationProperty}' not found");
+
             return;
         }
-        
+
+        $navInfo = $this->getNavigationInfoForEntity($navigationProperty, $parentEntityType);
+        if ($navInfo === null || $navInfo['isCollection']) {
+            return;
+        }
+
         $relatedEntityType = $navInfo['entityType'];
-        $isCollection = $navInfo['isCollection'];
-        
-        log_message('debug', "addJoinForNavigationPath - relatedEntityType: {$relatedEntityType}, isCollection: " . ($isCollection ? 'true' : 'false'));
-        
-        // Get foreign key
-        $foreignKey = $this->getForeignKeyForNavigation($entityReflection, $navigationProperty, $isCollection, $this->entityType);
+        $foreignKey = $this->getForeignKeyForNavigation($entityReflection, $navigationProperty, false, $parentEntityType);
         $relatedTableName = $this->context->getTableName($relatedEntityType);
-        $mainTableName = $this->context->getTableName($this->entityType);
-        
-        // Get column names
-        $fkColumnName = $this->getColumnNameFromProperty($entityReflection, $foreignKey);
         $relatedReflection = self::getCachedReflection($relatedEntityType);
-        // Use getPrimaryKeyColumnName to get the correct primary key column name
+        $fkColumnName = $this->getColumnNameFromProperty($entityReflection, $foreignKey);
         $relatedIdColumn = $this->getPrimaryKeyColumnName($relatedReflection);
-        
-        // Get main entity primary key column name
-        $mainIdColumn = $this->getPrimaryKeyColumnName($entityReflection);
-        
-        // For SQL Server, table names might need to be quoted
-        // CodeIgniter should handle this automatically, but let's ensure proper quoting
+        $parentIdColumn = $this->getPrimaryKeyColumnName($entityReflection);
+
         $quotedRelatedTable = $this->connection->escapeIdentifiers($relatedTableName);
-        $quotedMainTable = $this->connection->escapeIdentifiers($mainTableName);
+        $quotedParentTable = $this->connection->escapeIdentifiers($parentTableAlias);
         $quotedFkColumn = $this->connection->escapeIdentifiers($fkColumnName);
         $quotedRelatedIdColumn = $this->connection->escapeIdentifiers($relatedIdColumn);
-        $quotedMainIdColumn = $this->connection->escapeIdentifiers($mainIdColumn);
+        $quotedParentIdColumn = $this->connection->escapeIdentifiers($parentIdColumn);
 
-        // If include() has a custom join condition for this navigation, prefer it.
-        // This is required for non-standard relations like AccessEvent -> Terminal
-        // where join is DeviceSerial = SerialNumber (not FK by property name).
         $customJoinCondition = null;
-        if (!empty($this->includes) && is_array($this->includes)) {
+        if (! empty($this->includes) && is_array($this->includes)) {
             foreach ($this->includes as $include) {
-                if (!is_array($include)) {
+                if (! is_array($include)) {
                     continue;
                 }
-                if (($include['path'] ?? null) === $navigationProperty && isset($include['joinCondition'])) {
+                if (($include['path'] ?? null) === $joinKey && isset($include['joinCondition'])) {
                     $customJoinCondition = (string) $include['joinCondition'];
                     break;
                 }
             }
         }
         if ($customJoinCondition !== null && trim($customJoinCondition) !== '') {
-            // Query Builder count() path expects plain table identifiers here;
-            // using fully escaped/schema-qualified identifier may collapse to ".Column".
-            $joinCondition = str_replace('{alias}', $mainTableName, $customJoinCondition);
+            $joinCondition = str_replace('{alias}', $parentTableAlias, $customJoinCondition);
             $joinCondition = str_replace('{relatedAlias}', $relatedTableName, $joinCondition);
             $builder->join($relatedTableName, $joinCondition, 'LEFT');
-            log_message('debug', "Added JOIN (custom): {$relatedTableName} ON {$joinCondition}");
             $this->requiredJoins[$joinKey] = [
                 'table' => $relatedTableName,
                 'alias' => $relatedTableName,
-                'entityType' => $relatedEntityType
+                'entityType' => $relatedEntityType,
             ];
+
             return;
         }
-        
-        if ($isCollection) {
-            // One-to-many: Join on related table's foreign key
-            $joinCondition = "{$quotedRelatedTable}.{$quotedFkColumn} = {$quotedMainTable}.{$quotedMainIdColumn}";
-            $builder->join($relatedTableName, $joinCondition, 'LEFT');
-            log_message('debug', "Added JOIN (collection): {$relatedTableName} ON {$joinCondition}");
+
+        if ($entityReflection->hasProperty($foreignKey)) {
+            $joinCondition = "{$quotedParentTable}.{$quotedFkColumn} = {$quotedRelatedTable}.{$quotedRelatedIdColumn}";
         } else {
-            // Check if FK is in main entity or related entity
-            if ($entityReflection->hasProperty($foreignKey)) {
-                // Many-to-one: FK in main entity
-                $joinCondition = "{$quotedMainTable}.{$quotedFkColumn} = {$quotedRelatedTable}.{$quotedRelatedIdColumn}";
-                $builder->join($relatedTableName, $joinCondition, 'LEFT');
-                log_message('debug', "Added JOIN (many-to-one): {$relatedTableName} ON {$joinCondition}");
-            } else {
-                // One-to-one: FK in related entity
-                $joinCondition = "{$quotedRelatedTable}.{$quotedFkColumn} = {$quotedMainTable}.{$quotedMainIdColumn}";
-                $builder->join($relatedTableName, $joinCondition, 'LEFT');
-                log_message('debug', "Added JOIN (one-to-one): {$relatedTableName} ON {$joinCondition}");
-            }
+            $joinCondition = "{$quotedRelatedTable}.{$quotedFkColumn} = {$quotedParentTable}.{$quotedParentIdColumn}";
         }
-        
-        // For CodeIgniter Query Builder, use table name as alias (not navigation property name)
-        // CodeIgniter Query Builder doesn't use aliases by default, so we'll use table name
+
+        $builder->join($relatedTableName, $joinCondition, 'LEFT');
         $this->requiredJoins[$joinKey] = [
             'table' => $relatedTableName,
-            'alias' => $relatedTableName, // Use table name as alias for CodeIgniter Query Builder
-            'entityType' => $relatedEntityType
+            'alias' => $relatedTableName,
+            'entityType' => $relatedEntityType,
         ];
     }
-    
+
     /**
      * Apply navigation WHERE clause to SQL
      * Converts predicate to SQL WHERE conditions
@@ -9567,7 +9622,7 @@ class AdvancedQueryBuilder
                 if ($secondNavInfo !== null && ! $secondNavInfo['isCollection']) {
                     $leafReflection = new \ReflectionClass($secondNavInfo['entityType']);
                     if ($leafReflection->hasProperty($pathParts[2])) {
-                        $recursiveSql = $this->buildNavigationPathConditionRecursive($pathParts, $values, null);
+                        $recursiveSql = $this->buildNavigationPathConditionRecursive($pathParts, $values, null, $mainAlias);
                         if ($recursiveSql !== null && $recursiveSql !== '') {
                             return $recursiveSql;
                         }
@@ -9581,11 +9636,16 @@ class AdvancedQueryBuilder
             }
             $nestedNavInfo = $this->getNavigationInfoForEntity($pathParts[1], $refNavInfo['entityType']);
 
-            // e.g. Employee.EmployeeDepartments.DepartmentID — filter on many-to-many / junction entity row
-            if ($nestedNavInfo && $nestedNavInfo['isCollection']) {
+            // e.g. Employee.EmployeeDepartments.DepartmentID — filter on many-to-many / junction entity row (exactly 3 parts)
+            if ($nestedNavInfo && $nestedNavInfo['isCollection'] && count($pathParts) === 3) {
                 $collectionEntityReflection = new \ReflectionClass($nestedNavInfo['entityType']);
                 if (!$collectionEntityReflection->hasProperty($pathParts[2])) {
                     return null;
+                }
+                $junctionProp = $collectionEntityReflection->getProperty($pathParts[2]);
+                $junctionType = $junctionProp->getType();
+                if ($junctionType !== null && !$junctionType->isBuiltin()) {
+                    return $this->buildNavigationPathConditionRecursive($pathParts, $values, null, $mainAlias);
                 }
                 $mainEntityReflection = new \ReflectionClass($this->entityType);
                 $mainFkColumn = $this->getColumnNameFromProperty($mainEntityReflection, $refNavInfo['foreignKey']);
@@ -9644,7 +9704,7 @@ class AdvancedQueryBuilder
 
         // 4+ parts: e.g. Card filter on Employee.EmployeeDepartments.Department.DepartmentID (reference -> collection -> reference -> column)
         if (count($pathParts) >= 4) {
-            return $this->buildNavigationPathConditionRecursive($pathParts, $values, null);
+            return $this->buildNavigationPathConditionRecursive($pathParts, $values, null, $mainAlias);
         }
 
         return null;
@@ -9729,15 +9789,64 @@ class AdvancedQueryBuilder
                 $expanded = "EXISTS (SELECT 1 FROM {$quotedRefTable} AS _r WHERE _r.{$quotedRefPk} = {$quotedMainAlias}.{$quotedMainFk} AND _r.{$quotedRefCol} {$sqlOperator})";
             }
         }
-        // 3 parts: collection.reference.column (e.g. Employee.EmployeeDepartments.Department.DepartmentName)
-        elseif (count($pathParts) >= 3) {
+        // 4+ parts: deep navigation (e.g. Employee.EmployeeDepartments.Department.DepartmentID)
+        if (count($pathParts) >= 4) {
+            $recursiveSql = $this->buildNavigationPathConditionRecursive($pathParts, '?', null, $mainAlias);
+            if ($recursiveSql !== null) {
+                $op = trim($sqlOperator);
+                if (preg_match('/^IS\s+(NOT\s+)?NULL$/i', $op)) {
+                    $expanded = preg_replace('/\s+IN\s*\(\?\)\s*\)\s*$/i', ' AND ' . $this->extractNavigationLeafColumnFromExists($recursiveSql) . ' ' . $op . ')', $recursiveSql);
+                    if ($expanded !== null && $expanded !== $recursiveSql) {
+                        return $isNotWrapped ? "NOT ({$expanded})" : $expanded;
+                    }
+                }
+                $expanded = preg_replace('/\s+IN\s*\(\?\)\s*\)\s*$/i', ' AND ' . $this->extractNavigationLeafColumnFromExists($recursiveSql) . ' ' . $sqlOperator . ')', $recursiveSql);
+                if ($expanded !== null && $expanded !== $recursiveSql) {
+                    return $isNotWrapped ? "NOT ({$expanded})" : $expanded;
+                }
+            }
+        }
+
+        // 3 parts: Collection.Reference.Column (e.g. EmployeeDepartments.Department.DepartmentID)
+        if (count($pathParts) === 3) {
+            $collNavInfo = $this->getNavigationInfo($pathParts[0]);
+            if ($collNavInfo && $collNavInfo['isCollection']) {
+                $refNavInfo = $this->getNavigationInfoForEntity($pathParts[1], $collNavInfo['entityType']);
+                if ($refNavInfo && !$refNavInfo['isCollection']) {
+                    $leafReflection = new \ReflectionClass($refNavInfo['entityType']);
+                    if ($leafReflection->hasProperty($pathParts[2])) {
+                        $recursiveSql = $this->buildNavigationPathConditionRecursive($pathParts, '?', null, $mainAlias);
+                        if ($recursiveSql !== null) {
+                            $op = trim($sqlOperator);
+                            if (preg_match('/^IS\s+(NOT\s+)?NULL$/i', $op)) {
+                                $expanded = preg_replace('/\s+IN\s*\(\?\)\s*\)\s*$/i', ' AND ' . $this->extractNavigationLeafColumnFromExists($recursiveSql) . ' ' . $op . ')', $recursiveSql);
+                                if ($expanded !== null && $expanded !== $recursiveSql) {
+                                    return $isNotWrapped ? "NOT ({$expanded})" : $expanded;
+                                }
+                            }
+                            $expanded = preg_replace('/\s+IN\s*\(\?\)\s*\)\s*$/i', ' AND ' . $this->extractNavigationLeafColumnFromExists($recursiveSql) . ' ' . $sqlOperator . ')', $recursiveSql);
+                            if ($expanded !== null && $expanded !== $recursiveSql) {
+                                return $isNotWrapped ? "NOT ({$expanded})" : $expanded;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3+ parts: reference.collection... or reference.reference.column
+        if (count($pathParts) >= 3) {
             $refNavInfo = $this->getNavigationInfo($pathParts[0]);
             if ($refNavInfo && !$refNavInfo['isCollection']) {
                 $nestedNavInfo = $this->getNavigationInfoForEntity($pathParts[1], $refNavInfo['entityType']);
-                if ($nestedNavInfo && $nestedNavInfo['isCollection'] && isset($pathParts[2])) {
-                    // collection scalar column on junction entity
+                if ($nestedNavInfo && $nestedNavInfo['isCollection'] && isset($pathParts[2]) && count($pathParts) === 3) {
+                    // collection scalar column on junction entity (exactly 3 parts)
                     $collectionEntityReflection = new \ReflectionClass($nestedNavInfo['entityType']);
                     if ($collectionEntityReflection->hasProperty($pathParts[2])) {
+                        $junctionProp = $collectionEntityReflection->getProperty($pathParts[2]);
+                        $junctionType = $junctionProp->getType();
+                        $isNavProp = $junctionType !== null && !$junctionType->isBuiltin();
+                        if (!$isNavProp) {
                         $mainEntityReflection = new \ReflectionClass($this->entityType);
                         $mainFkColumn = $this->getColumnNameFromProperty($mainEntityReflection, $refNavInfo['foreignKey']);
                         $collFkColumn = $this->getColumnNameFromProperty($collectionEntityReflection, $nestedNavInfo['foreignKey']);
@@ -9748,6 +9857,7 @@ class AdvancedQueryBuilder
                         $quotedCollFk = $provider->escapeIdentifier($collFkColumn);
                         $quotedFilterCol = $provider->escapeIdentifier($filterColumn);
                         $expanded = "EXISTS (SELECT 1 FROM {$quotedCollTable} AS _ed WHERE _ed.{$quotedCollFk} = {$quotedMainAlias}.{$quotedMainFk} AND _ed.{$quotedFilterCol} {$sqlOperator})";
+                        }
                     }
                 } elseif ($nestedNavInfo && !$nestedNavInfo['isCollection'] && isset($pathParts[2])) {
                     // reference.reference.column
@@ -12755,7 +12865,7 @@ class AdvancedQueryBuilder
      * @param mixed $builder CodeIgniter query builder or null
      * @return string|null SQL condition or null if path cannot be resolved
      */
-    private function buildNavigationPathConditionRecursive(array $pathParts, string $values, $builder = null): ?string
+    private function buildNavigationPathConditionRecursive(array $pathParts, string $values, $builder = null, ?string $mainAlias = null): ?string
     {
         if (count($pathParts) < 2) {
             return null; // Need at least navigation.property or collection.reference.column
@@ -12802,7 +12912,34 @@ class AdvancedQueryBuilder
         }
 
         // Multiple parts - need to resolve recursively
-        return $this->buildNavigationPathConditionRecursiveInternal($pathParts, $columnName, $values, $builder, $this->entityType, 0);
+        return $this->buildNavigationPathConditionRecursiveInternal($pathParts, $columnName, $values, $builder, $this->entityType, 0, $mainAlias);
+    }
+
+    /**
+     * EXISTS alt sorgusundaki son kolon ifadesini çıkarır (IN (?) öncesindeki parça).
+     */
+    private function extractNavigationLeafColumnFromExists(string $existsSql): string
+    {
+        if (preg_match('/\s+AND\s+(.+?)\s+IN\s*\(\?\)\s*\)\s*$/i', $existsSql, $m)) {
+            return trim($m[1]);
+        }
+
+        return '1=1';
+    }
+
+    /**
+     * JSON / raw SQL bağlamında ana tablo takma adını çözümler.
+     */
+    private function resolveMainTableAliasForNavigation($builder, ?string $mainAlias, string $fallbackEntityType): string
+    {
+        if ($mainAlias !== null && $mainAlias !== '') {
+            return $mainAlias;
+        }
+        if ($builder !== null) {
+            return $this->context->getTableName($fallbackEntityType);
+        }
+
+        return $this->getTableAliasForParser($builder);
     }
 
     /**
@@ -12908,7 +13045,8 @@ class AdvancedQueryBuilder
         string $values, 
         $builder, 
         string $currentEntityType, 
-        int $depth
+        int $depth,
+        ?string $mainAlias = null
     ): ?string {
         if (empty($pathParts)) {
             return null; // Should not happen
@@ -12933,7 +13071,8 @@ class AdvancedQueryBuilder
                     $values,
                     $builder,
                     $currentEntityType,
-                    $depth
+                    $depth,
+                    $mainAlias
                 );
             } else {
                 // Collection -> Column (column lives directly on the collection entity)
@@ -12952,12 +13091,7 @@ class AdvancedQueryBuilder
                 $collectionEntityReflection = new \ReflectionClass($collectionEntityType);
                 $collectionFkColumn = $this->getColumnNameFromProperty($collectionEntityReflection, $collectionFkProperty);
 
-                // Determine main table alias (always root entity table for parser/builder context)
-                if ($builder !== null) {
-                    $mainTableAlias = $this->context->getTableName($rootEntityType);
-                } else {
-                    $mainTableAlias = $this->getTableAliasForParser();
-                }
+                $mainTableAlias = $this->resolveMainTableAliasForNavigation($builder, $mainAlias, $rootEntityType);
 
                 // Try to use the same FK column name on the root entity if it exists (e.g., EmployeeID on AccessEvent)
                 if ($rootEntityReflection->hasProperty($collectionFkProperty)) {
@@ -13002,7 +13136,8 @@ class AdvancedQueryBuilder
                     $values,
                     $builder,
                     $navInfo['entityType'],
-                    $depth + 1
+                    $depth + 1,
+                    $mainAlias
                 );
             } else {
                 // Reference -> Column (simple case)
@@ -13063,7 +13198,8 @@ class AdvancedQueryBuilder
         string $values,
         $builder,
         string $currentEntityType,
-        int $depth
+        int $depth,
+        ?string $mainAlias = null
     ): ?string {
         $collectionEntityType = $navInfo['entityType'];
         $collectionTableName = $this->context->getTableName($collectionEntityType);
@@ -13091,12 +13227,7 @@ class AdvancedQueryBuilder
             $mainJoinColumn = $this->getPrimaryKeyColumnName($currentEntityReflection);
         }
 
-        // Get main table alias
-        if ($builder !== null) {
-            $mainTableAlias = $this->context->getTableName($mainEntityForExists);
-        } else {
-            $mainTableAlias = $this->getTableAliasForParser();
-        }
+        $mainTableAlias = $this->resolveMainTableAliasForNavigation($builder, $mainAlias, $mainEntityForExists);
 
         $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
         $quotedMainTable = $provider->escapeIdentifier($mainTableAlias);

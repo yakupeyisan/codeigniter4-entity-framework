@@ -365,32 +365,76 @@ trait JsonModeQueryTrait
      */
     private function jsonEnsureWhereReferenceJoins(array &$selectParts, array &$joinParts, array &$refAliasByPath, int &$refIndex): void
     {
+        $pathsToEnsure = [];
         foreach ($this->wheres as $whereItem) {
             $pred = is_array($whereItem) ? ($whereItem['predicate'] ?? null) : $whereItem;
-            if (!is_callable($pred)) {
-                continue;
+            if (is_callable($pred)) {
+                foreach ($this->detectNavigationPaths($pred) as $navPath) {
+                    $pathsToEnsure[] = $navPath;
+                }
             }
-            foreach ($this->detectNavigationPaths($pred) as $navPath) {
-                $navInfo = $this->getNavigationInfo($navPath);
-                if ($navInfo === null || $navInfo['isCollection']) {
-                    continue;
+
+            $rawSql = is_array($whereItem) ? ($whereItem['rawSql'] ?? null) : null;
+            if (is_string($rawSql) && str_contains($rawSql, '.')) {
+                if (preg_match_all('/\b([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+)\b/', $rawSql, $matches)) {
+                    foreach (array_unique($matches[1]) as $dotPath) {
+                        foreach ($this->collectReferenceNavigationPathsFromDotPath($dotPath) as $navPath) {
+                            $pathsToEnsure[] = $navPath;
+                        }
+                    }
                 }
-                if (isset($refAliasByPath[$navPath])) {
-                    continue;
-                }
-                $fake = ['path' => $navPath, 'thenIncludes' => []];
-                $this->jsonProcessIncludeTree(
-                    $fake,
-                    $this->entityType,
-                    'e0',
-                    '',
-                    $selectParts,
-                    $joinParts,
-                    $refAliasByPath,
-                    $refIndex
-                );
             }
         }
+
+        foreach (array_unique($pathsToEnsure) as $navPath) {
+            if ($navPath === '' || isset($refAliasByPath[$navPath])) {
+                continue;
+            }
+            $this->jsonEnsureReferenceJoinForPath(
+                $navPath,
+                $selectParts,
+                $joinParts,
+                $refAliasByPath,
+                $refIndex
+            );
+        }
+    }
+
+    /**
+     * @param list<string> $selectParts
+     * @param list<string> $joinParts
+     * @param array<string, string> $refAliasByPath
+     */
+    private function jsonEnsureReferenceJoinForPath(
+        string $navPath,
+        array &$selectParts,
+        array &$joinParts,
+        array &$refAliasByPath,
+        int &$refIndex
+    ): void {
+        $parts = explode('.', $navPath);
+        if ($parts === []) {
+            return;
+        }
+
+        $fake = ['path' => array_shift($parts), 'thenIncludes' => []];
+        $current = &$fake;
+        foreach ($parts as $part) {
+            $child = ['path' => $part, 'thenIncludes' => []];
+            $current['thenIncludes'][] = $child;
+            $current = $child;
+        }
+
+        $this->jsonProcessIncludeTree(
+            $fake,
+            $this->entityType,
+            'e0',
+            '',
+            $selectParts,
+            $joinParts,
+            $refAliasByPath,
+            $refIndex
+        );
     }
 
     /**
@@ -820,7 +864,10 @@ trait JsonModeQueryTrait
             }
 
             if (is_string($rawSql)) {
-                $piece = '(' . trim($this->jsonRewriteRawSqlMainTableRefs($rawSql, $mainAlias)) . ')';
+                $rewritten = $this->jsonRewriteRawSqlMainTableRefs($rawSql, $mainAlias);
+                $rewritten = $this->rewriteNavigationEmptyNotEmptyConditions($rewritten, $mainAlias, $refAliasByPath);
+                $rewritten = $this->jsonRewriteRawSqlNavigationRefs($rewritten, $mainAlias, $refAliasByPath);
+                $piece = '(' . trim($rewritten) . ')';
             } elseif (is_callable($predicate)) {
                 $piece = $this->jsonParseCallableWhere($predicate, $mainAlias, $refAliasByPath);
                 if ($piece === null || $piece === '') {
@@ -1005,32 +1052,42 @@ trait JsonModeQueryTrait
                     return $m[0];
                 }
                 $columnName = array_pop($pathParts);
-                $navigationProperty = implode('.', $pathParts);
+                $navParts = $pathParts;
 
-                if (!isset($refAliasByPath[$navigationProperty])) {
-                    return $m[0];
+                while (count($navParts) >= 1) {
+                    $navigationProperty = implode('.', $navParts);
+                    if (!isset($refAliasByPath[$navigationProperty])) {
+                        array_pop($navParts);
+                        continue;
+                    }
+                    if ($this->navigationPathContainsCollection($navParts)) {
+                        return $m[0];
+                    }
+
+                    $entityType = $this->jsonResolveEntityTypeForNavPath($navParts);
+                    if ($entityType === null) {
+                        array_pop($navParts);
+                        continue;
+                    }
+
+                    $refReflection = new ReflectionClass($entityType);
+                    if (!$refReflection->hasProperty($columnName)) {
+                        array_pop($navParts);
+                        continue;
+                    }
+
+                    $column = $this->getColumnNameFromProperty($refReflection, $columnName);
+                    $quotedAlias = $provider->escapeIdentifier($refAliasByPath[$navigationProperty]);
+                    $quotedColumn = $provider->escapeIdentifier($column);
+
+                    if ($values === '' || $values === '?') {
+                        return $quotedAlias . '.' . $quotedColumn . ' IN (' . ($values === '' ? '?' : $values) . ')';
+                    }
+
+                    return $quotedAlias . '.' . $quotedColumn . ' IN (' . $values . ')';
                 }
 
-                $navInfo = $this->getNavigationInfo($navigationProperty);
-                if ($navInfo === null || $navInfo['isCollection']) {
-                    return $m[0];
-                }
-
-                $alias = $refAliasByPath[$navigationProperty];
-                $refReflection = new ReflectionClass($navInfo['entityType']);
-                if (!$refReflection->hasProperty($columnName)) {
-                    return $m[0];
-                }
-                $column = $this->getColumnNameFromProperty($refReflection, $columnName);
-
-                $quotedAlias = $provider->escapeIdentifier($alias);
-                $quotedColumn = $provider->escapeIdentifier($column);
-
-                if ($values === '' || $values === '?') {
-                    return $quotedAlias . '.' . $quotedColumn . ' IN (' . ($values === '' ? '?' : $values) . ')';
-                }
-
-                return $quotedAlias . '.' . $quotedColumn . ' IN (' . $values . ')';
+                return $m[0];
             },
             $sql
         ) ?? $sql;
@@ -1261,5 +1318,245 @@ trait JsonModeQueryTrait
         }
 
         return '';
+    }
+
+    /**
+     * isEmpty / isNotEmpty ham SQL koşullarında collection veya derin navigation path'lerini
+     * EXISTS / NOT EXISTS alt sorgularına çevirir; referans path'leri join alias'ına bırakır.
+     *
+     * @param array<string, string> $refAliasByPath
+     */
+    private function rewriteNavigationEmptyNotEmptyConditions(string $sql, string $mainAlias, array $refAliasByPath): string
+    {
+        if ($sql === '' || !str_contains($sql, '.')) {
+            return $sql;
+        }
+
+        $sql = preg_replace_callback(
+            '/\(\s*([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+)\s+IS\s+NULL(?:\s+OR\s+\1\s*=\s*\'\')?\s*\)/i',
+            function (array $m) use ($mainAlias, $refAliasByPath): string {
+                return $this->rewriteSingleEmptyNotEmptyNavCondition($m[1], 'isEmpty', $mainAlias, $refAliasByPath);
+            },
+            $sql
+        ) ?? $sql;
+
+        return preg_replace_callback(
+            '/\(\s*([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+)\s+IS\s+NOT\s+NULL(?:\s+AND\s+\1\s*<>\s*\'\')?\s*\)/i',
+            function (array $m) use ($mainAlias, $refAliasByPath): string {
+                return $this->rewriteSingleEmptyNotEmptyNavCondition($m[1], 'isNotEmpty', $mainAlias, $refAliasByPath);
+            },
+            $sql
+        ) ?? $sql;
+    }
+
+    /**
+     * @param array<string, string> $refAliasByPath
+     */
+    private function rewriteSingleEmptyNotEmptyNavCondition(
+        string $dotPath,
+        string $mode,
+        string $mainAlias,
+        array $refAliasByPath
+    ): string {
+        $allParts = explode('.', $dotPath);
+        if (count($allParts) < 2) {
+            return $mode === 'isEmpty' ? "({$dotPath} IS NULL)" : "({$dotPath} IS NOT NULL)";
+        }
+
+        $columnName = array_pop($allParts);
+        $navParts = $allParts;
+
+        while (count($navParts) >= 1) {
+            $navPath = implode('.', $navParts);
+            if (isset($refAliasByPath[$navPath]) && !$this->navigationPathContainsCollection($navParts)) {
+                $entityType = $this->jsonResolveEntityTypeForNavPath($navParts);
+                if ($entityType !== null) {
+                    $ref = new ReflectionClass($entityType);
+                    if ($ref->hasProperty($columnName)) {
+                        $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
+                        $colRef = $provider->escapeIdentifier($refAliasByPath[$navPath]) . '.'
+                            . $provider->escapeIdentifier($this->getColumnNameFromProperty($ref, $columnName));
+                        if ($mode === 'isEmpty') {
+                            return "({$colRef} IS NULL OR {$colRef} = '')";
+                        }
+
+                        return "({$colRef} IS NOT NULL AND {$colRef} <> '')";
+                    }
+                }
+            }
+            array_pop($navParts);
+        }
+
+        if (!$this->navigationPathNeedsExistsSemantics($dotPath, $refAliasByPath)) {
+            if ($mode === 'isEmpty') {
+                return "({$dotPath} IS NULL)";
+            }
+
+            return "({$dotPath} IS NOT NULL)";
+        }
+
+        $existsSql = $this->buildNavigationExistsForEmptyFilter(explode('.', $dotPath), $mainAlias);
+        if ($existsSql === null) {
+            if ($mode === 'isEmpty') {
+                return "({$dotPath} IS NULL)";
+            }
+
+            return "({$dotPath} IS NOT NULL)";
+        }
+
+        return $mode === 'isEmpty' ? "NOT ({$existsSql})" : "({$existsSql})";
+    }
+
+    /**
+     * @param string[] $pathParts
+     */
+    private function buildNavigationExistsForEmptyFilter(array $pathParts, string $mainAlias): ?string
+    {
+        if (count($pathParts) < 2) {
+            return null;
+        }
+
+        $existsWithFilter = $this->buildNavigationPathConditionRecursive($pathParts, '1', null, $mainAlias);
+        if ($existsWithFilter !== null) {
+            $stripped = preg_replace('/\s+AND\s+.+\s+IN\s*\(\s*1\s*\)\s*\)\s*$/i', ')', $existsWithFilter);
+            if ($stripped !== null && $stripped !== '') {
+                return trim($stripped);
+            }
+        }
+
+        $dotPath = implode('.', $pathParts);
+        $expanded = $this->expandNavigationTokenForRawSql("NAVIGATION:{$dotPath} IS NOT NULL", $mainAlias);
+        if ($expanded !== null) {
+            $trimmed = trim($expanded);
+            if (preg_match('/^NOT\s*\((EXISTS\s*\(.+\))\)\s*$/is', $trimmed, $m)) {
+                return trim($m[1]);
+            }
+            if (preg_match('/^(EXISTS\s*\(.+\))\s*$/is', $trimmed, $m)) {
+                return trim($m[1]);
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * @param string[] $navParts
+     */
+    private function navigationPathContainsCollection(array $navParts): bool
+    {
+        $current = $this->entityType;
+        foreach ($navParts as $part) {
+            $navInfo = $this->getNavigationInfoForEntity($part, $current);
+            if ($navInfo === null) {
+                return true;
+            }
+            if ($navInfo['isCollection']) {
+                return true;
+            }
+            $current = $navInfo['entityType'];
+        }
+
+        return false;
+    }
+
+    /**
+     * @param array<string, string> $refAliasByPath
+     */
+    private function navigationPathNeedsExistsSemantics(string $dotPath, array $refAliasByPath): bool
+    {
+        $allParts = explode('.', $dotPath);
+        if (count($allParts) < 2) {
+            return false;
+        }
+        array_pop($allParts);
+
+        if ($this->navigationPathContainsCollection($allParts)) {
+            return true;
+        }
+
+        $navParts = $allParts;
+        while (count($navParts) >= 1) {
+            if (isset($refAliasByPath[implode('.', $navParts)])) {
+                return false;
+            }
+            array_pop($navParts);
+        }
+
+        return true;
+    }
+
+    /**
+     * Raw WHERE (isEmpty/isNotEmpty) içindeki navigation path'lerini JSON join alias'larına çevirir.
+     * Örn. (Employee.Name IS NULL) → ([e1].[Name] IS NULL)
+     */
+    private function jsonRewriteRawSqlNavigationRefs(string $sql, string $mainAlias, array $refAliasByPath): string
+    {
+        if ($sql === '' || !str_contains($sql, '.')) {
+            return $sql;
+        }
+
+        return preg_replace_callback(
+            '/\b([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+)\b/',
+            function (array $m) use ($mainAlias, $refAliasByPath): string {
+                $path = $m[1];
+                if (substr_count($path, '.') < 1) {
+                    return $path;
+                }
+                $resolved = $this->jsonResolveQualifiedColumnRef($path, $mainAlias, $refAliasByPath);
+
+                return $resolved ?? $path;
+            },
+            $sql
+        ) ?? $sql;
+    }
+
+    /**
+     * @param array<string, string> $refAliasByPath
+     */
+    private function jsonResolveQualifiedColumnRef(string $dotPath, string $mainAlias, array $refAliasByPath): ?string
+    {
+        $allParts = explode('.', $dotPath);
+        if (count($allParts) < 2) {
+            return null;
+        }
+
+        $columnName = array_pop($allParts);
+        $navParts = $allParts;
+
+        while (count($navParts) >= 1) {
+            $navPath = implode('.', $navParts);
+            if (isset($refAliasByPath[$navPath]) && !$this->navigationPathContainsCollection($navParts)) {
+                $entityType = $this->jsonResolveEntityTypeForNavPath($navParts);
+                if ($entityType !== null) {
+                    $ref = new ReflectionClass($entityType);
+                    if ($ref->hasProperty($columnName)) {
+                        $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
+                        $col = $this->getColumnNameFromProperty($ref, $columnName);
+
+                        return $provider->escapeIdentifier($refAliasByPath[$navPath]) . '.' . $provider->escapeIdentifier($col);
+                    }
+                }
+            }
+            array_pop($navParts);
+        }
+
+        return null;
+    }
+
+    /**
+     * @param string[] $pathParts
+     */
+    private function jsonResolveEntityTypeForNavPath(array $pathParts): ?string
+    {
+        $current = $this->entityType;
+        foreach ($pathParts as $part) {
+            $navInfo = $this->getNavigationInfoForEntity($part, $current);
+            if ($navInfo === null) {
+                return null;
+            }
+            $current = $navInfo['entityType'];
+        }
+
+        return $current;
     }
 }
