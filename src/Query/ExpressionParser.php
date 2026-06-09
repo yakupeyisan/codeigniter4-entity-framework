@@ -238,30 +238,46 @@ class ExpressionParser
             
             return 'fn($x) => ' . $lambdaBody;
         }
+
+        // Fallback: read only the closure's own source span (not sibling if/return lines above/below).
+        $fnSpan = implode('', array_slice($lines, $start - 1, $end - $start + 1));
+        if (preg_match('/(?:fn|function)\s*\(\s*(\$[a-zA-Z_][a-zA-Z0-9_]*)\s*\)\s*=>\s*(.+)/s', $fnSpan, $fnMatches)) {
+            $lambdaParam = $fnMatches[1];
+            $lambdaBody = trim($fnMatches[2]);
+            $lambdaBody = preg_replace('/\s*\)\s*$/', '', $lambdaBody);
+            $lambdaBody = preg_replace(
+                '/\s*->\s*(firstOrDefault|first|single|toArray|toList|toJson(?:Array)?|count|skip|take|include|thenInclude|orderBy|orderByDescending|enableSensitive|disableSensitive)\s*\(.*$/is',
+                '',
+                $lambdaBody
+            );
+            if ($lambdaParam !== '$x') {
+                $lambdaBody = preg_replace('/' . preg_quote($lambdaParam, '/') . '\s*->/', '$x->', $lambdaBody);
+                $lambdaBody = preg_replace('/\b' . preg_quote($lambdaParam, '/') . '\b/', '$x', $lambdaBody);
+            }
+
+            return 'fn($x) => ' . trim($lambdaBody);
+        }
         
         return $code;
     }
+
+    /**
+     * IQueryable chain methods that may follow a where() closure on the next line.
+     */
+    private const QUERY_CHAIN_METHODS = 'where|and|or|not|firstOrDefault|first|single|toArray|toList|toJson(?:Array)?|count|skip|take|include|thenInclude|orderBy|orderByDescending|enableSensitive|disableSensitive';
 
     /**
      * Extract expression from function code
      */
     public function extractExpression(string $code): string
     {
-        // function ($e) use (...) { return $e->$field === $value; } — => use(...) içinde yakalanmasın
-        if (preg_match('/return\s+(.+?);/s', $code, $matches)) {
+        // Arrow-function closures: prefer fn(...) => extraction before any bare return in surrounding source lines.
+        // Do not use a bare `=>` match — array literals ('key' => value) also contain =>.
+        if (preg_match('/(?:fn|function)\s*\([^)]*\)\s*=>\s*(.+)/s', $code, $matches)) {
             $expression = trim($matches[1]);
-            $expression = preg_replace('/\s*->(where|and|or|not)\s*\(.*$/i', '', $expression);
+            // Source slice may include the closing ")" of where(fn(...) => ...); drop only that paren.
+            $expression = preg_replace('/\)\s*(?=\r?\n)/', '', $expression, 1);
 
-            return trim($expression);
-        }
-
-        // Remove function declaration and get expression
-        // Pattern: fn($x) => $x->Property === value
-        // Also handle incomplete expressions like: fn($x) => $x->Property === (int
-        // Handle nested function calls like: fn($x) => in_array($x->Id, $ids)
-        if (preg_match('/=>\s*(.+)/s', $code, $matches)) {
-            $expression = trim($matches[1]);
-            
             // Remove any method calls or variable assignments that might have been captured from previous lines
             // Remove method calls like getQueryable(), toList(), etc. that are not part of the lambda expression
             $expression = preg_replace('/\b(getQueryable|toList|toArray|count|first|single|skip|take|include|thenInclude|orderBy|orderByDescending)\s*\([^)]*\)/i', '', $expression);
@@ -309,15 +325,15 @@ class ExpressionParser
                     // End of statement
                     $expressionEndPos = $i;
                     break;
-                } elseif (preg_match('/\s*->(where|and|or|not)\s*\(/i', substr($expression, $i), $methodMatch) && $parenCount === 0) {
-                    // Method chaining detected
+                } elseif (preg_match('/^\s*->(' . self::QUERY_CHAIN_METHODS . ')\s*\(/i', substr($expression, $i), $methodMatch) && $parenCount === 0) {
+                    // Method chaining detected (firstOrDefault, toArray, …) — anchored so $x->ID is not matched
                     $expressionEndPos = $i;
                     break;
                 } elseif (($char === "\n" || $char === "\r") && $parenCount === 0 && $i > 0) {
                     // End of line, but only if we're not inside parentheses
                     // Check if next non-whitespace is method chaining or end of code
                     $remaining = trim(substr($expression, $i));
-                    if (empty($remaining) || preg_match('/^->(where|and|or|not)\s*\(/i', $remaining)) {
+                    if (empty($remaining) || preg_match('/^->(' . self::QUERY_CHAIN_METHODS . ')\s*\(/i', $remaining)) {
                         $expressionEndPos = $i;
                         break;
                     }
@@ -348,8 +364,8 @@ class ExpressionParser
                 }
             }
             
-            // Remove any trailing ->where, ->and, ->or, etc. that might be part of method chaining
-            $expression = preg_replace('/\s*->(where|and|or|not)\s*\(.*$/i', '', $expression);
+            // Remove any trailing query-builder chain calls that might be part of method chaining
+            $expression = preg_replace('/\s*->(' . self::QUERY_CHAIN_METHODS . ')\s*\(.*$/i', '', $expression);
             // Remove any trailing closing parentheses that might be from method chaining (but keep function call parentheses)
             // Only remove if it's at the very end and we have balanced parentheses
             if (preg_match('/\)\s*$/', $expression) && substr_count($expression, '(') === substr_count($expression, ')') - 1) {
@@ -359,12 +375,12 @@ class ExpressionParser
             $expression = preg_replace('/\s*->\s*$/', '', $expression);
             return trim($expression);
         }
-        
-        // Pattern: function($x) { return $x->Property === value; }
+
+        // function ($e) use (...) { return $e->$field === $value; }
         if (preg_match('/return\s+(.+?);/s', $code, $matches)) {
             $expression = trim($matches[1]);
-            // Remove any trailing ->where, ->and, ->or, etc.
-            $expression = preg_replace('/\s*->(where|and|or|not)\s*\(.*$/i', '', $expression);
+            $expression = preg_replace('/\s*->(' . self::QUERY_CHAIN_METHODS . ')\s*\(.*$/i', '', $expression);
+
             return trim($expression);
         }
         
@@ -1410,7 +1426,12 @@ class ExpressionParser
         $expression = preg_replace('/[^A-Za-z0-9_]/', '', $expression);
         
         // Filter out invalid property names (method names that might have been captured)
-        $invalidPropertyNames = ['getQueryable', 'toList', 'toArray', 'count', 'first', 'single', 'skip', 'take', 'include', 'thenInclude', 'orderBy', 'orderByDescending', 'where', 'and', 'or', 'not'];
+        $invalidPropertyNames = [
+            'getQueryable', 'toList', 'toArray', 'count', 'first', 'firstOrDefault', 'single', 'skip', 'take',
+            'include', 'thenInclude', 'orderBy', 'orderByDescending', 'where', 'and', 'or', 'not',
+            'if', 'else', 'elseif', 'return', 'foreach', 'for', 'while', 'switch', 'case', 'break', 'continue',
+            'isset', 'empty', 'new', 'throw', 'try', 'catch', 'function', 'fn', 'use', 'static', 'true', 'false', 'null',
+        ];
         if (in_array(strtolower($expression), array_map('strtolower', $invalidPropertyNames))) {
             // This is not a property, it's a method name that was incorrectly captured
             // Return a fallback (primary key) or empty string
