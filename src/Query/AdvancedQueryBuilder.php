@@ -26,6 +26,7 @@ class AdvancedQueryBuilder
     private array $whereGroups = []; // Groups of where clauses with OR logic
     private int $currentWhereIndex = 0; // Track current where clause index for OR logic
     private bool $inGroup = false; // Track if we're currently in a group
+    private bool $currentGroupHasConditions = false; // Whether the open group received at least one WHERE
     private $select = null; // callable|null
     private array $includes = [];
     private array $orderBys = [];
@@ -321,6 +322,10 @@ class AdvancedQueryBuilder
                 'groupEnd' => false
             ];
         }
+
+        if ($this->inGroup) {
+            $this->currentGroupHasConditions = true;
+        }
         
         $this->debugLog("wheres array count: " . count($this->wheres) . ", last isOr: " . ($isOr ? 'true' : 'false'));
         return $this;
@@ -338,6 +343,7 @@ class AdvancedQueryBuilder
             throw new $exceptionClass('Cannot start a new group while already in a group. Call endGroup() first.');
         }
         $this->inGroup = true;
+        $this->currentGroupHasConditions = false;
         $this->wheres[] = [
             'predicate' => null,
             'isOr' => false,
@@ -360,6 +366,16 @@ class AdvancedQueryBuilder
             throw new $exceptionClass('Cannot end a group that was not started. Call startGroup() first.');
         }
         $this->inGroup = false;
+        if (!$this->currentGroupHasConditions) {
+            for ($i = count($this->wheres) - 1; $i >= 0; $i--) {
+                if (is_array($this->wheres[$i]) && !empty($this->wheres[$i]['groupStart'])) {
+                    array_splice($this->wheres, $i, 1);
+                    break;
+                }
+            }
+            $this->debugLog("AdvancedQueryBuilder::endGroup() cancelled empty group");
+            return $this;
+        }
         $this->wheres[] = [
             'predicate' => null,
             'isOr' => false,
@@ -910,18 +926,27 @@ class AdvancedQueryBuilder
             $this->addJoinForNavigationPath($builder, $path);
         }
 
+        $builderGroupOpen = false;
+        $builderGroupHasCondition = false;
+
         foreach ($this->wheres as $index => $whereItem) {
             $groupStart = is_array($whereItem) && isset($whereItem['groupStart']) ? $whereItem['groupStart'] : false;
             $groupEnd = is_array($whereItem) && isset($whereItem['groupEnd']) ? $whereItem['groupEnd'] : false;
 
             if ($groupStart) {
                 $builder->groupStart();
+                $builderGroupOpen = true;
+                $builderGroupHasCondition = false;
                 log_message('debug', "count(): Group start at index #{$index}");
                 continue;
             }
 
             if ($groupEnd) {
-                $builder->groupEnd();
+                if ($builderGroupOpen && $builderGroupHasCondition) {
+                    $builder->groupEnd();
+                }
+                $builderGroupOpen = false;
+                $builderGroupHasCondition = false;
                 log_message('debug', "count(): Group end at index #{$index}");
                 continue;
             }
@@ -944,6 +969,10 @@ class AdvancedQueryBuilder
                 } else {
                     $this->applyWhere($builder, $whereToApply, $isOr);
                 }
+            }
+
+            if ($builderGroupOpen) {
+                $builderGroupHasCondition = true;
             }
         }
 
@@ -1632,18 +1661,26 @@ class AdvancedQueryBuilder
         
         // Apply WHERE clauses with performance tracking
         $parsingStartTime = microtime(true);
+        $builderGroupOpen = false;
+        $builderGroupHasCondition = false;
         foreach ($this->wheres as $index => $whereItem) {
             $groupStart = is_array($whereItem) && isset($whereItem['groupStart']) ? $whereItem['groupStart'] : false;
             $groupEnd = is_array($whereItem) && isset($whereItem['groupEnd']) ? $whereItem['groupEnd'] : false;
             
             if ($groupStart) {
                 $builder->groupStart();
+                $builderGroupOpen = true;
+                $builderGroupHasCondition = false;
                 log_message('debug', "executeQuery: Group start at index #{$index}");
                 continue;
             }
             
             if ($groupEnd) {
-                $builder->groupEnd();
+                if ($builderGroupOpen && $builderGroupHasCondition) {
+                    $builder->groupEnd();
+                }
+                $builderGroupOpen = false;
+                $builderGroupHasCondition = false;
                 log_message('debug', "executeQuery: Group end at index #{$index}");
                 continue;
             }
@@ -1656,6 +1693,10 @@ class AdvancedQueryBuilder
             $whereToApply = $rawSql !== null ? $rawSql : $where;
             log_message('debug', "executeQuery: Processing where item #{$index}, isOr=" . ($isOr ? 'true' : 'false') . ", type=" . (is_string($whereToApply) ? 'raw SQL' : 'callable'));
             $this->applyWhere($builder, $whereToApply, $isOr);
+
+            if ($builderGroupOpen) {
+                $builderGroupHasCondition = true;
+            }
         }
         $parsingEndTime = microtime(true);
         $this->currentQueryStats['parsingTime'] = ($parsingEndTime - $parsingStartTime);
@@ -2848,6 +2889,74 @@ class AdvancedQueryBuilder
     }
 
     /**
+     * BaseManager::applySingleCondition uses fn($e) use ($field, $formattedValue) => $e->$field->contains(...)
+     * Build SQL directly from captured static variables (count()/simple builder path).
+     */
+    private function tryApplyDynamicFieldTextMethodSql($builder, callable $predicate, bool $isOr): bool
+    {
+        if ($builder === null) {
+            return false;
+        }
+
+        $reflection = new \ReflectionFunction($predicate);
+        $staticVariables = $reflection->getStaticVariables();
+        if (!isset($staticVariables['field'], $staticVariables['formattedValue'])) {
+            return false;
+        }
+
+        $fieldName = $staticVariables['field'];
+        $value = $staticVariables['formattedValue'];
+        if (!is_string($fieldName) || $fieldName === '' || str_contains($fieldName, '.')) {
+            return false;
+        }
+
+        $file = $reflection->getFileName();
+        $start = $reflection->getStartLine();
+        $end = $reflection->getEndLine();
+        if (!$file || !$start || !$end || !file_exists($file)) {
+            return false;
+        }
+
+        $lines = file($file);
+        $closureCode = implode('', array_slice($lines, $start - 1, $end - $start + 1));
+        if (!preg_match('/->(contains|startsWith|endsWith)\s*\(/i', $closureCode, $methodMatch)) {
+            return false;
+        }
+
+        $methodName = strtolower($methodMatch[1]);
+        $entityReflection = new \ReflectionClass($this->entityType);
+        $columnName = $this->getColumnNameFromProperty($entityReflection, $fieldName);
+        $tableAlias = $this->getTableAliasForParser($builder);
+        $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
+        $quotedAlias = $provider->escapeIdentifier($tableAlias);
+        $quotedColumn = $provider->escapeIdentifier($columnName);
+        $escapedValue = str_replace("'", "''", (string) $value);
+
+        switch ($methodName) {
+            case 'startswith':
+                $sqlCondition = "{$quotedAlias}.{$quotedColumn} LIKE '{$escapedValue}%'";
+                break;
+            case 'contains':
+                $sqlCondition = "{$quotedAlias}.{$quotedColumn} LIKE '%{$escapedValue}%'";
+                break;
+            case 'endswith':
+                $sqlCondition = "{$quotedAlias}.{$quotedColumn} LIKE '%{$escapedValue}'";
+                break;
+            default:
+                return false;
+        }
+
+        if ($isOr) {
+            $builder->orWhere($sqlCondition, null, false);
+        } else {
+            $builder->where($sqlCondition, null, false);
+        }
+
+        log_message('debug', 'tryApplyDynamicFieldTextMethodSql applied: ' . $sqlCondition);
+        return true;
+    }
+
+    /**
      * Apply simple WHERE clause using ExpressionParser
      * Supports both callable predicates and raw SQL strings
      */
@@ -2865,6 +2974,10 @@ class AdvancedQueryBuilder
                 }
                 log_message('debug', 'WHERE clause applied (raw SQL): ' . $predicate);
             }
+            return;
+        }
+
+        if ($this->tryApplyDynamicFieldTextMethodSql($builder, $predicate, $isOr)) {
             return;
         }
         
@@ -3067,8 +3180,8 @@ class AdvancedQueryBuilder
                             $builder->where($sqlCondition, null, false);
                         }
                         log_message('debug', 'applySimpleWhereWithParser - expanded NAVIGATION_IN: ' . $sqlCondition);
+                        return;
                     }
-                    return;
                 }
 
                 // Check if SQL condition is a navigation property path (NAVIGATION:...)
@@ -4237,12 +4350,13 @@ class AdvancedQueryBuilder
         } else {
             // For reference navigation, foreign key can be in current entity (many-to-one) 
             // or in related entity (one-to-one)
-            // Convention: NavigationPropertyName + "Id" or check ForeignKey attribute
-            $fkPropertyName = $navigationProperty . 'Id';
-            
-            // Check if FK property exists in current entity (many-to-one)
-            if ($entityReflection->hasProperty($fkPropertyName)) {
-                return $fkPropertyName;
+            // Convention: NavigationPropertyName + "Id"/"ID" or check ForeignKey attribute
+            foreach ($entityReflection->getProperties() as $property) {
+                $propName = $property->getName();
+                if (strcasecmp($propName, $navigationProperty . 'Id') === 0
+                    || strcasecmp($propName, $navigationProperty . 'ID') === 0) {
+                    return $propName;
+                }
             }
 
             // Check ForeignKey attribute on properties in current entity
@@ -9466,6 +9580,22 @@ class AdvancedQueryBuilder
             
             // Parse the expression directly (parseExpression expects string, not callable)
             $sqlCondition = $parser->parseExpression($lambdaCode);
+
+            if ($sqlCondition && strpos($sqlCondition, 'NAVIGATION_IN:') !== false) {
+                $mainAlias = $this->getTableAliasForParser();
+                $expandedNavIn = $this->expandNavigationInTokensForRawSql(trim($sqlCondition), $mainAlias);
+                if ($expandedNavIn !== null && strpos($expandedNavIn, 'NAVIGATION_IN:') === false) {
+                    $sqlCondition = $expandedNavIn;
+                }
+            }
+
+            if ($sqlCondition && $this->isNavigationTokenCondition($sqlCondition)) {
+                $mainAlias = $this->getTableAliasForParser();
+                $expandedNav = $this->expandNavigationTokenForRawSql(trim($sqlCondition), $mainAlias);
+                if ($expandedNav !== null) {
+                    $sqlCondition = $expandedNav;
+                }
+            }
             
             if ($sqlCondition) {
                 log_message('debug', "convertNavigationWhereToSql - parsed SQL condition (before alias replacement): {$sqlCondition}");
@@ -9951,6 +10081,20 @@ class AdvancedQueryBuilder
             $parser->setVariableValues($variableValues);
             
             $sqlCondition = $parser->parse($predicate);
+
+            if (!empty($sqlCondition) && strpos($sqlCondition, 'NAVIGATION_IN:') !== false) {
+                $expandedNavIn = $this->expandNavigationInTokensForRawSql(trim($sqlCondition), $alias);
+                if ($expandedNavIn !== null && strpos($expandedNavIn, 'NAVIGATION_IN:') === false) {
+                    return $expandedNavIn;
+                }
+            }
+
+            if (!empty($sqlCondition) && $this->isNavigationTokenCondition($sqlCondition)) {
+                $expandedNav = $this->expandNavigationTokenForRawSql(trim($sqlCondition), $alias);
+                if ($expandedNav !== null) {
+                    return $expandedNav;
+                }
+            }
             
             if (!empty($sqlCondition)) {
                 // Check if SQL condition is a navigation property path (NAVIGATION:...)
