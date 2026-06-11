@@ -1198,27 +1198,9 @@ class AdvancedQueryBuilder
             $this->applyWhere($builder, $whereToApply, $isOr);
         }
         
-        // Apply order by
-        // Use table name as alias for simple queries (CodeIgniter doesn't use aliases by default)
-        $mainAlias = $tableName;
+        // Apply order by (includes navigation JOIN registration for multi-hop paths)
         foreach ($this->orderBys as $orderBy) {
-            $orderBySql = $this->convertOrderByToSql($orderBy['selector'], $orderBy['direction'], $mainAlias);
-            if ($orderBySql) {
-                // Extract column name from ORDER BY SQL (e.g., "[alias].[Column] ASC" -> "Column ASC")
-                // CodeIgniter's orderBy expects just column name and direction
-                if (preg_match('/\[?[^\]]+\]?\.\[?([^\]]+)\]?\s+(ASC|DESC)/i', $orderBySql, $matches)) {
-                    $columnName = $matches[1];
-                    $direction = strtoupper($matches[2]);
-                    $builder->orderBy($columnName, $direction);
-                } else {
-                    // Fallback: try to extract column name directly
-                    $orderBySql = preg_replace('/\[.*?\]\./', '', $orderBySql);
-                    $orderBySql = preg_replace('/\[|\]/', '', $orderBySql);
-                    if (preg_match('/^([a-zA-Z_][a-zA-Z0-9_]*)\s+(ASC|DESC)$/i', trim($orderBySql), $matches)) {
-                        $builder->orderBy($matches[1], strtoupper($matches[2]));
-                    }
-                }
-            }
+            $this->applyOrderBy($builder, $orderBy);
         }
         
         // Apply skip/take
@@ -3884,6 +3866,154 @@ class AdvancedQueryBuilder
     }
 
     /**
+     * Cumulative JOIN paths for a dot-separated sort/filter field (alias for collectReferenceNavigationPathsFromDotPath).
+     *
+     * @return list<string> e.g. Employee.Company.PdksCompanyName → ['Employee', 'Employee.Company']
+     */
+    private function collectCumulativeJoinPathsFromDotPath(string $fieldPath): array
+    {
+        return $this->collectReferenceNavigationPathsFromDotPath($fieldPath);
+    }
+
+    /**
+     * Resolve a pure-reference dot path for ORDER BY (no collection segments).
+     *
+     * @return array{joinKey:string,fieldPath:string,leafProperty:string,columnName:string,tableName:string,tableAlias:string,entityType:string}|null
+     */
+    private function resolvePureReferenceOrderByPath(string $fieldPath): ?array
+    {
+        $parts = $this->stripRedundantRootEntityFromPathParts(explode('.', $fieldPath));
+        if (count($parts) < 2) {
+            return null;
+        }
+
+        $leafProperty = array_pop($parts);
+        if ($parts === []) {
+            return null;
+        }
+
+        $currentEntityType = $this->entityType;
+        $cumulative = '';
+
+        foreach ($parts as $segment) {
+            $navInfo = $this->getNavigationInfoForEntity($segment, $currentEntityType);
+            if ($navInfo === null || $navInfo['isCollection']) {
+                return null;
+            }
+            $cumulative = $cumulative === '' ? $segment : $cumulative . '.' . $segment;
+            $currentEntityType = $navInfo['entityType'];
+        }
+
+        $leafReflection = new \ReflectionClass($currentEntityType);
+        if (! $leafReflection->hasProperty($leafProperty)) {
+            return null;
+        }
+
+        $columnName = $this->getColumnNameFromProperty($leafReflection, $leafProperty);
+        $tableName = $this->context->getTableName($currentEntityType);
+        $joinKey = $cumulative;
+        $joinInfo = $this->requiredJoins[$joinKey] ?? null;
+        $tableAlias = $joinInfo['alias'] ?? $joinInfo['table'] ?? $tableName;
+
+        return [
+            'joinKey' => $joinKey,
+            'fieldPath' => $fieldPath,
+            'leafProperty' => $leafProperty,
+            'columnName' => $columnName,
+            'tableName' => $tableName,
+            'tableAlias' => $tableAlias,
+            'entityType' => $currentEntityType,
+        ];
+    }
+
+    /**
+     * Build ORDER BY SQL fragment from a resolved pure-reference navigation path.
+     */
+    private function buildOrderBySqlFromResolvedPath(array $resolved, string $direction, string $alias): ?string
+    {
+        $joinKey = $resolved['joinKey'];
+        $columnName = $resolved['columnName'];
+        $direction = strtoupper($direction);
+        if ($direction !== 'ASC' && $direction !== 'DESC') {
+            $direction = 'ASC';
+        }
+
+        $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
+        $mainTableName = $this->context->getTableName($this->entityType);
+
+        // Final query wrapping subquery alias (JSON mode)
+        if ($alias === 's' || $alias === $mainTableName) {
+            $refIndex = $this->referenceNavIndexes[$joinKey] ?? null;
+            if ($refIndex !== null) {
+                $leafReflection = new \ReflectionClass($resolved['entityType']);
+                $refPrimaryKeyColumn = $this->getPrimaryKeyColumnName($leafReflection);
+                $subqueryColumnAlias = $columnName === $refPrimaryKeyColumn
+                    ? "Id{$refIndex}"
+                    : "{$columnName}{$refIndex}";
+                $quotedAlias = $provider->escapeIdentifier($alias);
+                $quotedColAlias = $provider->escapeIdentifier($subqueryColumnAlias);
+
+                return "{$quotedAlias}.{$quotedColAlias} {$direction}";
+            }
+        }
+
+        $joinInfo = $this->requiredJoins[$joinKey] ?? null;
+        if ($joinInfo) {
+            $joinAlias = $joinInfo['alias'] ?? $joinInfo['table'];
+            $quotedJoinAlias = $provider->escapeIdentifier($joinAlias);
+            $quotedColumn = $provider->escapeIdentifier($columnName);
+
+            return "{$quotedJoinAlias}.{$quotedColumn} {$direction}";
+        }
+
+        $quotedTable = $provider->escapeIdentifier($resolved['tableName']);
+        $quotedColumn = $provider->escapeIdentifier($columnName);
+
+        return "{$quotedTable}.{$quotedColumn} {$direction}";
+    }
+
+    /**
+     * Navigation JOIN paths required for an ORDER BY selector (supports multi-hop dot paths).
+     *
+     * @return list<string>
+     */
+    private function collectOrderByNavigationPaths(callable $selector): array
+    {
+        $paths = $this->detectNavigationPaths($selector);
+        $reflection = new \ReflectionFunction($selector);
+        $staticVariables = $reflection->getStaticVariables();
+
+        foreach ($staticVariables as $varValue) {
+            if (! is_string($varValue) || ! str_contains($varValue, '.')) {
+                continue;
+            }
+            foreach ($this->collectCumulativeJoinPathsFromDotPath($varValue) as $path) {
+                if (! in_array($path, $paths, true)) {
+                    $paths[] = $path;
+                }
+            }
+            break;
+        }
+
+        return $paths;
+    }
+
+    /**
+     * Extract dot-separated field path from ORDER BY closure static variables.
+     */
+    private function extractDotPathFromOrderBySelector(callable $selector): ?string
+    {
+        $reflection = new \ReflectionFunction($selector);
+        foreach ($reflection->getStaticVariables() as $varValue) {
+            if (is_string($varValue) && str_contains($varValue, '.')) {
+                return $varValue;
+            }
+        }
+
+        return null;
+    }
+
+    /**
      * isEmpty/isNotEmpty ham SQL'inde geçen navigation path'lerini COUNT/aggregate builder için çözümler.
      */
     private function expandRawSqlNavigationWhereForCount(string $rawSql, $builder): string
@@ -4186,27 +4316,11 @@ class AdvancedQueryBuilder
      */
     private function applyOrderBy($builder, array $orderBy): void
     {
-        // Detect navigation property paths in orderBy selector
-        $navigationPaths = $this->detectNavigationPaths($orderBy['selector']);
-        
-        // Also check static variables for navigation property path (from createNavigationKeySelector)
-        if (empty($navigationPaths)) {
-            $reflection = new \ReflectionFunction($orderBy['selector']);
-            $staticVariables = $reflection->getStaticVariables();
-            
-            // Check for 'field' variable that might contain navigation property path (e.g., "Kadro.Name")
-            if (isset($staticVariables['field']) && is_string($staticVariables['field']) && strpos($staticVariables['field'], '.') !== false) {
-                $parts = explode('.', $staticVariables['field'], 2);
-                $navigationProperty = $parts[0];
-                if (!in_array($navigationProperty, $navigationPaths)) {
-                    $navigationPaths[] = $navigationProperty;
-                    log_message('debug', "applyOrderBy: Detected navigation property from static variable: {$navigationProperty}");
-                }
-            }
-        }
-        
+        // Detect navigation property paths in orderBy selector (multi-hop dot paths included)
+        $navigationPaths = $this->collectOrderByNavigationPaths($orderBy['selector']);
+
         // Add JOINs for navigation properties if needed
-        if (!empty($navigationPaths)) {
+        if (! empty($navigationPaths)) {
             foreach ($navigationPaths as $path) {
                 $this->addJoinForNavigationPath($builder, $path);
             }
@@ -5793,25 +5907,9 @@ class AdvancedQueryBuilder
                 // This ensures convertOrderByToSql can find join info
                 // Note: collectionSubqueries will be built later, so we need to handle collection navigation properties differently
                 foreach ($this->orderBys as $orderBy) {
-                    // Detect navigation property paths in orderBy selector
-                    $navigationPaths = $this->detectNavigationPaths($orderBy['selector']);
-                    
-                    // Also check static variables for navigation property path (from createNavigationKeySelector)
-                    if (empty($navigationPaths)) {
-                        $reflection = new \ReflectionFunction($orderBy['selector']);
-                        $staticVariables = $reflection->getStaticVariables();
-                        
-                        // Check for 'field' variable that might contain navigation property path (e.g., "Kadro.Name" or "Department.DepartmentName")
-                        if (isset($staticVariables['field']) && is_string($staticVariables['field']) && strpos($staticVariables['field'], '.') !== false) {
-                            $parts = explode('.', $staticVariables['field'], 2);
-                            $navigationProperty = $parts[0];
-                            if (!in_array($navigationProperty, $navigationPaths)) {
-                                $navigationPaths[] = $navigationProperty;
-                                log_message('debug', "buildEfCoreStyleQuery: Detected navigation property from static variable for ORDER BY: {$navigationProperty}");
-                            }
-                        }
-                    }
-                    
+                    // Detect navigation property paths (multi-hop dot paths included)
+                    $navigationPaths = $this->collectOrderByNavigationPaths($orderBy['selector']);
+
                     // Add join info to requiredJoins for each navigation property
                     foreach ($navigationPaths as $navPath) {
                         if (!isset($this->requiredJoins[$navPath])) {
@@ -10693,44 +10791,52 @@ class AdvancedQueryBuilder
             $nestedProperty = null;
             
             // Check for 'field' or 'fieldPath' in static variables (from createNavigationKeySelector)
-            // Also check all variables that might contain the field path
             foreach ($staticVariables as $varName => $varValue) {
                 if (is_string($varValue) && strpos($varValue, '.') !== false) {
-                    // This might be a navigation property path
                     $fieldName = $varValue;
-                    $parts = explode('.', $fieldName, 2);
-                    if (count($parts) === 2) {
-                        $navigationProperty = $parts[0];
-                        $nestedProperty = $parts[1];
-                        log_message('debug', "convertOrderByToSql: Found navigation property from static variable '{$varName}': {$navigationProperty}.{$nestedProperty}");
-                        break;
-                    }
+                    log_message('debug', "convertOrderByToSql: Found dot path from static variable '{$varName}': {$fieldName}");
+                    break;
                 }
             }
-            
+
             // Early check: If fieldName contains a collection navigation property path, return null
             if ($fieldName !== null && strpos($fieldName, '.') !== false) {
                 $pathParts = explode('.', $fieldName);
-                
+
                 // Check each part of the path to see if any is a collection navigation property
                 $currentEntityType = $this->entityType;
                 foreach ($pathParts as $part) {
                     $navInfo = $this->getNavigationInfoForEntity($part, $currentEntityType);
                     if ($navInfo) {
                         if ($navInfo['isCollection']) {
-                            // This path contains a collection navigation property - cannot use in ORDER BY
                             log_message('debug', "convertOrderByToSql: Early check - Path '{$fieldName}' contains collection navigation property '{$part}', skipping");
                             return null;
                         }
-                        // Move to next entity type for nested navigation
                         $currentEntityType = $navInfo['entityType'];
                     } else {
-                        // Not a navigation property, stop checking
                         break;
                     }
                 }
+
+                // Multi-hop pure-reference path (e.g. Employee.Company.PdksCompanyName)
+                $resolved = $this->resolvePureReferenceOrderByPath($fieldName);
+                if ($resolved !== null) {
+                    $orderBySql = $this->buildOrderBySqlFromResolvedPath($resolved, $direction, $alias);
+                    if ($orderBySql !== null) {
+                        log_message('debug', "convertOrderByToSql: Generated ORDER BY SQL for multi-hop path '{$fieldName}': {$orderBySql}");
+                        return $orderBySql;
+                    }
+                }
+
+                // Legacy 2-segment split for backward compatibility
+                $parts = explode('.', $fieldName, 2);
+                if (count($parts) === 2) {
+                    $navigationProperty = $parts[0];
+                    $nestedProperty = $parts[1];
+                    log_message('debug', "convertOrderByToSql: Legacy 2-segment path '{$navigationProperty}.{$nestedProperty}'");
+                }
             }
-            
+
             if ($navigationProperty === null || $nestedProperty === null) {
                 // Try to parse closure code to extract property name
                 $closureFile = $reflection->getFileName();
