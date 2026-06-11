@@ -1458,6 +1458,11 @@ class AdvancedQueryBuilder
             );
             $this->debugLog($perfLine . $sqlPart);
         }
+
+        if (class_exists(\App\Services\RequestQueryProfiler::class)
+            && \App\Services\RequestQueryProfiler::isEnabled()) {
+            \App\Services\RequestQueryProfiler::appendFromEf($this->currentQueryStats);
+        }
     }
 
     /**
