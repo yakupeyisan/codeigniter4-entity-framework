@@ -1387,24 +1387,16 @@ trait JsonModeQueryTrait
             array_pop($navParts);
         }
 
-        if (!$this->navigationPathNeedsExistsSemantics($dotPath, $refAliasByPath)) {
-            if ($mode === 'isEmpty') {
-                return "({$dotPath} IS NULL)";
-            }
-
-            return "({$dotPath} IS NOT NULL)";
-        }
-
         $existsSql = $this->buildNavigationExistsForEmptyFilter(explode('.', $dotPath), $mainAlias);
-        if ($existsSql === null) {
-            if ($mode === 'isEmpty') {
-                return "({$dotPath} IS NULL)";
-            }
-
-            return "({$dotPath} IS NOT NULL)";
+        if ($existsSql !== null) {
+            return $mode === 'isEmpty' ? "NOT ({$existsSql})" : "({$existsSql})";
         }
 
-        return $mode === 'isEmpty' ? "NOT ({$existsSql})" : "({$existsSql})";
+        if ($mode === 'isEmpty') {
+            return "({$dotPath} IS NULL)";
+        }
+
+        return "({$dotPath} IS NOT NULL)";
     }
 
     /**
@@ -1414,6 +1406,18 @@ trait JsonModeQueryTrait
     {
         if (count($pathParts) < 2) {
             return null;
+        }
+
+        if (count($pathParts) === 2) {
+            $existsSql = $this->buildReferenceNavigationExistsForFilter(
+                $pathParts[0],
+                $pathParts[1],
+                'IS NOT NULL',
+                $mainAlias
+            );
+            if ($existsSql !== null) {
+                return $existsSql;
+            }
         }
 
         $existsWithFilter = $this->buildNavigationPathConditionRecursive($pathParts, '1', null, $mainAlias);
