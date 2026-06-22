@@ -1043,7 +1043,7 @@ trait JsonModeQueryTrait
         $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
 
         return preg_replace_callback(
-            '/NAVIGATION_IN:([A-Za-z0-9_.]+):([^)\s]+)/',
+            '/NAVIGATION_IN:([A-Za-z0-9_.]+):((?:\'(?:[^\']|\'\')*\'(?:,\'(?:[^\']|\'\')*\')*)|\?|[0-9]+(?:,[0-9]+)*)/',
             function (array $m) use ($refAliasByPath, $provider): string {
                 $fullPath = $m[1];
                 $values = $m[2];

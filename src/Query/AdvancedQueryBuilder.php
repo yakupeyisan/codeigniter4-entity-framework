@@ -10018,10 +10018,12 @@ class AdvancedQueryBuilder
             return $sqlCondition;
         }
 
+        // Values may be quoted strings with spaces (e.g. 'KREDİ OPERASYON'); [^)\s]+ truncated those tokens.
         $expandedCondition = preg_replace_callback(
-            '/NAVIGATION_IN:[A-Za-z0-9_.]+:[^)\s]+/',
+            '/NAVIGATION_IN:([A-Za-z0-9_.]+):((?:\'(?:[^\']|\'\')*\'(?:,\'(?:[^\']|\'\')*\')*)|\?|[0-9]+(?:,[0-9]+)*)/',
             function (array $m) use ($mainAlias) {
-                $expanded = $this->expandNavigationInForRawSql($m[0], $mainAlias);
+                $token = 'NAVIGATION_IN:' . $m[1] . ':' . $m[2];
+                $expanded = $this->expandNavigationInForRawSql($token, $mainAlias);
                 return $expanded ?? $m[0];
             },
             $sqlCondition
