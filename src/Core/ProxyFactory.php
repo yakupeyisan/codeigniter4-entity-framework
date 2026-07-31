@@ -185,16 +185,40 @@ class ProxyFactory
             }
 
             $type = $property->getType();
-            
-            // Check if it's a navigation property (object or array type)
-            if ($type && !$type->isBuiltin()) {
-                // It's an object - likely a reference navigation
-                $proxy = $this->createProxy($entity, $property->getName());
-                if ($proxy !== null) {
-                    $this->setProxyToEntity($entity, $property->getName(), $proxy);
+            if ($type === null) {
+                continue;
+            }
+
+            // Navigation props are class types (possibly inside a union, e.g. Employee|null).
+            // ReflectionUnionType has no isBuiltin()/getName() — handle named vs union explicitly.
+            $isObjectNavigation = false;
+            $isArrayNavigation = false;
+
+            if ($type instanceof \ReflectionNamedType) {
+                if (!$type->isBuiltin()) {
+                    $isObjectNavigation = true;
+                } elseif ($type->getName() === 'array') {
+                    $isArrayNavigation = true;
                 }
-            } elseif ($type && $type->getName() === 'array') {
-                // It's an array - likely a collection navigation
+            } elseif ($type instanceof \ReflectionUnionType) {
+                foreach ($type->getTypes() as $inner) {
+                    if (!$inner instanceof \ReflectionNamedType) {
+                        continue;
+                    }
+                    if ($inner->getName() === 'null') {
+                        continue;
+                    }
+                    if (!$inner->isBuiltin()) {
+                        $isObjectNavigation = true;
+                        break;
+                    }
+                    if ($inner->getName() === 'array') {
+                        $isArrayNavigation = true;
+                    }
+                }
+            }
+
+            if ($isObjectNavigation || $isArrayNavigation) {
                 $proxy = $this->createProxy($entity, $property->getName());
                 if ($proxy !== null) {
                     $this->setProxyToEntity($entity, $property->getName(), $proxy);

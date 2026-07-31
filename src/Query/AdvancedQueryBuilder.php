@@ -875,9 +875,22 @@ class AdvancedQueryBuilder
             }
         }
 
-        foreach ($allNavigationPaths as $path) {
+        // Do NOT add every applyIncludes() path here — eager-load includes (e.g. Employee.Authorization +
+        // Employee.WebClientAuthorization) often target the same table twice and break COUNT on SQL Server.
+        // WHERE-driven paths: use EXISTS subqueries (expandNavigationIn / convertNavigationConditionToSql)
+        // instead of JOINs here — CI builder JOINs can emit wrong catalog-qualified table names.
+        //
+        // Aggregate SELECT may reference joined tables that are not in WHERE (e.g. SUM(Payments.Amount)).
+        // Only apply explicit $additionalJoinNavigationPaths as JOINs for that case.
+        foreach ($additionalJoinNavigationPaths as $path) {
+            if (! is_string($path) || $path === '') {
+                continue;
+            }
             $this->addJoinForNavigationPath($builder, $path);
         }
+
+        $builderGroupOpen = false;
+        $builderGroupHasCondition = false;
 
         foreach ($this->wheres as $index => $whereItem) {
             $groupStart = is_array($whereItem) && isset($whereItem['groupStart']) ? $whereItem['groupStart'] : false;
