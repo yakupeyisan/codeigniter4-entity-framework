@@ -922,6 +922,15 @@ class AdvancedQueryBuilder
         // Employee.WebClientAuthorization) often target the same table twice and break COUNT on SQL Server.
         // WHERE-driven paths: use EXISTS subqueries (expandNavigationIn / convertNavigationConditionToSql)
         // instead of JOINs here — CI builder JOINs can emit wrong catalog-qualified table names.
+        //
+        // Aggregate SELECT may reference joined tables that are not in WHERE (e.g. SUM(Payments.Amount)).
+        // Only apply explicit $additionalJoinNavigationPaths as JOINs for that case.
+        foreach ($additionalJoinNavigationPaths as $path) {
+            if (! is_string($path) || $path === '') {
+                continue;
+            }
+            $this->addJoinForNavigationPath($builder, $path);
+        }
 
         $builderGroupOpen = false;
         $builderGroupHasCondition = false;
