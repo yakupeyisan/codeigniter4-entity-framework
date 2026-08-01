@@ -306,6 +306,7 @@ trait JsonModeQueryTrait
 
         $refIndex = 0;
         $this->jsonEnsureWhereReferenceJoins($selectParts, $joinParts, $refAliasByPath, $refIndex);
+        $this->jsonEnsureOrderByReferenceJoins($selectParts, $joinParts, $refAliasByPath, $refIndex);
 
         foreach ($this->includes as $include) {
             if (!is_array($include)) {
@@ -382,6 +383,39 @@ trait JsonModeQueryTrait
                             $pathsToEnsure[] = $navPath;
                         }
                     }
+                }
+            }
+        }
+
+        foreach (array_unique($pathsToEnsure) as $navPath) {
+            if ($navPath === '' || isset($refAliasByPath[$navPath])) {
+                continue;
+            }
+            $this->jsonEnsureReferenceJoinForPath(
+                $navPath,
+                $selectParts,
+                $joinParts,
+                $refAliasByPath,
+                $refIndex
+            );
+        }
+    }
+
+    /**
+     * LEFT JOIN reference navigations required by ORDER BY if not already included.
+     *
+     * @param list<string> $selectParts
+     * @param list<string> $joinParts
+     * @param array<string, string> $refAliasByPath
+     */
+    private function jsonEnsureOrderByReferenceJoins(array &$selectParts, array &$joinParts, array &$refAliasByPath, int &$refIndex): void
+    {
+        $pathsToEnsure = [];
+        foreach ($this->orderBys as $orderBy) {
+            $selector = $orderBy['selector'] ?? null;
+            if (is_callable($selector)) {
+                foreach ($this->detectNavigationPaths($selector) as $navPath) {
+                    $pathsToEnsure[] = $navPath;
                 }
             }
         }
@@ -1242,6 +1276,8 @@ trait JsonModeQueryTrait
                 throw new \InvalidArgumentException('JSON mode V1: this orderBy expression is not supported (navigation/collection order or unresolved join).');
             }
             $sql = str_replace('[u].', '[' . $mainAlias . '].', $sql);
+            // InjectQuery columns (Day/Time/DayName): expand expressions for ORDER BY (same as WHERE).
+            $sql = $this->jsonRewriteInjectQueryReferences($sql, $mainAlias);
             $parts[] = $sql;
         }
         $this->requiredJoins = $savedReq;
