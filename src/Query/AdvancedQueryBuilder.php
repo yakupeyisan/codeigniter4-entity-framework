@@ -8207,11 +8207,21 @@ class AdvancedQueryBuilder
                     }
                 }
                 if ($fkOnRelated) {
-                    $isCollection = true;
-                    log_message(
-                        'debug',
-                        "getNavigationInfo: Promoting '{$navigationProperty}' to collection (FK '{$foreignKey}' only on related {$relatedEntityType})"
-                    );
+                    // EmployeeLastAccessEvent is a 1:1 TVF include: the include "whereClause" is the
+                    // fnInOutAccessEvents(@date) argument, not a SQL predicate. Promoting it to a
+                    // collection emits "WHERE 2026-08-01T..." (SQL 4145). Keep as reference.
+                    if ($navigationProperty === 'EmployeeLastAccessEvent') {
+                        log_message(
+                            'debug',
+                            "getNavigationInfo: Skipping collection promotion for TVF reference '{$navigationProperty}'"
+                        );
+                    } else {
+                        $isCollection = true;
+                        log_message(
+                            'debug',
+                            "getNavigationInfo: Promoting '{$navigationProperty}' to collection (FK '{$foreignKey}' only on related {$relatedEntityType})"
+                        );
+                    }
                 }
             }
         }
@@ -11670,7 +11680,12 @@ class AdvancedQueryBuilder
                         continue; // Skip nested collections here
                     }
                     $navProperty = $entityReflection->getProperty($navPath);
-                    $navProperty->setValue($entity, []);
+                    // Promoted InverseProperty 1:1 (e.g. Employee.CustomField, Payment.CafeteriaEvent)
+                    // is typed as a singular object — never initialize with [].
+                    $navProperty->setValue(
+                        $entity,
+                        $this->navigationPropertyExpectsArray($navProperty) ? [] : null
+                    );
                 }
                 
                 $entitiesMap[$entityId] = $entity;
@@ -12081,10 +12096,14 @@ class AdvancedQueryBuilder
                     }
                     $navProperty = $entityReflection->getProperty($navPath);
                 }
-                
+
+                $expectsArrayCollection = $this->navigationPropertyExpectsArray($navProperty);
                 $collection = $navProperty->getValue($targetEntity);
-                if ($collection === null) {
+                if ($expectsArrayCollection && $collection === null) {
                     $collection = [];
+                } elseif (!$expectsArrayCollection) {
+                    // Singular promoted nav: use a transient list only for de-dupe / first-item logic
+                    $collection = $collection !== null ? [$collection] : [];
                 }
                 
                 // Collection subquery alias (s0, s1, s2, etc.)
@@ -12466,8 +12485,12 @@ class AdvancedQueryBuilder
                                     $this->parseNestedCollections($collectionItem, $collectionItemType, $info['thenIncludes'], $row, $subqueryAlias, $info['index']);
                                 }
                                 
-                                $collection[] = $collectionItem;
-                                $navProperty->setValue($targetEntity, $collection);
+                                $this->assignParsedCollectionItem($navProperty, $targetEntity, $collectionItem, $expectsArrayCollection);
+                                if ($expectsArrayCollection) {
+                                    $collection = $navProperty->getValue($targetEntity) ?? [];
+                                } else {
+                                    $collection = [$collectionItem];
+                                }
                                 log_message('debug', "parseEfCoreStyleResults: Added collection item to '{$navPath}', total count: " . count($collection));
                             } else {
                                 // Collection item Id not found - skip this row
@@ -12532,12 +12555,18 @@ class AdvancedQueryBuilder
                                     $this->parseNestedCollections($relatedEntity, $relatedEntityType, $info['thenIncludes'], $row, $subqueryAlias, $info['index']);
                                 }
                                 
-                                $collection[] = $joinEntity;
+                                $this->assignParsedCollectionItem($navProperty, $targetEntity, $joinEntity, $expectsArrayCollection);
+                                $collection = $expectsArrayCollection
+                                    ? ($navProperty->getValue($targetEntity) ?? [])
+                                    : [$joinEntity];
                             } else {
                                 // Related entity Id not found, but collection join entity exists
                                 // Create join entity without related entity
                                 $joinEntity = $this->mapRowToEntity($joinEntityData, $joinEntityReflection);
-                                $collection[] = $joinEntity;
+                                $this->assignParsedCollectionItem($navProperty, $targetEntity, $joinEntity, $expectsArrayCollection);
+                                $collection = $expectsArrayCollection
+                                    ? ($navProperty->getValue($targetEntity) ?? [])
+                                    : [$joinEntity];
                             }
                         }
                         
@@ -12547,8 +12576,6 @@ class AdvancedQueryBuilder
                             $collectionIdMaps[$mapKey] = [];
                         }
                         $collectionIdMaps[$mapKey][$collectionId] = true;
-                        // IMPORTANT: Set collection back to target entity's navigation property
-                        $navProperty->setValue($targetEntity, $collection);
                         log_message('debug', "parseEfCoreStyleResults: Added join entity collection item to '{$navPath}', total count: " . count($collection));
                     }
                 }
@@ -14062,6 +14089,53 @@ class AdvancedQueryBuilder
 
         $escapedDate = str_replace("'", "''", $dateValue);
         return "fnInOutAccessEvents('{$escapedDate}')";
+    }
+
+    /**
+     * True when the navigation property is declared as an array / @var T[].
+     * Singular typed properties (e.g. ?EmployeeCustomField $CustomField) may still be
+     * promoted to collection SQL for pagination, but must hydrate as a single object.
+     */
+    private function navigationPropertyExpectsArray(\ReflectionProperty $property): bool
+    {
+        $type = $property->getType();
+        if ($type instanceof \ReflectionNamedType && $type->getName() === 'array') {
+            return true;
+        }
+        if ($type instanceof \ReflectionUnionType) {
+            foreach ($type->getTypes() as $inner) {
+                if ($inner instanceof \ReflectionNamedType && $inner->getName() === 'array') {
+                    return true;
+                }
+            }
+        }
+        $doc = $property->getDocComment();
+        return is_string($doc) && preg_match('/@var\s+\S+\[\]/', $doc) === 1;
+    }
+
+    /**
+     * Assign a parsed collection/subquery row onto a navigation property.
+     * Array-typed navs append; singular promoted navs keep the first item only.
+     */
+    private function assignParsedCollectionItem(
+        \ReflectionProperty $navProperty,
+        object $targetEntity,
+        object $item,
+        bool $expectsArray
+    ): void {
+        if ($expectsArray) {
+            $collection = $navProperty->getValue($targetEntity);
+            if (!is_array($collection)) {
+                $collection = [];
+            }
+            $collection[] = $item;
+            $navProperty->setValue($targetEntity, $collection);
+            return;
+        }
+
+        if ($navProperty->getValue($targetEntity) === null) {
+            $navProperty->setValue($targetEntity, $item);
+        }
     }
 
     /**
