@@ -54,6 +54,14 @@ class AdvancedQueryBuilder
      * Cache key: class name => ReflectionClass instance
      */
     private static array $reflectionCache = [];
+
+    /**
+     * Cached entity short-name resolve namespaces from Composer PSR-4 discovery.
+     * null = not yet discovered; [] = discovery yielded nothing.
+     *
+     * @var list<string>|null
+     */
+    private static ?array $entityResolveNamespacesCache = null;
     
     /**
      * Property cache: class name => [property name => ReflectionProperty]
@@ -4170,7 +4178,7 @@ class AdvancedQueryBuilder
         $includeConfig = $this->findIncludeConfig($joinKey);
         $provider = \Yakupeyisan\CodeIgniter4\EntityFramework\Providers\DatabaseProviderFactory::getProvider($this->connection);
         $relatedTableExpr = $this->resolveSpecialReferenceTableExpression(
-            $joinKey,
+            $relatedEntityType,
             $relatedTableName,
             $includeConfig['whereClause'] ?? null
         );
@@ -4193,8 +4201,8 @@ class AdvancedQueryBuilder
 
         // CI SQLSRV join() already qualifies/escapes bare table names (→ "db"."dbo"."Payments").
         // Pre-escaping with [Payments] produces invalid "dbo"."[Payments]". Only keep provider
-        // quoting for raw SQL expressions (e.g. fnInOutAccessEvents(...)).
-        $isRawTableExpression = stripos(trim($relatedTableExpr), 'fnInOutAccessEvents(') === 0;
+        // quoting for raw SQL expressions (e.g. fnName(...)).
+        $isRawTableExpression = $this->isRawTableExpression($relatedTableExpr);
         $joinTableClause = $isRawTableExpression
             ? $relatedTableExpr
             : $relatedTableExpr;
@@ -5281,7 +5289,7 @@ class AdvancedQueryBuilder
                 $refTableNameForJoin = $this->context->getTableName($navInfo['entityType']);
                 $includeConfigForJoin = $this->findIncludeConfig($navPath);
                 $resolvedRefTable = $this->resolveSpecialReferenceTableExpression(
-                    $navPath,
+                    $navInfo['entityType'],
                     $refTableNameForJoin,
                     $includeConfigForJoin['whereClause'] ?? null
                 );
@@ -5658,7 +5666,7 @@ class AdvancedQueryBuilder
                 $includeConfig = $this->findIncludeConfig($navPath);
                 $customJoinCondition = $includeConfig['joinCondition'] ?? null;
                 $refTableName = $this->resolveSpecialReferenceTableExpression(
-                    $navPath,
+                    $navInfo['entityType'],
                     $refTableName,
                     $includeConfig['whereClause'] ?? null
                 );
@@ -6436,7 +6444,7 @@ class AdvancedQueryBuilder
                     $refAlias = $referenceNavAliases[$navPath];
                     $refTableName = $this->context->getTableName($navInfo['entityType']);
                     $refTableName = $this->resolveSpecialReferenceTableExpression(
-                        $navPath,
+                        $navInfo['entityType'],
                         $refTableName,
                         $include['whereClause'] ?? null
                     );
@@ -7839,29 +7847,8 @@ class AdvancedQueryBuilder
             }
         }
         
-        // Fallback to common namespaces (incl. RestApp entity roots; use-import path already preferred)
-        $commonNamespaces = [
-            'App\\Models',
-            'App\\EntityFramework\\Core',
-            'App\\Entities',
-            'App\\Entities\\AccessControl',
-            'App\\Entities\\AlarmControl',
-            'App\\Entities\\Authorization',
-            'App\\Entities\\Cafeteria',
-            'App\\Entities\\Designers',
-            'App\\Entities\\General',
-            'App\\Entities\\HesControl',
-            'App\\Entities\\LiveView',
-            'App\\Entities\\PayStation',
-            'App\\Entities\\Payment',
-            'App\\Entities\\Pdks',
-            'App\\Entities\\PosControl',
-            'App\\Entities\\SmsAndMailControl',
-            'App\\Entities\\Ticket',
-            'App\\Entities\\Utilities',
-            'App\\Entities\\VisitorControl',
-        ];
-        foreach ($commonNamespaces as $ns) {
+        // Fallback: Composer PSR-4 roots (autoload) → Models / Entities(+subs) / EntityFramework\Core
+        foreach ($this->getEntityResolveNamespaces($entityReflection) as $ns) {
             $fullyQualified = $ns . '\\' . $shortName;
             if (class_exists($fullyQualified)) {
                 return $fullyQualified;
@@ -7869,6 +7856,163 @@ class AdvancedQueryBuilder
         }
         
         return null;
+    }
+
+    /**
+     * Namespaces used to resolve short entity class names when use-imports miss.
+     * Derived from Composer PSR-4 (project composer.json), not hardcoded app paths.
+     *
+     * @return list<string>
+     */
+    private function getEntityResolveNamespaces(ReflectionClass $entityReflection): array
+    {
+        if (self::$entityResolveNamespacesCache !== null) {
+            return self::$entityResolveNamespacesCache;
+        }
+
+        self::$entityResolveNamespacesCache = $this->discoverEntityNamespacesFromComposer($entityReflection);
+        return self::$entityResolveNamespacesCache;
+    }
+
+    /**
+     * Discover candidate entity namespaces from Composer PSR-4 mappings.
+     *
+     * @return list<string>
+     */
+    private function discoverEntityNamespacesFromComposer(ReflectionClass $entityReflection): array
+    {
+        $prefixes = $this->getComposerPsr4Prefixes($entityReflection);
+        $namespaces = [];
+
+        foreach ($prefixes as $prefix => $dirs) {
+            $nsRoot = rtrim(str_replace('/', '\\', $prefix), '\\');
+            foreach ((array) $dirs as $dir) {
+                $dir = $this->normalizeFilesystemPath((string) $dir);
+                if ($dir === '' || !$this->isNonVendorProjectPath($dir) || !is_dir($dir)) {
+                    continue;
+                }
+                foreach ($this->expandPsr4DirToEntityNamespaces($nsRoot, $dir) as $ns) {
+                    $namespaces[$ns] = true;
+                }
+            }
+        }
+
+        return array_keys($namespaces);
+    }
+
+    /**
+     * @return array<string, list<string>> PSR-4 prefix => directories
+     */
+    private function getComposerPsr4Prefixes(ReflectionClass $entityReflection): array
+    {
+        if (class_exists(\Composer\Autoload\ClassLoader::class)) {
+            try {
+                $loaders = \Composer\Autoload\ClassLoader::getRegisteredLoaders();
+                $merged = [];
+                foreach ($loaders as $loader) {
+                    foreach ($loader->getPrefixesPsr4() as $prefix => $dirs) {
+                        foreach ((array) $dirs as $dir) {
+                            $merged[$prefix][] = $dir;
+                        }
+                    }
+                }
+                if ($merged !== []) {
+                    return $merged;
+                }
+            } catch (\Throwable) {
+                // Fall through to composer.json
+            }
+        }
+
+        return $this->readPsr4FromComposerJson($entityReflection);
+    }
+
+    /**
+     * @return array<string, list<string>>
+     */
+    private function readPsr4FromComposerJson(ReflectionClass $entityReflection): array
+    {
+        $fileName = $entityReflection->getFileName();
+        if (!$fileName) {
+            return [];
+        }
+
+        $dir = dirname($fileName);
+        for ($i = 0; $i < 12; $i++) {
+            $composerPath = $dir . DIRECTORY_SEPARATOR . 'composer.json';
+            if (is_file($composerPath)) {
+                $json = json_decode((string) file_get_contents($composerPath), true);
+                if (!is_array($json)) {
+                    return [];
+                }
+                $psr4 = $json['autoload']['psr-4'] ?? [];
+                if (!is_array($psr4)) {
+                    return [];
+                }
+                $result = [];
+                foreach ($psr4 as $prefix => $path) {
+                    $paths = is_array($path) ? $path : [$path];
+                    foreach ($paths as $p) {
+                        $abs = $dir . DIRECTORY_SEPARATOR . str_replace(['/', '\\'], DIRECTORY_SEPARATOR, (string) $p);
+                        $result[$prefix][] = $abs;
+                    }
+                }
+                return $result;
+            }
+            $parent = dirname($dir);
+            if ($parent === $dir) {
+                break;
+            }
+            $dir = $parent;
+        }
+
+        return [];
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function expandPsr4DirToEntityNamespaces(string $nsRoot, string $dir): array
+    {
+        $namespaces = [];
+        $modelsDir = $dir . DIRECTORY_SEPARATOR . 'Models';
+        if (is_dir($modelsDir)) {
+            $namespaces[] = $nsRoot . '\\Models';
+        }
+
+        $entitiesDir = $dir . DIRECTORY_SEPARATOR . 'Entities';
+        if (is_dir($entitiesDir)) {
+            $namespaces[] = $nsRoot . '\\Entities';
+            foreach (scandir($entitiesDir) ?: [] as $entry) {
+                if ($entry === '.' || $entry === '..') {
+                    continue;
+                }
+                $child = $entitiesDir . DIRECTORY_SEPARATOR . $entry;
+                if (is_dir($child)) {
+                    $namespaces[] = $nsRoot . '\\Entities\\' . $entry;
+                }
+            }
+        }
+
+        $efCoreDir = $dir . DIRECTORY_SEPARATOR . 'EntityFramework' . DIRECTORY_SEPARATOR . 'Core';
+        if (is_dir($efCoreDir)) {
+            $namespaces[] = $nsRoot . '\\EntityFramework\\Core';
+        }
+
+        return $namespaces;
+    }
+
+    private function normalizeFilesystemPath(string $path): string
+    {
+        $path = str_replace(['/', '\\'], DIRECTORY_SEPARATOR, $path);
+        $real = realpath($path);
+        return $real !== false ? $real : rtrim($path, DIRECTORY_SEPARATOR);
+    }
+
+    private function isNonVendorProjectPath(string $dir): bool
+    {
+        $normalized = str_replace('\\', '/', $dir);
+        return !str_contains($normalized, '/vendor/');
     }
 
     /**
@@ -8207,10 +8351,9 @@ class AdvancedQueryBuilder
                     }
                 }
                 if ($fkOnRelated) {
-                    // EmployeeLastAccessEvent is a 1:1 TVF include: the include "whereClause" is the
-                    // fnInOutAccessEvents(@date) argument, not a SQL predicate. Promoting it to a
-                    // collection emits "WHERE 2026-08-01T..." (SQL 4145). Keep as reference.
-                    if ($navigationProperty === 'EmployeeLastAccessEvent') {
+                    // TVF-backed 1:1 includes: include() 2nd arg is a function parameter, not a
+                    // SQL predicate. Promoting emits "WHERE 2026-08-01T..." (SQL 4145). Keep as reference.
+                    if ($this->entityUsesIncludeArgumentAsTvfParameter($relatedEntityType)) {
                         log_message(
                             'debug',
                             "getNavigationInfo: Skipping collection promotion for TVF reference '{$navigationProperty}'"
@@ -14073,22 +14216,61 @@ class AdvancedQueryBuilder
     }
 
     /**
-     * Resolve special reference table expressions (TVF, etc.).
+     * Resolve reference table expressions from entity metadata (TVF, etc.).
+     * When the related entity has #[TableValuedFunction] with includeArgumentAsParameter,
+     * include()'s whereClause is the TVF argument (not a SQL predicate).
      */
-    private function resolveSpecialReferenceTableExpression(string $navPath, string $defaultTableName, ?string $includeWhereClause = null): string
-    {
-        // EmployeeLastAccessEvent was converted from a view to TVF.
-        if ($navPath !== 'EmployeeLastAccessEvent') {
+    private function resolveSpecialReferenceTableExpression(
+        string $relatedEntityType,
+        string $defaultTableName,
+        ?string $includeWhereClause = null
+    ): string {
+        $tvf = $this->getTableValuedFunctionAttribute($relatedEntityType);
+        if ($tvf === null || !$tvf->includeArgumentAsParameter) {
             return $defaultTableName;
         }
 
-        $dateValue = $includeWhereClause !== null ? trim((string)$includeWhereClause) : '';
-        if ($dateValue === '') {
-            return "fnInOutAccessEvents(GETDATE())";
+        $argValue = $includeWhereClause !== null ? trim((string) $includeWhereClause) : '';
+        if ($argValue === '') {
+            return "{$tvf->name}({$tvf->defaultArgumentSql})";
         }
 
-        $escapedDate = str_replace("'", "''", $dateValue);
-        return "fnInOutAccessEvents('{$escapedDate}')";
+        $escapedArg = str_replace("'", "''", $argValue);
+        return "{$tvf->name}('{$escapedArg}')";
+    }
+
+    /**
+     * @return \Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\TableValuedFunction|null
+     */
+    private function getTableValuedFunctionAttribute(string $entityType): ?object
+    {
+        if ($entityType === '' || !class_exists($entityType)) {
+            return null;
+        }
+
+        $reflection = self::getCachedReflection($entityType);
+        $attrs = $reflection->getAttributes(
+            \Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\TableValuedFunction::class
+        );
+        if ($attrs === []) {
+            return null;
+        }
+
+        return $attrs[0]->newInstance();
+    }
+
+    private function entityUsesIncludeArgumentAsTvfParameter(string $entityType): bool
+    {
+        $tvf = $this->getTableValuedFunctionAttribute($entityType);
+        return $tvf !== null && $tvf->includeArgumentAsParameter;
+    }
+
+    /**
+     * True when the FROM target is a raw SQL expression (TVF call, subquery), not a bare table name.
+     */
+    private function isRawTableExpression(string $tableNameOrExpression): bool
+    {
+        return str_contains(trim($tableNameOrExpression), '(');
     }
 
     /**
@@ -14139,12 +14321,12 @@ class AdvancedQueryBuilder
     }
 
     /**
-     * Quote identifier unless it's a known raw SQL expression.
+     * Quote identifier unless it's a raw SQL expression (e.g. TVF call).
      */
     private function quoteTableNameOrExpression($provider, string $tableNameOrExpression): string
     {
         $trimmed = trim($tableNameOrExpression);
-        if (stripos($trimmed, 'fnInOutAccessEvents(') === 0) {
+        if ($this->isRawTableExpression($trimmed)) {
             return $trimmed;
         }
 
