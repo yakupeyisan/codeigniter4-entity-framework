@@ -12776,7 +12776,15 @@ class AdvancedQueryBuilder
             }
             
             $navProperty = $relatedEntityReflection->getProperty($thenIncludeNav);
-            $collection = $navProperty->getValue($relatedEntity) ?? [];
+            // Singular 1:1 navs (e.g. Employee.CustomField) may be promoted to collection SQL
+            // for pagination, but must hydrate as a single object — not an array.
+            $expectsArrayCollection = $this->navigationPropertyExpectsArray($navProperty);
+            $existingNavValue = $navProperty->getValue($relatedEntity);
+            if ($expectsArrayCollection) {
+                $collection = is_array($existingNavValue) ? $existingNavValue : [];
+            } else {
+                $collection = $existingNavValue !== null ? [$existingNavValue] : [];
+            }
             
             // Nested subquery alias (e.g., s1 for AccessGroupReaders within AccessGroup)
             // Nested collection subqueries use the next index after parent collection
@@ -13010,8 +13018,10 @@ class AdvancedQueryBuilder
                             }
                         }
                         
-                        $collection[] = $nestedEntity;
-                        $navProperty->setValue($relatedEntity, $collection);
+                        $this->assignParsedCollectionItem($navProperty, $relatedEntity, $nestedEntity, $expectsArrayCollection);
+                        $collection = $expectsArrayCollection
+                            ? ($navProperty->getValue($relatedEntity) ?? [])
+                            : (($v = $navProperty->getValue($relatedEntity)) !== null ? [$v] : []);
                     } else {
                         // Many-to-many: use old logic (backward compatibility)
                         $nestedJoinEntityType = $thenNavInfo['joinEntityType'];
@@ -13083,8 +13093,10 @@ class AdvancedQueryBuilder
                                 $nestedRelatedNavProperty->setValue($nestedJoinEntity, $nestedRelatedEntity);
                             }
                             
-                            $collection[] = $nestedJoinEntity;
-                            $navProperty->setValue($relatedEntity, $collection);
+                            $this->assignParsedCollectionItem($navProperty, $relatedEntity, $nestedJoinEntity, $expectsArrayCollection);
+                            $collection = $expectsArrayCollection
+                                ? ($navProperty->getValue($relatedEntity) ?? [])
+                                : (($v = $navProperty->getValue($relatedEntity)) !== null ? [$v] : []);
                         }
                     }
                 }
