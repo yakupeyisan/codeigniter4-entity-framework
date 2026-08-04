@@ -14105,15 +14105,31 @@ class AdvancedQueryBuilder
             return null;
         }
 
+        // ::class does not autoload; newInstance() does. Guard against missing/stale OPcache
+        // so include hydration does not fatal when the attribute file is temporarily unseen.
+        $attrClass = 'Yakupeyisan\\CodeIgniter4\\EntityFramework\\Attributes\\TableValuedFunction';
+        if (!class_exists($attrClass)) {
+            $attrFile = dirname(__DIR__) . DIRECTORY_SEPARATOR . 'Attributes' . DIRECTORY_SEPARATOR . 'TableValuedFunction.php';
+            if (is_file($attrFile)) {
+                require_once $attrFile;
+            }
+        }
+        if (!class_exists($attrClass)) {
+            return null;
+        }
+
         $reflection = self::getCachedReflection($entityType);
-        $attrs = $reflection->getAttributes(
-            \Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\TableValuedFunction::class
-        );
+        $attrs = $reflection->getAttributes($attrClass);
         if ($attrs === []) {
             return null;
         }
 
-        return $attrs[0]->newInstance();
+        try {
+            return $attrs[0]->newInstance();
+        } catch (\Throwable $e) {
+            log_message('error', 'getTableValuedFunctionAttribute: ' . $e->getMessage());
+            return null;
+        }
     }
 
     private function entityUsesIncludeArgumentAsTvfParameter(string $entityType): bool
