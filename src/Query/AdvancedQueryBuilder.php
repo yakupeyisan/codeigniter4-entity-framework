@@ -4806,13 +4806,17 @@ class AdvancedQueryBuilder
             $idProperty = $entityRef->getProperty('Id');
             $id = $idProperty->getValue($entity);
             
+            $navProperty = $entityRef->getProperty($navigationProperty);
+            $expectsArray = $this->navigationPropertyExpectsArray($navProperty);
             if (isset($grouped[$id])) {
-                $navProperty = $entityRef->getProperty($navigationProperty);
-                $navProperty->setValue($entity, $grouped[$id]);
+                // Singular 1:1 mis-routed as collection: keep first item only.
+                $navProperty->setValue(
+                    $entity,
+                    $expectsArray ? $grouped[$id] : ($grouped[$id][0] ?? null)
+                );
             } else {
-                // Initialize empty array if no related entities
-                $navProperty = $entityRef->getProperty($navigationProperty);
-                $navProperty->setValue($entity, []);
+                // Never assign [] to singular navs (e.g. Employee.CustomField).
+                $navProperty->setValue($entity, $expectsArray ? [] : null);
             }
         }
     }
@@ -8357,6 +8361,13 @@ class AdvancedQueryBuilder
                         log_message(
                             'debug',
                             "getNavigationInfo: Skipping collection promotion for TVF reference '{$navigationProperty}'"
+                        );
+                    } elseif ($this->isSharedPrimaryKeyOneToOne($relatedEntityReflection, $foreignKey)) {
+                        // True 1:1 (e.g. EmployeeCustomFields.EmployeeID is PK+FK). Keep as reference
+                        // JOIN — promoting would hydrate an array into ?EmployeeCustomField.
+                        log_message(
+                            'debug',
+                            "getNavigationInfo: Skipping collection promotion for shared-PK 1:1 '{$navigationProperty}' (FK/PK '{$foreignKey}' on {$relatedEntityType})"
                         );
                     } else {
                         $isCollection = true;
@@ -14275,6 +14286,44 @@ class AdvancedQueryBuilder
     {
         $tvf = $this->getTableValuedFunctionAttribute($entityType);
         return $tvf !== null && $tvf->includeArgumentAsParameter;
+    }
+
+    /**
+     * True shared-PK one-to-one: related entity's FK property is also its primary key
+     * (e.g. EmployeeCustomFields.EmployeeID).
+     * FK name matching is case-insensitive (EmployeeId vs EmployeeID).
+     */
+    private function isSharedPrimaryKeyOneToOne(ReflectionClass $relatedEntityReflection, string $foreignKey): bool
+    {
+        $fkProperty = null;
+        if ($relatedEntityReflection->hasProperty($foreignKey)) {
+            $fkProperty = $relatedEntityReflection->getProperty($foreignKey);
+        } else {
+            foreach ($relatedEntityReflection->getProperties() as $prop) {
+                if (strcasecmp($prop->getName(), $foreignKey) === 0) {
+                    $fkProperty = $prop;
+                    break;
+                }
+            }
+        }
+
+        if ($fkProperty === null) {
+            return false;
+        }
+
+        $keyAttributes = $fkProperty->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\Key::class);
+        if (!empty($keyAttributes)) {
+            return true;
+        }
+
+        // Fallback: FK property name matches the entity's resolved PK column/property
+        $pkColumn = $this->getPrimaryKeyColumnName($relatedEntityReflection);
+        if ($pkColumn !== null && strcasecmp($pkColumn, $foreignKey) === 0) {
+            return true;
+        }
+
+        $fkColName = $this->getColumnNameFromProperty($relatedEntityReflection, $fkProperty->getName());
+        return $pkColumn !== null && $fkColName !== null && strcasecmp((string) $pkColumn, (string) $fkColName) === 0;
     }
 
     /**
