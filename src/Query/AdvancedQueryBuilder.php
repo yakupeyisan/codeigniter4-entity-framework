@@ -4810,13 +4810,14 @@ class AdvancedQueryBuilder
             $expectsArray = $this->navigationPropertyExpectsArray($navProperty);
             if (isset($grouped[$id])) {
                 // Singular 1:1 mis-routed as collection: keep first item only.
-                $navProperty->setValue(
+                $this->safeSetNavigationValue(
+                    $navProperty,
                     $entity,
                     $expectsArray ? $grouped[$id] : ($grouped[$id][0] ?? null)
                 );
             } else {
                 // Never assign [] to singular navs (e.g. Employee.CustomField).
-                $navProperty->setValue($entity, $expectsArray ? [] : null);
+                $this->safeSetNavigationValue($navProperty, $entity, $expectsArray ? [] : null);
             }
         }
     }
@@ -8369,6 +8370,13 @@ class AdvancedQueryBuilder
                             'debug',
                             "getNavigationInfo: Skipping collection promotion for shared-PK 1:1 '{$navigationProperty}' (FK/PK '{$foreignKey}' on {$relatedEntityType})"
                         );
+                    } elseif (!$this->navigationPropertyExpectsArray($navProperty)) {
+                        // Singular typed InverseProperty (e.g. Payment.CafeteriaEvent, Payment.Account).
+                        // Keep as reference JOIN — collection promotion hydrates [] into ?T and TypeErrors.
+                        log_message(
+                            'debug',
+                            "getNavigationInfo: Skipping collection promotion for singular '{$navigationProperty}'"
+                        );
                     } else {
                         $isCollection = true;
                         log_message(
@@ -11836,7 +11844,8 @@ class AdvancedQueryBuilder
                     $navProperty = $entityReflection->getProperty($navPath);
                     // Promoted InverseProperty 1:1 (e.g. Employee.CustomField, Payment.CafeteriaEvent)
                     // is typed as a singular object — never initialize with [].
-                    $navProperty->setValue(
+                    $this->safeSetNavigationValue(
+                        $navProperty,
                         $entity,
                         $this->navigationPropertyExpectsArray($navProperty) ? [] : null
                     );
@@ -14388,12 +14397,38 @@ class AdvancedQueryBuilder
                 $collection = [];
             }
             $collection[] = $item;
-            $navProperty->setValue($targetEntity, $collection);
+            $this->safeSetNavigationValue($navProperty, $targetEntity, $collection);
             return;
         }
 
         if ($navProperty->getValue($targetEntity) === null) {
-            $navProperty->setValue($targetEntity, $item);
+            $this->safeSetNavigationValue($navProperty, $targetEntity, $item);
+        }
+    }
+
+    /**
+     * Set a navigation property without TypeError when SQL promoted a singular ?T as collection.
+     * Arrays are coerced to the first element (or null) when the property is not array-typed.
+     */
+    private function safeSetNavigationValue(\ReflectionProperty $navProperty, object $entity, mixed $value): void
+    {
+        if (is_array($value) && !$this->navigationPropertyExpectsArray($navProperty)) {
+            $value = $value[0] ?? null;
+        }
+
+        try {
+            $navProperty->setValue($entity, $value);
+        } catch (\TypeError $e) {
+            if (is_array($value)) {
+                $navProperty->setValue($entity, $value[0] ?? null);
+                return;
+            }
+            // Last resort: leave unset rather than kill the request (ARR 502).
+            log_message(
+                'error',
+                'safeSetNavigationValue TypeError on ' . $navProperty->getDeclaringClass()->getName()
+                . '::$' . $navProperty->getName() . ': ' . $e->getMessage()
+            );
         }
     }
 
