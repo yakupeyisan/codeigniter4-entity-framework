@@ -4798,13 +4798,17 @@ class AdvancedQueryBuilder
             $idProperty = $entityRef->getProperty('Id');
             $id = $idProperty->getValue($entity);
             
+            $navProperty = $entityRef->getProperty($navigationProperty);
+            $expectsArray = $this->navigationPropertyExpectsArray($navProperty);
             if (isset($grouped[$id])) {
-                $navProperty = $entityRef->getProperty($navigationProperty);
-                $navProperty->setValue($entity, $grouped[$id]);
+                // Singular 1:1 mis-routed as collection: keep first item only.
+                $navProperty->setValue(
+                    $entity,
+                    $expectsArray ? $grouped[$id] : ($grouped[$id][0] ?? null)
+                );
             } else {
-                // Initialize empty array if no related entities
-                $navProperty = $entityRef->getProperty($navigationProperty);
-                $navProperty->setValue($entity, []);
+                // Never assign [] to singular navs (e.g. Employee.CustomField).
+                $navProperty->setValue($entity, $expectsArray ? [] : null);
             }
         }
     }
@@ -8207,11 +8211,27 @@ class AdvancedQueryBuilder
                     }
                 }
                 if ($fkOnRelated) {
-                    $isCollection = true;
-                    log_message(
-                        'debug',
-                        "getNavigationInfo: Promoting '{$navigationProperty}' to collection (FK '{$foreignKey}' only on related {$relatedEntityType})"
-                    );
+                    // TVF-backed 1:1 includes: include() 2nd arg is a function parameter, not a
+                    // SQL predicate. Promoting emits "WHERE 2026-08-01T..." (SQL 4145). Keep as reference.
+                    if ($this->entityUsesIncludeArgumentAsTvfParameter($relatedEntityType)) {
+                        log_message(
+                            'debug',
+                            "getNavigationInfo: Skipping collection promotion for TVF reference '{$navigationProperty}'"
+                        );
+                    } elseif ($this->isSharedPrimaryKeyOneToOne($relatedEntityReflection, $foreignKey)) {
+                        // True 1:1 (e.g. EmployeeCustomFields.EmployeeID is PK+FK). Keep as reference
+                        // JOIN — promoting would hydrate an array into ?EmployeeCustomField.
+                        log_message(
+                            'debug',
+                            "getNavigationInfo: Skipping collection promotion for shared-PK 1:1 '{$navigationProperty}' (FK/PK '{$foreignKey}' on {$relatedEntityType})"
+                        );
+                    } else {
+                        $isCollection = true;
+                        log_message(
+                            'debug',
+                            "getNavigationInfo: Promoting '{$navigationProperty}' to collection (FK '{$foreignKey}' only on related {$relatedEntityType})"
+                        );
+                    }
                 }
             }
         }
@@ -14077,7 +14097,126 @@ class AdvancedQueryBuilder
     }
 
     /**
-     * Quote identifier unless it's a known raw SQL expression.
+     * @return \Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\TableValuedFunction|null
+     */
+    private function getTableValuedFunctionAttribute(string $entityType): ?object
+    {
+        if ($entityType === '' || !class_exists($entityType)) {
+            return null;
+        }
+
+        $reflection = self::getCachedReflection($entityType);
+        $attrs = $reflection->getAttributes(
+            \Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\TableValuedFunction::class
+        );
+        if ($attrs === []) {
+            return null;
+        }
+
+        return $attrs[0]->newInstance();
+    }
+
+    private function entityUsesIncludeArgumentAsTvfParameter(string $entityType): bool
+    {
+        $tvf = $this->getTableValuedFunctionAttribute($entityType);
+        return $tvf !== null && $tvf->includeArgumentAsParameter;
+    }
+
+    /**
+     * True shared-PK one-to-one: related entity's FK property is also its primary key
+     * (e.g. EmployeeCustomFields.EmployeeID).
+     * FK name matching is case-insensitive (EmployeeId vs EmployeeID).
+     */
+    private function isSharedPrimaryKeyOneToOne(ReflectionClass $relatedEntityReflection, string $foreignKey): bool
+    {
+        $fkProperty = null;
+        if ($relatedEntityReflection->hasProperty($foreignKey)) {
+            $fkProperty = $relatedEntityReflection->getProperty($foreignKey);
+        } else {
+            foreach ($relatedEntityReflection->getProperties() as $prop) {
+                if (strcasecmp($prop->getName(), $foreignKey) === 0) {
+                    $fkProperty = $prop;
+                    break;
+                }
+            }
+        }
+
+        if ($fkProperty === null) {
+            return false;
+        }
+
+        $keyAttributes = $fkProperty->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\Key::class);
+        if (!empty($keyAttributes)) {
+            return true;
+        }
+
+        // Fallback: FK property name matches the entity's resolved PK column/property
+        $pkColumn = $this->getPrimaryKeyColumnName($relatedEntityReflection);
+        if ($pkColumn !== null && strcasecmp($pkColumn, $foreignKey) === 0) {
+            return true;
+        }
+
+        $fkColName = $this->getColumnNameFromProperty($relatedEntityReflection, $fkProperty->getName());
+        return $pkColumn !== null && $fkColName !== null && strcasecmp((string) $pkColumn, (string) $fkColName) === 0;
+    }
+
+    /**
+     * True when the FROM target is a raw SQL expression (TVF call, subquery), not a bare table name.
+     */
+    private function isRawTableExpression(string $tableNameOrExpression): bool
+    {
+        return str_contains(trim($tableNameOrExpression), '(');
+    }
+
+    /**
+     * True when the navigation property is declared as an array / @var T[].
+     * Singular typed properties (e.g. ?EmployeeCustomField $CustomField) may still be
+     * promoted to collection SQL for pagination, but must hydrate as a single object.
+     */
+    private function navigationPropertyExpectsArray(\ReflectionProperty $property): bool
+    {
+        $type = $property->getType();
+        if ($type instanceof \ReflectionNamedType && $type->getName() === 'array') {
+            return true;
+        }
+        if ($type instanceof \ReflectionUnionType) {
+            foreach ($type->getTypes() as $inner) {
+                if ($inner instanceof \ReflectionNamedType && $inner->getName() === 'array') {
+                    return true;
+                }
+            }
+        }
+        $doc = $property->getDocComment();
+        return is_string($doc) && preg_match('/@var\s+\S+\[\]/', $doc) === 1;
+    }
+
+    /**
+     * Assign a parsed collection/subquery row onto a navigation property.
+     * Array-typed navs append; singular promoted navs keep the first item only.
+     */
+    private function assignParsedCollectionItem(
+        \ReflectionProperty $navProperty,
+        object $targetEntity,
+        object $item,
+        bool $expectsArray
+    ): void {
+        if ($expectsArray) {
+            $collection = $navProperty->getValue($targetEntity);
+            if (!is_array($collection)) {
+                $collection = [];
+            }
+            $collection[] = $item;
+            $navProperty->setValue($targetEntity, $collection);
+            return;
+        }
+
+        if ($navProperty->getValue($targetEntity) === null) {
+            $navProperty->setValue($targetEntity, $item);
+        }
+    }
+
+    /**
+     * Quote identifier unless it's a raw SQL expression (e.g. TVF call).
      */
     private function quoteTableNameOrExpression($provider, string $tableNameOrExpression): string
     {
