@@ -20,6 +20,7 @@ class ExpressionParser
     private array $variableValues = [];
     private array $parameterValues = []; // Store actual parameter values
     private ?\Yakupeyisan\CodeIgniter4\EntityFramework\Core\DbContext $context = null; // For resolving dynamic properties
+    private ?object $closureThis = null; // Bound $this of the parsed arrow/closure (e.g. BaseManager)
 
     public function __construct(string $entityType, string $tableAlias = 't0', ?\Yakupeyisan\CodeIgniter4\EntityFramework\Core\DbContext $context = null)
     {
@@ -37,12 +38,26 @@ class ExpressionParser
     }
 
     /**
+     * Bind the closure's $this so {$this->primaryKey} can be resolved to the real field name.
+     */
+    public function bindPredicate(callable $predicate): void
+    {
+        $reflection = new ReflectionFunction($predicate);
+        $this->closureThis = $reflection->getClosureThis() ?: $this->closureThis;
+        $this->mergeBoundThisScalarsIntoVariableValues();
+    }
+
+    /**
      * Parse lambda expression to SQL WHERE condition
      */
     public function parse(callable $predicate): string
     {
         $reflection = new ReflectionFunction($predicate);
+        $this->closureThis = $reflection->getClosureThis() ?: $this->closureThis;
+        $this->mergeBoundThisScalarsIntoVariableValues();
+
         $code = $this->getFunctionCode($reflection);
+        $code = $this->rewriteThisCurlyPropertyAccess($code);
         
         log_message('debug', 'ExpressionParser - Raw code: ' . substr($code, 0, 200));
         
@@ -53,7 +68,13 @@ class ExpressionParser
 
         // Extract the expression part (between => and ; or end)
         $expression = $this->extractExpression($code);
+        $expression = $this->rewriteThisCurlyPropertyAccess($expression);
         log_message('debug', 'ExpressionParser - Extracted expression: ' . $expression);
+
+        if ($this->isDocCommentNoise($expression)) {
+            log_message('error', 'ExpressionParser - extracted PHPDoc instead of lambda body: ' . substr($expression, 0, 200));
+            throw new \InvalidArgumentException('Invalid field name: failed to extract lambda expression');
+        }
         
         // Parse the expression
         $sql = $this->parseExpression($expression);
@@ -79,6 +100,15 @@ class ExpressionParser
         // Get more lines to handle multi-line expressions, but only from the lambda's start line
         // Don't include too many previous lines to avoid capturing getQueryable() calls
         $code = implode('', array_slice($lines, max(0, $start - 1), min($end - $start + 3, count($lines) - $start + 1)));
+
+        // Arrow functions that use {$this->primaryKey} can report a start line inside the
+        // enclosing method's PHPDoc on some PHP/opcache builds. Scan nearby for the real fn().
+        if ($this->isDocCommentNoise($code) || !$this->containsLambda($code)) {
+            $scanFrom = max(0, $start - 8);
+            $scanLen = min(50, count($lines) - $scanFrom);
+            $code = implode('', array_slice($lines, $scanFrom, $scanLen));
+            log_message('debug', 'getFunctionCode - startLine looked like PHPDoc or had no lambda, expanded scan');
+        }
         
         // If the code contains ->where, ->and, ->or, etc., extract just the lambda part
         // Pattern: ->where(fn($e) => $e->Id === $id) or ->where(function($e) { return $e->Id === $id; })
@@ -238,8 +268,133 @@ class ExpressionParser
             
             return 'fn($x) => ' . $lambdaBody;
         }
+
+        // Fallback: read only the closure's own source span (not sibling if/return lines above/below).
+        $fnSpan = implode('', array_slice($lines, $start - 1, $end - $start + 1));
+        if (preg_match('/(?:fn|function)\s*\(\s*(\$[a-zA-Z_][a-zA-Z0-9_]*)\s*\)\s*=>\s*(.+)/s', $fnSpan, $fnMatches)) {
+            $lambdaParam = $fnMatches[1];
+            $lambdaBody = trim($fnMatches[2]);
+            $lambdaBody = preg_replace('/\s*\)\s*$/', '', $lambdaBody);
+            $lambdaBody = preg_replace(
+                '/\s*->\s*(firstOrDefault|first|single|toArray|toList|toJson(?:Array)?|count|skip|take|include|thenInclude|orderBy|orderByDescending|enableSensitive|disableSensitive)\s*\(.*$/is',
+                '',
+                $lambdaBody
+            );
+            if ($lambdaParam !== '$x') {
+                $lambdaBody = preg_replace('/' . preg_quote($lambdaParam, '/') . '\s*->/', '$x->', $lambdaBody);
+                $lambdaBody = preg_replace('/\b' . preg_quote($lambdaParam, '/') . '\b/', '$x', $lambdaBody);
+            }
+
+            return 'fn($x) => ' . trim($lambdaBody);
+        }
         
         return $code;
+    }
+
+    /**
+     * IQueryable chain methods that may follow a where() closure on the next line.
+     */
+    private const QUERY_CHAIN_METHODS = 'where|and|or|not|firstOrDefault|first|single|toArray|toList|toJson(?:Array)?|count|skip|take|include|thenInclude|orderBy|orderByDescending|enableSensitive|disableSensitive';
+
+    private function containsLambda(string $code): bool
+    {
+        return (bool) preg_match('/(?:fn|function)\s*\(/', $code);
+    }
+
+    /**
+     * True when source extraction captured a PHPDoc block instead of a lambda.
+     */
+    private function isDocCommentNoise(string $code): bool
+    {
+        if ($this->containsLambda($code)) {
+            return false;
+        }
+
+        $trimmed = ltrim($code);
+        if ($trimmed === '') {
+            return false;
+        }
+
+        return str_starts_with($trimmed, '/**')
+            || str_starts_with($trimmed, '*')
+            || str_contains($code, '@param')
+            || str_contains($code, '@return')
+            || str_contains($code, '@var');
+    }
+
+    /**
+     * Copy scalar properties from the bound $this (BaseManager::$primaryKey, etc.)
+     * into variableValues so {$this->primaryKey} can be rewritten to $e->Id.
+     */
+    private function mergeBoundThisScalarsIntoVariableValues(): void
+    {
+        if ($this->closureThis === null) {
+            return;
+        }
+
+        try {
+            $ref = new ReflectionClass($this->closureThis);
+            foreach ($ref->getProperties() as $property) {
+                $name = $property->getName();
+                if (isset($this->variableValues[$name])) {
+                    continue;
+                }
+                $property->setAccessible(true);
+                if (!$property->isInitialized($this->closureThis)) {
+                    continue;
+                }
+                $value = $property->getValue($this->closureThis);
+                if (is_string($value) || is_int($value) || is_float($value) || is_bool($value) || $value === null) {
+                    $this->variableValues[$name] = $value;
+                }
+            }
+        } catch (\Throwable $e) {
+            log_message('debug', 'mergeBoundThisScalarsIntoVariableValues: ' . $e->getMessage());
+        }
+    }
+
+    private function getBoundThisProperty(string $name): mixed
+    {
+        if ($this->closureThis === null) {
+            return $this->variableValues[$name] ?? null;
+        }
+
+        try {
+            $property = new ReflectionProperty($this->closureThis, $name);
+            $property->setAccessible(true);
+            if (!$property->isInitialized($this->closureThis)) {
+                return $this->variableValues[$name] ?? null;
+            }
+            return $property->getValue($this->closureThis);
+        } catch (\Throwable $e) {
+            return $this->variableValues[$name] ?? null;
+        }
+    }
+
+    /**
+     * Rewrite $e->{$this->primaryKey} to $e->Id using the bound manager instance.
+     * Keeps application code using curly braces; only the parsed source is rewritten.
+     */
+    private function rewriteThisCurlyPropertyAccess(string $code): string
+    {
+        if (!str_contains($code, '{$this->')) {
+            return $code;
+        }
+
+        $rewritten = preg_replace_callback(
+            '/(\$[a-zA-Z_][a-zA-Z0-9_]*)->\{\$this->([a-zA-Z_][a-zA-Z0-9_]*)\}/',
+            function (array $matches): string {
+                $value = $this->getBoundThisProperty($matches[2]);
+                if (!is_string($value) || !preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $value)) {
+                    return $matches[0];
+                }
+                log_message('debug', "rewriteThisCurlyPropertyAccess: {$matches[0]} -> {$matches[1]}->{$value}");
+                return $matches[1] . '->' . $value;
+            },
+            $code
+        );
+
+        return is_string($rewritten) ? $rewritten : $code;
     }
 
     /**
@@ -247,18 +402,20 @@ class ExpressionParser
      */
     public function extractExpression(string $code): string
     {
-        // Remove function declaration and get expression
-        // Pattern: fn($x) => $x->Property === value
-        // Also handle incomplete expressions like: fn($x) => $x->Property === (int
-        // Handle nested function calls like: fn($x) => in_array($x->Id, $ids)
-        if (preg_match('/=>\s*(.+)/s', $code, $matches)) {
+        // Arrow-function closures: prefer fn(...) => extraction before any bare return in surrounding source lines.
+        // Do not use a bare `=>` match — array literals ('key' => value) also contain =>.
+        if (preg_match('/(?:fn|function)\s*\([^)]*\)\s*=>\s*(.+)/s', $code, $matches)) {
             $expression = trim($matches[1]);
-            
+            // Source slice may include the closing ")" of where(fn(...) => ...); drop only that paren.
+            $expression = preg_replace('/\)\s*(?=\r?\n)/', '', $expression, 1);
+
             // Remove any method calls or variable assignments that might have been captured from previous lines
             // Remove method calls like getQueryable(), toList(), etc. that are not part of the lambda expression
             $expression = preg_replace('/\b(getQueryable|toList|toArray|count|first|single|skip|take|include|thenInclude|orderBy|orderByDescending)\s*\([^)]*\)/i', '', $expression);
-            // Remove variable assignments that might have been captured
-            $expression = preg_replace('/\$[a-zA-Z_][a-zA-Z0-9_]*\s*=\s*[^;]+;/', '', $expression);
+            // Remove variable assignments that might have been captured (e.g. multi-line code preceding the lambda).
+            // Use negative lookbehind/lookahead so we do NOT match comparison operators (==, ===, !==, <=, >=) when
+            // a closure body like "$e->$key === $value" appears after the => arrow.
+            $expression = preg_replace('/\$[a-zA-Z_][a-zA-Z0-9_]*\s*(?<![=!<>])=(?!=)\s*[^;]+;/', '', $expression);
             // Remove any standalone method calls on variables that might have been captured
             $expression = preg_replace('/\$[a-zA-Z_][a-zA-Z0-9_]*\s*->\s*(getQueryable|toList|toArray|count|first|single|skip|take|include|thenInclude|orderBy|orderByDescending)\s*\([^)]*\)\s*;/', '', $expression);
             // Clean up any extra whitespace
@@ -299,15 +456,15 @@ class ExpressionParser
                     // End of statement
                     $expressionEndPos = $i;
                     break;
-                } elseif (preg_match('/\s*->(where|and|or|not)\s*\(/i', substr($expression, $i), $methodMatch) && $parenCount === 0) {
-                    // Method chaining detected
+                } elseif (preg_match('/^\s*->(' . self::QUERY_CHAIN_METHODS . ')\s*\(/i', substr($expression, $i), $methodMatch) && $parenCount === 0) {
+                    // Method chaining detected (firstOrDefault, toArray, …) — anchored so $x->ID is not matched
                     $expressionEndPos = $i;
                     break;
                 } elseif (($char === "\n" || $char === "\r") && $parenCount === 0 && $i > 0) {
                     // End of line, but only if we're not inside parentheses
                     // Check if next non-whitespace is method chaining or end of code
                     $remaining = trim(substr($expression, $i));
-                    if (empty($remaining) || preg_match('/^->(where|and|or|not)\s*\(/i', $remaining)) {
+                    if (empty($remaining) || preg_match('/^->(' . self::QUERY_CHAIN_METHODS . ')\s*\(/i', $remaining)) {
                         $expressionEndPos = $i;
                         break;
                     }
@@ -338,8 +495,8 @@ class ExpressionParser
                 }
             }
             
-            // Remove any trailing ->where, ->and, ->or, etc. that might be part of method chaining
-            $expression = preg_replace('/\s*->(where|and|or|not)\s*\(.*$/i', '', $expression);
+            // Remove any trailing query-builder chain calls that might be part of method chaining
+            $expression = preg_replace('/\s*->(' . self::QUERY_CHAIN_METHODS . ')\s*\(.*$/i', '', $expression);
             // Remove any trailing closing parentheses that might be from method chaining (but keep function call parentheses)
             // Only remove if it's at the very end and we have balanced parentheses
             if (preg_match('/\)\s*$/', $expression) && substr_count($expression, '(') === substr_count($expression, ')') - 1) {
@@ -349,12 +506,12 @@ class ExpressionParser
             $expression = preg_replace('/\s*->\s*$/', '', $expression);
             return trim($expression);
         }
-        
-        // Pattern: function($x) { return $x->Property === value; }
+
+        // function ($e) use (...) { return $e->$field === $value; }
         if (preg_match('/return\s+(.+?);/s', $code, $matches)) {
             $expression = trim($matches[1]);
-            // Remove any trailing ->where, ->and, ->or, etc.
-            $expression = preg_replace('/\s*->(where|and|or|not)\s*\(.*$/i', '', $expression);
+            $expression = preg_replace('/\s*->(' . self::QUERY_CHAIN_METHODS . ')\s*\(.*$/i', '', $expression);
+
             return trim($expression);
         }
         
@@ -366,13 +523,44 @@ class ExpressionParser
      */
     public function parseExpression(string $expression): string
     {
-        $expression = trim($expression);
+        $expression = $this->rewriteThisCurlyPropertyAccess(trim($expression));
         
         log_message('debug', "parseExpression - input: {$expression}");
         
         // Handle null comparisons FIRST - BEFORE method calls (for navigation properties)
         // Pattern: $x->NavProp->Property == null or $x->NavProp->Property === null
         // This must be checked before parseMethodCall to prevent incorrect parsing
+        // IMPORTANT: !== / != must be checked before === / ==
+        // otherwise expressions like "$x->OutDate !== null" can be
+        // incorrectly matched as "=== null" with a trailing "!" in left side.
+        if (preg_match('/^(.+?)\s*!==\s*null$/i', $expression, $matches)) {
+            $property = trim($matches[1]);
+            $propertySql = $this->parsePropertyAccess($property);
+            if (!empty($propertySql)) {
+                if (preg_match('/^[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*$|^\[[^\]]+\]\.\[[^\]]+\]$/', $propertySql)) {
+                    log_message('debug', "parseExpression - null comparison (!==) result: {$propertySql} IS NOT NULL");
+                    return "{$propertySql} IS NOT NULL";
+                }
+                if (preg_match('/^NAVIGATION:(?!IN:)/i', $propertySql)) {
+                    log_message('debug', "parseExpression - null comparison (!==) with navigation result: {$propertySql} IS NOT NULL");
+                    return "{$propertySql} IS NOT NULL";
+                }
+            }
+        }
+        if (preg_match('/^(.+?)\s*!=\s*null$/i', $expression, $matches)) {
+            $property = trim($matches[1]);
+            $propertySql = $this->parsePropertyAccess($property);
+            if (!empty($propertySql)) {
+                if (preg_match('/^[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*$|^\[[^\]]+\]\.\[[^\]]+\]$/', $propertySql)) {
+                    log_message('debug', "parseExpression - null comparison (!=) result: {$propertySql} IS NOT NULL");
+                    return "{$propertySql} IS NOT NULL";
+                }
+                if (preg_match('/^NAVIGATION:(?!IN:)/i', $propertySql)) {
+                    log_message('debug', "parseExpression - null comparison (!=) with navigation result: {$propertySql} IS NOT NULL");
+                    return "{$propertySql} IS NOT NULL";
+                }
+            }
+        }
         if (preg_match('/^(.+?)\s*===\s*null$/i', $expression, $matches)) {
             $property = trim($matches[1]);
             $propertySql = $this->parsePropertyAccess($property);
@@ -382,7 +570,7 @@ class ExpressionParser
                     log_message('debug', "parseExpression - null comparison (===) result: {$propertySql} IS NULL");
                     return "{$propertySql} IS NULL";
                 }
-                if (preg_match('/^NAVIGATION:/', $propertySql)) {
+                if (preg_match('/^NAVIGATION:(?!IN:)/i', $propertySql)) {
                     log_message('debug', "parseExpression - null comparison (===) with navigation result: {$propertySql} IS NULL");
                     return "{$propertySql} IS NULL";
                 }
@@ -397,7 +585,7 @@ class ExpressionParser
                     log_message('debug', "parseExpression - null comparison (==) result: {$propertySql} IS NULL");
                     return "{$propertySql} IS NULL";
                 }
-                if (preg_match('/^NAVIGATION:/', $propertySql)) {
+                if (preg_match('/^NAVIGATION:(?!IN:)/i', $propertySql)) {
                     log_message('debug', "parseExpression - null comparison (==) with navigation result: {$propertySql} IS NULL");
                     return "{$propertySql} IS NULL";
                 }
@@ -417,13 +605,11 @@ class ExpressionParser
             return '(' . $this->parseExpression($matches[1]) . ')';
         }
         
-        // Handle type casting first: (int)$id, (string)$value, etc.
-        // Match: (int)$id, (string)$value, (float)$num, (bool)$flag
-        if (preg_match('/^\((\w+)\)\s*\$?([a-zA-Z_][a-zA-Z0-9_]*)/', $expression, $castMatches)) {
+        // Handle type casting first: (int)$id, (string)$value, etc. (yalnızca geçerli PHP cast — (for)mattedValue gibi yanlış eşleşmeyi önler)
+        if (preg_match('/^\((int|string|float|bool)\)\s*(\$[a-zA-Z_][a-zA-Z0-9_]*)/i', $expression, $castMatches)) {
             $type = $castMatches[1];
-            $value = '$' . $castMatches[2];
+            $value = $castMatches[2];
             log_message('debug', "parseExpression - type casting detected: ({$type}){$value}");
-            // Parse the value (ignore the cast, SQL will handle it)
             return $this->parseExpression($value);
         }
         
@@ -452,6 +638,13 @@ class ExpressionParser
             log_message('debug', "parseExpression - in result: {$sql}");
             return $sql;
         }
+
+        // Logical OR/AND before comparisons so "$x->A === null || $x->A === ''" is not split on the first ===
+        $sql = $this->parseLogicalOperators($expression);
+        if ($sql !== null) {
+            log_message('debug', "parseExpression - logical result: {$sql}");
+            return $sql;
+        }
         
         // Handle comparison operators (before arithmetic, because === has higher precedence than -)
         $sql = $this->parseComparison($expression);
@@ -466,13 +659,6 @@ class ExpressionParser
             $result = $this->parsePropertyAccess($expression);
             log_message('debug', "parseExpression - property access result: {$result}");
             return $result;
-        }
-        
-        // Handle logical operators (AND, OR)
-        $sql = $this->parseLogicalOperators($expression);
-        if ($sql !== null) {
-            log_message('debug', "parseExpression - logical result: {$sql}");
-            return $sql;
         }
         
         // Handle arithmetic operations (+, -, *, /, %) - but only if not part of comparison
@@ -500,15 +686,15 @@ class ExpressionParser
      */
     private function parseLogicalOperators(string $expression): ?string
     {
-        // Handle AND (&& or and)
-        if (preg_match('/^(.+?)\s*(?:&&|and)\s*(.+)$/i', $expression, $matches)) {
+        // Handle AND (&& or word and) — \band\b: $formattedValue içindeki "for" vb. eşleşmesin
+        if (preg_match('/^(.+?)\s*(?:&&|\band\b)\s*(.+)$/i', $expression, $matches)) {
             $left = $this->parseExpression(trim($matches[1]));
             $right = $this->parseExpression(trim($matches[2]));
             return "({$left} AND {$right})";
         }
         
-        // Handle OR (|| or or)
-        if (preg_match('/^(.+?)\s*(?:\|\||or)\s*(.+)$/i', $expression, $matches)) {
+        // Handle OR (|| or word or) — \bor\b: $formattedValue → $f + mattedValue hatasını önler
+        if (preg_match('/^(.+?)\s*(?:\|\||\bor\b)\s*(.+)$/i', $expression, $matches)) {
             $left = $this->parseExpression(trim($matches[1]));
             $right = $this->parseExpression(trim($matches[2]));
             return "({$left} OR {$right})";
@@ -563,7 +749,7 @@ class ExpressionParser
                 }
                 // Check if it's a navigation property format (NAVIGATION:NavProp.Property)
                 // This will be handled by AdvancedQueryBuilder
-                if (preg_match('/^NAVIGATION:/', $propertySql)) {
+                if (preg_match('/^NAVIGATION:(?!IN:)/i', $propertySql)) {
                     return "{$propertySql} IS NULL";
                 }
             }
@@ -580,7 +766,7 @@ class ExpressionParser
                 }
                 // Check if it's a navigation property format (NAVIGATION:NavProp.Property)
                 // This will be handled by AdvancedQueryBuilder
-                if (preg_match('/^NAVIGATION:/', $propertySql)) {
+                if (preg_match('/^NAVIGATION:(?!IN:)/i', $propertySql)) {
                     return "{$propertySql} IS NOT NULL";
                 }
             }
@@ -620,11 +806,10 @@ class ExpressionParser
             
             // Parse right side (value)
             // Handle type casting first: (int)$id, (string)$value, etc.
-            if (preg_match('/^\((\w+)\)\s*\$?([a-zA-Z_][a-zA-Z0-9_]*)/', $right, $castMatches)) {
+            if (preg_match('/^\((int|string|float|bool)\)\s*(\$[a-zA-Z_][a-zA-Z0-9_]*)/i', $right, $castMatches)) {
                 $type = $castMatches[1];
-                $varName = '$' . $castMatches[2];
+                $varName = $castMatches[2];
                 log_message('debug', "parseComparison - type casting detected on right side: ({$type}){$varName}");
-                // Parse the value (ignore the cast, SQL will handle it)
                 $rightSql = $this->parseValue($varName);
             } elseif (preg_match('/^\$[a-zA-Z_][a-zA-Z0-9_]*->/', $right)) {
                 // Check if right side is a property access too (for comparisons like $e->Id === $e->OtherId)
@@ -652,8 +837,8 @@ class ExpressionParser
         }
         
         // Match: $x->Property === value, $x->Property == value, etc.
-        // IMPORTANT: !== and != must be checked BEFORE == and ===, otherwise "!=="
-        // is matched by "==" (the two equals in "!==") and the operator becomes = incorrectly.
+        // CRITICAL: Try !== and != BEFORE === and ==, otherwise "!==" is incorrectly split
+        // by the "==" pattern (left becomes "$e->IsVisitor !", right " true").
         $patterns = [
             '/^(.+?)\s*!==\s*(.+)$/' => '!=',
             '/^(.+?)\s*!=\s*(.+)$/' => '!=',
@@ -662,8 +847,8 @@ class ExpressionParser
             '/^(.+?)\s*<=\s*(.+)$/' => '<=',
             '/^(.+?)\s*>=\s*(.+)$/' => '>=',
             '/^(.+?)\s*<\s*(.+)$/' => '<',
-            // For > operator, check that it's not part of -> (property access)
-            '/^(.+?)(?<!->)\s*>\s*(.+)$/' => '>',
+            // For > operator: must not be the > in PHP's -> (lookbehind is one char: not hyphen)
+            '/^(.+?)(?<!\-)\s*>\s*(.+)$/' => '>',
         ];
         
         foreach ($patterns as $pattern => $operator) {
@@ -690,12 +875,10 @@ class ExpressionParser
                 log_message('debug', "parseComparison - leftSql: {$leftSql}");
                 
                 // Parse right side (value)
-                // Handle type casting first: (int)$id, (string)$value, etc.
-                if (preg_match('/^\((\w+)\)\s*\$?([a-zA-Z_][a-zA-Z0-9_]*)/', $right, $castMatches)) {
+                if (preg_match('/^\((int|string|float|bool)\)\s*(\$[a-zA-Z_][a-zA-Z0-9_]*)/i', $right, $castMatches)) {
                     $type = $castMatches[1];
-                    $varName = '$' . $castMatches[2];
+                    $varName = $castMatches[2];
                     log_message('debug', "parseComparison - type casting detected on right side: ({$type}){$varName}");
-                    // Parse the value (ignore the cast, SQL will handle it)
                     $rightSql = $this->parseValue($varName);
                 } elseif (preg_match('/^\$[a-zA-Z_][a-zA-Z0-9_]*->/', $right)) {
                     // Check if right side is a property access too (for comparisons like $e->Id === $e->OtherId)
@@ -1049,9 +1232,9 @@ class ExpressionParser
             return "{$propertySql} IN (" . implode(', ', $valuesArray) . ")";
         }
         
-        // Pattern 2: in_array($x->Property, $variable) - variable array
-        // Match: in_array($s->Id, $selectedShowIds) or in_array($s->Id, $selectedShowIds)
-        if (preg_match('/^in_array\((.+?),\s*\$([a-zA-Z_][a-zA-Z0-9_]*)\)$/i', $expression, $matches)) {
+        // Pattern 2: in_array($x->Property, $variable[, strict]) - variable array (third arg is PHP strict mode)
+        // Match: in_array($s->Id, $selectedShowIds) or in_array($s->Id, $selectedShowIds, true)
+        if (preg_match('/^in_array\((.+?),\s*\$([a-zA-Z_][a-zA-Z0-9_]*)(?:\s*,\s*(?:true|false|0|1))?\s*\)$/i', $expression, $matches)) {
             $property = trim($matches[1]);
             $varName = trim($matches[2]);
             $propertySql = $this->parsePropertyAccess($property);
@@ -1067,6 +1250,7 @@ class ExpressionParser
                         $valuesArray = $this->variableValues[$varName];
                         $valuesSql = [];
                         foreach ($valuesArray as $value) {
+                            $value = $this->unwrapSelectOptionItem($value);
                             // Filter out invalid values like 'undefined', 'null', empty strings
                             if (is_string($value) && in_array(strtolower($value), ['undefined', 'null', ''])) {
                                 log_message('debug', "parseIn - filtering out invalid value: '{$value}'");
@@ -1082,6 +1266,9 @@ class ExpressionParser
                                 $valuesSql[] = $value ? '1' : '0';
                             } elseif (is_null($value)) {
                                 $valuesSql[] = 'NULL';
+                            } elseif (is_array($value) || is_object($value)) {
+                                log_message('debug', 'parseIn - skipping non-scalar value in IN list after unwrap');
+                                continue;
                             } else {
                                 $value = str_replace("'", "''", (string)$value);
                                 $valuesSql[] = "'{$value}'";
@@ -1108,6 +1295,7 @@ class ExpressionParser
                 $valuesArray = $this->variableValues[$varName];
                 $valuesSql = [];
                 foreach ($valuesArray as $value) {
+                    $value = $this->unwrapSelectOptionItem($value);
                     // Filter out invalid values like 'undefined', 'null', empty strings
                     if (is_string($value) && in_array(strtolower($value), ['undefined', 'null', ''])) {
                         log_message('debug', "parseIn - filtering out invalid value: '{$value}'");
@@ -1123,6 +1311,9 @@ class ExpressionParser
                         $valuesSql[] = $value ? '1' : '0';
                     } elseif (is_null($value)) {
                         $valuesSql[] = 'NULL';
+                    } elseif (is_array($value) || is_object($value)) {
+                        log_message('debug', 'parseIn - skipping non-scalar value in IN list after unwrap');
+                        continue;
                     } else {
                         $value = str_replace("'", "''", (string)$value);
                         $valuesSql[] = "'{$value}'";
@@ -1161,17 +1352,24 @@ class ExpressionParser
         
         // Store original expression for error messages and fallback
         $originalExpression = $expression;
+
+        if ($this->isDocCommentNoise($expression)) {
+            log_message('error', "parsePropertyAccess - PHPDoc captured as expression: {$expression}");
+            throw new \InvalidArgumentException('Invalid field name: PHPDoc captured instead of lambda');
+        }
         
         // CRITICAL: Filter out method names that should never be treated as properties
         // If expression contains method names like getQueryable, this is an error in extraction
         $invalidMethodNames = ['getQueryable', 'toList', 'toArray', 'count', 'first', 'single', 'skip', 'take', 'include', 'thenInclude', 'orderBy', 'orderByDescending', 'where', 'and', 'or', 'not'];
         foreach ($invalidMethodNames as $methodName) {
-            // If the expression is just the method name or contains it as a standalone word
-            if (preg_match('/\b' . preg_quote($methodName, '/') . '\b/i', $expression)) {
-                // This is not a property, it's a method name that was incorrectly captured
+            // Only reject when the captured text is the method name itself (or $var->methodName),
+            // not when a PHPDoc word such as "Include deleted records" happens to contain "include".
+            $trimmedExpression = trim($expression);
+            if (strcasecmp($trimmedExpression, $methodName) === 0
+                || preg_match('/^\$[a-zA-Z_][a-zA-Z0-9_]*->' . preg_quote($methodName, '/') . '$/i', $trimmedExpression)
+            ) {
                 log_message('error', "parsePropertyAccess - invalid method name detected in expression: {$expression}");
-                // Return fallback to prevent SQL error
-                return "{$this->tableAlias}.Id";
+                throw new \InvalidArgumentException('Invalid field name: ' . $methodName);
             }
         }
         
@@ -1214,10 +1412,12 @@ class ExpressionParser
             if (preg_match('/\$this->([a-zA-Z_][a-zA-Z0-9_]*)/', $dynamicProperty, $thisMatches)) {
                 $propertyName = $thisMatches[1];
                 log_message('debug', "parsePropertyAccess - extracted property from \$this->: {$propertyName}");
-                
-                // If it's a common property name like 'primaryKey', try to resolve it
-                // For 'primaryKey', we need to find the actual primary key property from the entity
-                if ($propertyName === 'primaryKey' && $this->context !== null) {
+
+                $boundValue = $this->getBoundThisProperty($propertyName);
+                if (is_string($boundValue) && preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $boundValue)) {
+                    $propertyName = $boundValue;
+                    log_message('debug', "parsePropertyAccess - resolved \$this->{$thisMatches[1]} from bound object to: {$propertyName}");
+                } elseif ($propertyName === 'primaryKey' && $this->context !== null) {
                     // Try to find primary key property from entity
                     $reflection = new ReflectionClass($this->entityType);
                     foreach ($reflection->getProperties() as $prop) {
@@ -1259,22 +1459,14 @@ class ExpressionParser
             return $result;
         }
         
-        // Check for navigation property pattern: $var->NavProp->Property
-        // Example: $p->CafeteriaEvent->CafeteriaAccountId or $x->CafeteriaEvent->CafeteriaAccountId
-        // Also handle cases where there might be comparison operators: $x->NavProp->Property == value
+        // Check for navigation property pattern: $var->Nav->Ref->Column (2+ segments after entity var)
         // This MUST be checked BEFORE removing the variable prefix to ensure we catch navigation properties
-        // Pattern matches: $var->NavProp->Property (with or without trailing comparison operators)
         $trimmedExpression = trim($expression);
-        // Match navigation property pattern: $var->NavProp->Property
-        // Use a simpler pattern that just matches the navigation property part, ignoring what comes after
-        if (preg_match('/^\$[a-zA-Z_][a-zA-Z0-9_]*->([A-Za-z_][A-Za-z0-9_]*)->([A-Za-z_][A-Za-z0-9_]*)/', $trimmedExpression, $navMatches)) {
-            $navigationProperty = $navMatches[1]; // e.g., "CafeteriaEvent" or "Employee"
-            $property = $navMatches[2]; // e.g., "CafeteriaAccountId" or "DeletedAt"
-            
-            log_message('debug', "parsePropertyAccess - navigation property detected: {$navigationProperty}.{$property} from expression: {$expression}");
-            
-            // Return in NAVIGATION: format for AdvancedQueryBuilder to handle
-            return "NAVIGATION:{$navigationProperty}.{$property}";
+        if (preg_match('/^\$[a-zA-Z_][a-zA-Z0-9_]*->((?:[A-Za-z_][A-Za-z0-9_]*->)+[A-Za-z_][A-Za-z0-9_]*)/', $trimmedExpression, $navMatches)) {
+            $navPath = str_replace('->', '.', $navMatches[1]);
+            log_message('debug', "parsePropertyAccess - navigation path detected: {$navPath} from expression: {$expression}");
+
+            return "NAVIGATION:{$navPath}";
         }
         
         // Extract variable name and normalize to $x if it's the lambda parameter
@@ -1350,21 +1542,14 @@ class ExpressionParser
         
         // Handle nested properties (e.g., Company->Name) - but -> is already removed
         // If we had navigation properties, they would be handled differently
-        // For now, just get the last property name
+        // For now, just get the last word that looks like a property name (identifier).
         if (strpos($expression, ' ') !== false) {
-            // If there are spaces, take the last word (property name)
-            $parts = explode(' ', $expression);
-            $expression = end($parts);
+            $parts = array_filter(explode(' ', $expression), static function ($p) {
+                $t = trim($p);
+                return $t !== '' && preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $t);
+            });
+            $expression = $parts !== [] ? end($parts) : trim($expression);
             log_message('debug', "parsePropertyAccess - after extracting last word: {$expression}");
-            // If that produced empty (e.g. expression was single space "$x-> "), extract from original
-            if ($expression === '' || preg_match('/^[\s\-\.]+$/', $expression)) {
-                if (preg_match('/->\s*([A-Za-z_][A-Za-z0-9_]*)/', $originalExpression, $propMatches)) {
-                    $expression = $propMatches[1];
-                    log_message('debug', "parsePropertyAccess - extracted property after space split: {$expression}");
-                } else {
-                    return "{$this->tableAlias}.Id";
-                }
-            }
         }
         
         // Check if expression contains navigation property path (e.g., "EmployeeDepartments.Department.DepartmentID")
@@ -1380,19 +1565,13 @@ class ExpressionParser
         // But keep curly braces for dynamic properties
         $expression = preg_replace('/[^A-Za-z0-9_]/', '', $expression);
         
-        // If expression became empty (e.g. "$x-> " with space after ->), extract from original
-        if ($expression === '') {
-            log_message('debug', "parsePropertyAccess - expression empty after cleanup, extracting from: {$originalExpression}");
-            if (preg_match('/->\s*([A-Za-z_][A-Za-z0-9_]*)/', $originalExpression, $propMatches)) {
-                $expression = $propMatches[1];
-                log_message('debug', "parsePropertyAccess - extracted property: {$expression}");
-            } else {
-                return "{$this->tableAlias}.Id";
-            }
-        }
-        
         // Filter out invalid property names (method names that might have been captured)
-        $invalidPropertyNames = ['getQueryable', 'toList', 'toArray', 'count', 'first', 'single', 'skip', 'take', 'include', 'thenInclude', 'orderBy', 'orderByDescending', 'where', 'and', 'or', 'not'];
+        $invalidPropertyNames = [
+            'getQueryable', 'toList', 'toArray', 'count', 'first', 'firstOrDefault', 'single', 'skip', 'take',
+            'include', 'thenInclude', 'orderBy', 'orderByDescending', 'where', 'and', 'or', 'not',
+            'if', 'else', 'elseif', 'return', 'foreach', 'for', 'while', 'switch', 'case', 'break', 'continue',
+            'isset', 'empty', 'new', 'throw', 'try', 'catch', 'function', 'fn', 'use', 'static', 'true', 'false', 'null',
+        ];
         if (in_array(strtolower($expression), array_map('strtolower', $invalidPropertyNames))) {
             // This is not a property, it's a method name that was incorrectly captured
             // Return a fallback (primary key) or empty string
@@ -1426,6 +1605,33 @@ class ExpressionParser
         $tableAlias = 't' . (count($parts) - 1);
         
         return "{$tableAlias}.{$columnName}";
+    }
+
+    /**
+     * Unwrap UI / enum filter values shaped like Select2 options: { id, text }.
+     */
+    private function unwrapSelectOptionItem(mixed $value): mixed
+    {
+        if (is_array($value)) {
+            if (array_key_exists('id', $value)) {
+                return $value['id'];
+            }
+            if (array_key_exists('text', $value)) {
+                return $value['text'];
+            }
+
+            return $value;
+        }
+        if (is_object($value)) {
+            if (property_exists($value, 'id')) {
+                return $value->id;
+            }
+            if (property_exists($value, 'text')) {
+                return $value->text;
+            }
+        }
+
+        return $value;
     }
 
     /**
@@ -1463,13 +1669,14 @@ class ExpressionParser
         
         // Handle variables - try to get value from variableValues map
         if (preg_match('/^\$([a-zA-Z_][a-zA-Z0-9_]*)$/', $value, $varMatches)) {
-            $varName = $varMatches[1];
+            $varName = $this->resolveClosureVariableName($varMatches[1]);
             
             log_message('debug', "parseValue - variable: \${$varName}, variableValues: " . json_encode(array_keys($this->variableValues)));
             
             // Check if we have the value in variableValues
             if (isset($this->variableValues[$varName])) {
                 $varValue = $this->variableValues[$varName];
+                $varValue = $this->unwrapSelectOptionItem($varValue);
                 log_message('debug', "parseValue - found value for \${$varName}: " . (is_scalar($varValue) ? $varValue : gettype($varValue)));
                 
                 // Parse the actual value
@@ -1485,6 +1692,9 @@ class ExpressionParser
                 } elseif (is_object($varValue)) {
                     // Objects should not be passed as variable values - log error and return NULL
                     log_message('error', "parseValue - object of type " . get_class($varValue) . " passed as variable value for \${$varName}. Objects cannot be converted to SQL values.");
+                    return 'NULL';
+                } elseif (is_array($varValue)) {
+                    log_message('error', "parseValue - array passed as variable value for \${$varName}. Arrays cannot be converted to a single SQL value.");
                     return 'NULL';
                 } else {
                     $varValue = str_replace("'", "''", (string)$varValue);
@@ -1505,6 +1715,34 @@ class ExpressionParser
         // Default: treat as string
         $value = str_replace("'", "''", $value);
         return "'{$value}'";
+    }
+
+    /**
+     * Closure use değişkeni kısmi yakalandığında (ör. $for ← $formattedValue) tek aday varsa tam adı seç.
+     */
+    private function resolveClosureVariableName(string $varName): string
+    {
+        if (isset($this->variableValues[$varName])) {
+            return $varName;
+        }
+
+        $candidates = [];
+        foreach (array_keys($this->variableValues) as $key) {
+            if (str_starts_with($key, $varName)) {
+                $candidates[] = $key;
+            }
+        }
+
+        if ($candidates === []) {
+            return $varName;
+        }
+
+        usort($candidates, static fn (string $a, string $b): int => strlen($b) <=> strlen($a));
+        if ($candidates[0] !== $varName) {
+            log_message('debug', "resolveClosureVariableName: \${$varName} → \${$candidates[0]}");
+        }
+
+        return $candidates[0];
     }
 
     /**
@@ -1544,10 +1782,25 @@ class ExpressionParser
                     return $columnAttr->name;
                 }
             }
+
+            return $propertyName;
         }
-        
-        // Default: use property name as-is (or convert to snake_case if needed)
-        return $propertyName;
+
+        foreach ($reflection->getProperties() as $property) {
+            if (strcasecmp($property->getName(), $propertyName) === 0) {
+                $attributes = $property->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\Column::class);
+                if (!empty($attributes)) {
+                    $columnAttr = $attributes[0]->newInstance();
+                    if ($columnAttr->name !== null) {
+                        return $columnAttr->name;
+                    }
+                }
+
+                return $property->getName();
+            }
+        }
+
+        throw new \InvalidArgumentException('Invalid field name: ' . $propertyName);
     }
 
     /**
