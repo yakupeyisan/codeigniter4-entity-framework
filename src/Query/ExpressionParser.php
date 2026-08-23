@@ -20,6 +20,7 @@ class ExpressionParser
     private array $variableValues = [];
     private array $parameterValues = []; // Store actual parameter values
     private ?\Yakupeyisan\CodeIgniter4\EntityFramework\Core\DbContext $context = null; // For resolving dynamic properties
+    private ?object $closureThis = null; // Bound $this of the parsed arrow/closure (e.g. BaseManager)
 
     public function __construct(string $entityType, string $tableAlias = 't0', ?\Yakupeyisan\CodeIgniter4\EntityFramework\Core\DbContext $context = null)
     {
@@ -37,12 +38,26 @@ class ExpressionParser
     }
 
     /**
+     * Bind the closure's $this so {$this->primaryKey} can be resolved to the real field name.
+     */
+    public function bindPredicate(callable $predicate): void
+    {
+        $reflection = new ReflectionFunction($predicate);
+        $this->closureThis = $reflection->getClosureThis() ?: $this->closureThis;
+        $this->mergeBoundThisScalarsIntoVariableValues();
+    }
+
+    /**
      * Parse lambda expression to SQL WHERE condition
      */
     public function parse(callable $predicate): string
     {
         $reflection = new ReflectionFunction($predicate);
+        $this->closureThis = $reflection->getClosureThis() ?: $this->closureThis;
+        $this->mergeBoundThisScalarsIntoVariableValues();
+
         $code = $this->getFunctionCode($reflection);
+        $code = $this->rewriteThisCurlyPropertyAccess($code);
         
         log_message('debug', 'ExpressionParser - Raw code: ' . substr($code, 0, 200));
         
@@ -53,7 +68,13 @@ class ExpressionParser
 
         // Extract the expression part (between => and ; or end)
         $expression = $this->extractExpression($code);
+        $expression = $this->rewriteThisCurlyPropertyAccess($expression);
         log_message('debug', 'ExpressionParser - Extracted expression: ' . $expression);
+
+        if ($this->isDocCommentNoise($expression)) {
+            log_message('error', 'ExpressionParser - extracted PHPDoc instead of lambda body: ' . substr($expression, 0, 200));
+            throw new \InvalidArgumentException('Invalid field name: failed to extract lambda expression');
+        }
         
         // Parse the expression
         $sql = $this->parseExpression($expression);
@@ -79,6 +100,15 @@ class ExpressionParser
         // Get more lines to handle multi-line expressions, but only from the lambda's start line
         // Don't include too many previous lines to avoid capturing getQueryable() calls
         $code = implode('', array_slice($lines, max(0, $start - 1), min($end - $start + 3, count($lines) - $start + 1)));
+
+        // Arrow functions that use {$this->primaryKey} can report a start line inside the
+        // enclosing method's PHPDoc on some PHP/opcache builds. Scan nearby for the real fn().
+        if ($this->isDocCommentNoise($code) || !$this->containsLambda($code)) {
+            $scanFrom = max(0, $start - 8);
+            $scanLen = min(50, count($lines) - $scanFrom);
+            $code = implode('', array_slice($lines, $scanFrom, $scanLen));
+            log_message('debug', 'getFunctionCode - startLine looked like PHPDoc or had no lambda, expanded scan');
+        }
         
         // If the code contains ->where, ->and, ->or, etc., extract just the lambda part
         // Pattern: ->where(fn($e) => $e->Id === $id) or ->where(function($e) { return $e->Id === $id; })
@@ -266,6 +296,107 @@ class ExpressionParser
      */
     private const QUERY_CHAIN_METHODS = 'where|and|or|not|firstOrDefault|first|single|toArray|toList|toJson(?:Array)?|count|skip|take|include|thenInclude|orderBy|orderByDescending|enableSensitive|disableSensitive';
 
+    private function containsLambda(string $code): bool
+    {
+        return (bool) preg_match('/(?:fn|function)\s*\(/', $code);
+    }
+
+    /**
+     * True when source extraction captured a PHPDoc block instead of a lambda.
+     */
+    private function isDocCommentNoise(string $code): bool
+    {
+        if ($this->containsLambda($code)) {
+            return false;
+        }
+
+        $trimmed = ltrim($code);
+        if ($trimmed === '') {
+            return false;
+        }
+
+        return str_starts_with($trimmed, '/**')
+            || str_starts_with($trimmed, '*')
+            || str_contains($code, '@param')
+            || str_contains($code, '@return')
+            || str_contains($code, '@var');
+    }
+
+    /**
+     * Copy scalar properties from the bound $this (BaseManager::$primaryKey, etc.)
+     * into variableValues so {$this->primaryKey} can be rewritten to $e->Id.
+     */
+    private function mergeBoundThisScalarsIntoVariableValues(): void
+    {
+        if ($this->closureThis === null) {
+            return;
+        }
+
+        try {
+            $ref = new ReflectionClass($this->closureThis);
+            foreach ($ref->getProperties() as $property) {
+                $name = $property->getName();
+                if (isset($this->variableValues[$name])) {
+                    continue;
+                }
+                $property->setAccessible(true);
+                if (!$property->isInitialized($this->closureThis)) {
+                    continue;
+                }
+                $value = $property->getValue($this->closureThis);
+                if (is_string($value) || is_int($value) || is_float($value) || is_bool($value) || $value === null) {
+                    $this->variableValues[$name] = $value;
+                }
+            }
+        } catch (\Throwable $e) {
+            log_message('debug', 'mergeBoundThisScalarsIntoVariableValues: ' . $e->getMessage());
+        }
+    }
+
+    private function getBoundThisProperty(string $name): mixed
+    {
+        if ($this->closureThis === null) {
+            return $this->variableValues[$name] ?? null;
+        }
+
+        try {
+            $property = new ReflectionProperty($this->closureThis, $name);
+            $property->setAccessible(true);
+            if (!$property->isInitialized($this->closureThis)) {
+                return $this->variableValues[$name] ?? null;
+            }
+            return $property->getValue($this->closureThis);
+        } catch (\Throwable $e) {
+            return $this->variableValues[$name] ?? null;
+        }
+    }
+
+    /**
+     * Rewrite $e->{$this->primaryKey} to $e->Id using the bound manager instance.
+     * Keeps application code using curly braces; only the parsed source is rewritten.
+     */
+    private function rewriteThisCurlyPropertyAccess(string $code): string
+    {
+        if (!str_contains($code, '{$this->')) {
+            return $code;
+        }
+
+        $rewritten = preg_replace_callback(
+            '/(\$[a-zA-Z_][a-zA-Z0-9_]*)->\{\$this->([a-zA-Z_][a-zA-Z0-9_]*)\}/',
+            function (array $matches): string {
+                $value = $this->getBoundThisProperty($matches[2]);
+                if (!is_string($value) || !preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $value)) {
+                    return $matches[0];
+                }
+                log_message('debug', "rewriteThisCurlyPropertyAccess: {$matches[0]} -> {$matches[1]}->{$value}");
+                return $matches[1] . '->' . $value;
+            },
+            $code
+        );
+
+        return is_string($rewritten) ? $rewritten : $code;
+    }
+
     /**
      * Extract expression from function code
      */
@@ -392,7 +523,7 @@ class ExpressionParser
      */
     public function parseExpression(string $expression): string
     {
-        $expression = trim($expression);
+        $expression = $this->rewriteThisCurlyPropertyAccess(trim($expression));
         
         log_message('debug', "parseExpression - input: {$expression}");
         
@@ -1221,17 +1352,24 @@ class ExpressionParser
         
         // Store original expression for error messages and fallback
         $originalExpression = $expression;
+
+        if ($this->isDocCommentNoise($expression)) {
+            log_message('error', "parsePropertyAccess - PHPDoc captured as expression: {$expression}");
+            throw new \InvalidArgumentException('Invalid field name: PHPDoc captured instead of lambda');
+        }
         
         // CRITICAL: Filter out method names that should never be treated as properties
         // If expression contains method names like getQueryable, this is an error in extraction
         $invalidMethodNames = ['getQueryable', 'toList', 'toArray', 'count', 'first', 'single', 'skip', 'take', 'include', 'thenInclude', 'orderBy', 'orderByDescending', 'where', 'and', 'or', 'not'];
         foreach ($invalidMethodNames as $methodName) {
-            // If the expression is just the method name or contains it as a standalone word
-            if (preg_match('/\b' . preg_quote($methodName, '/') . '\b/i', $expression)) {
-                // This is not a property, it's a method name that was incorrectly captured
+            // Only reject when the captured text is the method name itself (or $var->methodName),
+            // not when a PHPDoc word such as "Include deleted records" happens to contain "include".
+            $trimmedExpression = trim($expression);
+            if (strcasecmp($trimmedExpression, $methodName) === 0
+                || preg_match('/^\$[a-zA-Z_][a-zA-Z0-9_]*->' . preg_quote($methodName, '/') . '$/i', $trimmedExpression)
+            ) {
                 log_message('error', "parsePropertyAccess - invalid method name detected in expression: {$expression}");
-                // Return fallback to prevent SQL error
-                return "{$this->tableAlias}.Id";
+                throw new \InvalidArgumentException('Invalid field name: ' . $methodName);
             }
         }
         
@@ -1274,10 +1412,12 @@ class ExpressionParser
             if (preg_match('/\$this->([a-zA-Z_][a-zA-Z0-9_]*)/', $dynamicProperty, $thisMatches)) {
                 $propertyName = $thisMatches[1];
                 log_message('debug', "parsePropertyAccess - extracted property from \$this->: {$propertyName}");
-                
-                // If it's a common property name like 'primaryKey', try to resolve it
-                // For 'primaryKey', we need to find the actual primary key property from the entity
-                if ($propertyName === 'primaryKey' && $this->context !== null) {
+
+                $boundValue = $this->getBoundThisProperty($propertyName);
+                if (is_string($boundValue) && preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $boundValue)) {
+                    $propertyName = $boundValue;
+                    log_message('debug', "parsePropertyAccess - resolved \$this->{$thisMatches[1]} from bound object to: {$propertyName}");
+                } elseif ($propertyName === 'primaryKey' && $this->context !== null) {
                     // Try to find primary key property from entity
                     $reflection = new ReflectionClass($this->entityType);
                     foreach ($reflection->getProperties() as $prop) {
@@ -1644,6 +1784,20 @@ class ExpressionParser
             }
 
             return $propertyName;
+        }
+
+        foreach ($reflection->getProperties() as $property) {
+            if (strcasecmp($property->getName(), $propertyName) === 0) {
+                $attributes = $property->getAttributes(\Yakupeyisan\CodeIgniter4\EntityFramework\Attributes\Column::class);
+                if (!empty($attributes)) {
+                    $columnAttr = $attributes[0]->newInstance();
+                    if ($columnAttr->name !== null) {
+                        return $columnAttr->name;
+                    }
+                }
+
+                return $property->getName();
+            }
         }
 
         throw new \InvalidArgumentException('Invalid field name: ' . $propertyName);
