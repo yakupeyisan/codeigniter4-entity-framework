@@ -970,6 +970,7 @@ trait JsonModeQueryTrait
                 }
             }
             $parser->setVariableValues($variableValues);
+            $parser->bindPredicate($predicate);
             $code = $this->getFunctionCode($reflection);
             $lambdaCode = $parser->extractExpression($code);
             $sql = $parser->parseExpression($lambdaCode);

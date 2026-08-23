@@ -4346,7 +4346,6 @@ class AdvancedQueryBuilder
             }
             
             $parser->setVariableValues($variableValues);
-            $parser->bindPredicate($predicate);
             
             // Get the lambda expression code
             $code = $this->getFunctionCode($reflection);
@@ -6316,7 +6315,6 @@ class AdvancedQueryBuilder
                             }
                             
                             $parser->setVariableValues($variableValues);
-                            $parser->bindPredicate($where);
                             $code = $this->getFunctionCode($reflection);
                             $lambdaCode = $parser->extractExpression($code);
                             $sqlCondition = $parser->parseExpression($lambdaCode);
@@ -10049,7 +10047,6 @@ class AdvancedQueryBuilder
             }
             
             $parser->setVariableValues($variableValues);
-            $parser->bindPredicate($predicate);
             
             // Get the lambda expression code
             $code = $this->getFunctionCode($reflection);
