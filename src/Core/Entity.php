@@ -288,7 +288,9 @@ abstract class Entity implements \JsonSerializable
             'originalValues',
             'currentValues',
             'navigationProperties',
-            'isTracking'
+            'isTracking',
+            'loadingProperties',
+            'AccessPermissionData',
         ];
         
         foreach ($reflection->getProperties() as $property) {
@@ -375,6 +377,9 @@ abstract class Entity implements \JsonSerializable
                         }
                     }
                 }
+                if (is_array($value)) {
+                    continue;
+                }
             }
             
             // Convert DateTime to string
@@ -413,7 +418,7 @@ abstract class Entity implements \JsonSerializable
      */
     public function jsonSerialize(): array
     {
-        return $this->toArray();
+        return $this->toArray(false);
     }
 }
 
