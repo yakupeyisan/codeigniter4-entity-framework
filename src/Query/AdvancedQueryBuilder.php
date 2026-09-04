@@ -626,8 +626,8 @@ class AdvancedQueryBuilder
         // For now, we'll store it and apply it when building the final query
         // Use join with escape = false to indicate it's raw SQL
         // Note: This might require custom handling in query execution
-        $builder->join($joinClause, null, '', false);
-        
+        $this->appendCompiledJoin($builder, $joinClause);
+
         $this->debugLog("Added RAW JOIN ({$joinType}): ({$rawSql}) AS {$alias} ON {$joinCondition}");
     }
 
@@ -4145,6 +4145,27 @@ class AdvancedQueryBuilder
     }
 
     /**
+     * SQLSRV Builder::join() ilk argümanı tablo adı sanıp catalog-qualify eder
+     * (`LEFT JOIN Payments …` → `JOIN "db"."dbo"."LEFT" JOIN Payments … USING ()`).
+     * Hazır JOIN cümlesini QBJoin'e doğrudan ekler.
+     */
+    private function appendCompiledJoin(object $builder, string $joinSql): void
+    {
+        $joinSql = trim($joinSql);
+        if ($joinSql === '') {
+            return;
+        }
+
+        $ref = new \ReflectionProperty($builder, 'QBJoin');
+        $joins = $ref->getValue($builder);
+        if (! is_array($joins)) {
+            $joins = [];
+        }
+        $joins[] = $joinSql;
+        $ref->setValue($builder, $joins);
+    }
+
+    /**
      * Parent entity/tablodan tek navigation segment join eder (COUNT / aggregate builder).
      */
     private function addJoinFromParentEntity(
@@ -4235,38 +4256,19 @@ class AdvancedQueryBuilder
         if ($customJoinCondition !== null && trim($customJoinCondition) !== '') {
             $joinCondition = str_replace('{alias}', $parentTableAlias, $customJoinCondition);
             $joinCondition = str_replace('{relatedAlias}', $relatedAlias, $joinCondition);
-            if ($isRawTableExpression) {
-                // SQLSRV Builder::join always catalog-qualifies the table arg; pass full fragment.
-                $fullJoin = "{$joinType} JOIN {$joinTableClause} AS {$quotedRelatedAlias} ON {$joinCondition}";
-                $builder->join($fullJoin, '', '', false);
-            } else {
-                // Alias required when same-table multi-nav disambiguates relatedAlias.
-                // ON is pre-built → escape=false so CI does not re-protect identifiers.
-                $fullJoin = "{$joinType} JOIN {$joinTableClause} AS {$quotedRelatedAlias} ON {$joinCondition}";
-                $builder->join($fullJoin, '', '', false);
-            }
-            $this->requiredJoins[$joinKey] = [
-                'table' => $relatedTableExpr,
-                'alias' => $relatedAlias,
-                'entityType' => $relatedEntityType,
-            ];
-
-            return;
-        }
-
-        if ($entityReflection->hasProperty($foreignKey)) {
+        } elseif ($entityReflection->hasProperty($foreignKey)) {
             $joinCondition = "{$quotedParentTable}.{$quotedFkColumn} = {$quotedRelatedAlias}.{$quotedRelatedIdColumn}";
         } else {
             $joinCondition = "{$quotedRelatedAlias}.{$quotedFkColumn} = {$quotedParentTable}.{$quotedParentIdColumn}";
         }
 
-        if ($isRawTableExpression) {
-            $fullJoin = "{$joinType} JOIN {$joinTableClause} AS {$quotedRelatedAlias} ON {$joinCondition}";
-            $builder->join($fullJoin, '', '', false);
-        } else {
-            $fullJoin = "{$joinType} JOIN {$joinTableClause} AS {$quotedRelatedAlias} ON {$joinCondition}";
-            $builder->join($fullJoin, '', '', false);
-        }
+        $quotedTable = $isRawTableExpression
+            ? $joinTableClause
+            : $this->connection->escapeIdentifiers($relatedTableExpr);
+        $this->appendCompiledJoin(
+            $builder,
+            "{$joinType} JOIN {$quotedTable} AS {$quotedRelatedAlias} ON {$joinCondition}"
+        );
         $this->requiredJoins[$joinKey] = [
             'table' => $relatedTableExpr,
             'alias' => $relatedAlias,
