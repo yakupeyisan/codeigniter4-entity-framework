@@ -21,13 +21,7 @@ trait JsonModeQueryTrait
      */
     public function toJsonArray(): array
     {
-        $raw = $this->toJson();
-        $decoded = json_decode($raw, true);
-        if (!is_array($decoded)) {
-            return [];
-        }
-
-        return $decoded;
+        return $this->executeJsonModeRows();
     }
 
     public function firstJson(): ?string
@@ -169,6 +163,50 @@ trait JsonModeQueryTrait
 
     private function executeJsonModeQuery(): string
     {
+        $payload = $this->fetchJsonModePayload();
+        $decoded = json_decode($payload, true);
+        if (is_array($decoded) && $decoded !== [] && !empty($this->includes)) {
+            $payload = null;
+            $decoded = $this->jsonDedupeRootRecordsByPrimaryKey($decoded);
+            $payload = json_encode($decoded, JSON_UNESCAPED_UNICODE);
+            if ($payload === false) {
+                $payload = '[]';
+            }
+        }
+        $this->currentQueryStats['rowCount'] = is_array($decoded) ? count($decoded) : 0;
+        $decoded = null;
+        $this->finalizeQueryStats();
+
+        return $payload;
+    }
+
+    /**
+     * Same result shape as executeJsonModeQuery() without the encode/decode round-trip.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private function executeJsonModeRows(): array
+    {
+        $payload = $this->fetchJsonModePayload();
+        $decoded = json_decode($payload, true);
+        $payload = null;
+        if (!is_array($decoded)) {
+            $decoded = [];
+        }
+        if ($decoded !== [] && !empty($this->includes)) {
+            $decoded = $this->jsonDedupeRootRecordsByPrimaryKey($decoded);
+        }
+        $this->currentQueryStats['rowCount'] = count($decoded);
+        $this->finalizeQueryStats();
+
+        return $decoded;
+    }
+
+    /**
+     * Runs the FOR JSON PATH query and concatenates its fragments into one JSON string.
+     */
+    private function fetchJsonModePayload(): string
+    {
         $this->assertJsonModeCompatibleJson();
         $this->validateGroupBalance();
         $this->currentQueryStats = [
@@ -200,6 +238,10 @@ trait JsonModeQueryTrait
             throw $e;
         }
         $resultRows = $query->getResultArray();
+        if (method_exists($query, 'freeResult')) {
+            $query->freeResult();
+        }
+        $query = null;
         $this->currentQueryStats['sqlExecutionTime'] = microtime(true) - $sqlExecStart;
         $this->currentQueryStats['sql'] = substr($sql, 0, 500);
         $this->currentQueryStats['sqlFull'] = $sql;
@@ -209,27 +251,17 @@ trait JsonModeQueryTrait
         $this->currentQueryStats['lazyLoadingTime'] = 0.0;
 
         $buffer = '';
-        foreach ($resultRows as $row) {
+        foreach ($resultRows as $i => $row) {
             foreach ($row as $fragment) {
                 if ($fragment !== null && $fragment !== '') {
                     $buffer .= (string) $fragment;
                 }
             }
+            unset($resultRows[$i]);
         }
+        $resultRows = null;
 
-        $payload = $buffer !== '' ? $buffer : '[]';
-        $decoded = json_decode($payload, true);
-        if (is_array($decoded) && $decoded !== [] && !empty($this->includes)) {
-            $decoded = $this->jsonDedupeRootRecordsByPrimaryKey($decoded);
-            $payload = json_encode($decoded, JSON_UNESCAPED_UNICODE);
-            if ($payload === false) {
-                $payload = '[]';
-            }
-        }
-        $this->currentQueryStats['rowCount'] = is_array($decoded) ? count($decoded) : 0;
-        $this->finalizeQueryStats();
-
-        return $payload;
+        return $buffer !== '' ? $buffer : '[]';
     }
 
     /**
