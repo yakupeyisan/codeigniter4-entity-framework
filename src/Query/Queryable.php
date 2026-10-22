@@ -189,7 +189,21 @@ class Queryable implements IQueryable
     public function chunk(callable $callback, int $chunkSize = 1000): int
     {
         return $this->queryBuilder->chunk($callback, $chunkSize);
-    }    
+    }
+
+    public function toJson(): string
+    {
+        return $this->queryBuilder->toJson();
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    public function toJsonArray(): array
+    {
+        return $this->queryBuilder->toJsonArray();
+    }
+
     public function cleanEntityState($data) {
         if (is_array($data)) {
             $cleaned = [];

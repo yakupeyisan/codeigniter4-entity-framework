@@ -216,6 +216,18 @@ interface IQueryable
     public function aggregateSelectFirstRow(string $selectListRaw, array $additionalJoinNavigationPaths = []): ?array;
 
     /**
+     * Execute query as SQL Server FOR JSON PATH and return the raw JSON string.
+     */
+    public function toJson(): string;
+
+    /**
+     * Execute query as SQL Server FOR JSON PATH and return decoded rows.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    public function toJsonArray(): array;
+
+    /**
      * Execute query and get count
      */
     public function count(): int;
