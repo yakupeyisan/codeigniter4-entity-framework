@@ -186,19 +186,6 @@ class Queryable implements IQueryable
         return $this->queryBuilder->toList();
     }
 
-    public function toJson(): string
-    {
-        return $this->queryBuilder->toJson();
-    }
-
-    /**
-     * @return array<int, array<string, mixed>>
-     */
-    public function toJsonArray(): array
-    {
-        return $this->queryBuilder->toJsonArray();
-    }
-
     public function cleanEntityState($data) {
         if (is_array($data)) {
             $cleaned = [];
